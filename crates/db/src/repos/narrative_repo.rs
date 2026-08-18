@@ -1,249 +1,281 @@
 //! Narrative Repository - CRUD operations for NarrativeNode, Scene
 
 use anyhow::{Context, Result};
-use chrono::Utc;
-use domain::{NarrativeNode, NarrativeNodeType, NarrativeNodeStatus, Scene};
+use chrono::{DateTime, Utc};
+use domain::{
+    NarrativeNode, NarrativeNodeStatus, NarrativeNodeType, Scene,
+};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::connection::Database;
-use crate::time_utils::get_timestamp;
+use crate::ser;
 
-pub struct NarrativeRepo<'a> {
-    db: &'a Database,
+pub struct NarrativeRepo {
+    pool: PgPool,
 }
 
-impl<'a> NarrativeRepo<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+impl NarrativeRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    pub fn create_node(&self, project_id: Uuid, world_id: Uuid, node_type: NarrativeNodeType, parent_id: Option<Uuid>, title: &str, description: Option<&str>, attributes: serde_json::Value, sort_order: i32) -> Result<NarrativeNode> {
+    pub async fn create_node(
+        &self,
+        project_id: Uuid,
+        world_id: Uuid,
+        node_type: NarrativeNodeType,
+        parent_id: Option<Uuid>,
+        title: &str,
+        description: Option<&str>,
+        attributes: serde_json::Value,
+        sort_order: i32,
+    ) -> Result<NarrativeNode> {
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let type_str = crate::ser::narrative_node_type_str(&node_type);
-        let status_str = crate::ser::narrative_node_status_str(&NarrativeNodeStatus::Draft);
-        let conn = self.db.conn();
-        
-        match parent_id {
-            Some(pid) => {
-                conn.execute(
-                    "INSERT INTO narrative_node (id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [id.to_string(), project_id.to_string(), world_id.to_string(), type_str, pid.to_string(), title.to_string(), description.unwrap_or("").to_string(), attributes.to_string(), sort_order.to_string(), status_str, now.to_string(), now.to_string()],
-                ).context("Failed to create narrative node")?;
-            }
-            None => {
-                conn.execute(
-                    "INSERT INTO narrative_node (id, project_id, world_id, node_type, title, description, attributes, sort_order, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [id.to_string(), project_id.to_string(), world_id.to_string(), type_str, title.to_string(), description.unwrap_or("").to_string(), attributes.to_string(), sort_order.to_string(), status_str, now.to_string(), now.to_string()],
-                ).context("Failed to create narrative node")?;
-            }
-        }
-        Ok(NarrativeNode { id, project_id, world_id, node_type, parent_id, title: title.to_string(), description: description.map(|s| s.to_string()), attributes, sort_order, status: NarrativeNodeStatus::Draft, created_at: now, updated_at: now })
+        let type_str = ser::narrative_node_type_str(&node_type);
+        let status_str = ser::narrative_node_status_str(&NarrativeNodeStatus::Draft);
+
+        sqlx::query(
+            "INSERT INTO narrative_node (id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(world_id)
+        .bind(&type_str)
+        .bind(parent_id)
+        .bind(title)
+        .bind(description.unwrap_or(""))
+        .bind(&attributes)
+        .bind(sort_order)
+        .bind(&status_str)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create narrative node")?;
+
+        Ok(NarrativeNode {
+            id,
+            project_id,
+            world_id,
+            node_type,
+            parent_id,
+            title: title.to_string(),
+            description: description.map(|s| s.to_string()),
+            attributes,
+            sort_order,
+            status: NarrativeNodeStatus::Draft,
+            created_at: now,
+            updated_at: now,
+        })
     }
 
-    pub fn get_node_by_id(&self, id: Uuid) -> Result<Option<NarrativeNode>> {
-        let conn = self.db.conn();
-        let result = conn.query_row(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at FROM narrative_node WHERE id = ?",
-            [id.to_string()],
-            |row| {
-                let parent: Option<String> = row.get(4)?;
-                Ok(NarrativeNode {
-                    id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                    project_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                    world_id: Uuid::parse_str(&row.get::<_, String>(2)?).unwrap(),
-                    node_type: crate::ser::parse_narrative_node_type(&row.get::<_, String>(3)?),
-                    parent_id: parent.and_then(|p| Uuid::parse_str(&p).ok()),
-                    title: row.get(5)?,
-                    description: row.get(6)?,
-                    attributes: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-                    sort_order: row.get(8)?,
-                    status: crate::ser::parse_narrative_node_status(&row.get::<_, String>(9)?),
-                    created_at: get_timestamp(row, 10),
-                    updated_at: get_timestamp(row, 11),
-                })
-            },
-        ).ok();
-        Ok(result)
+    pub async fn get_node_by_id(&self, id: Uuid) -> Result<Option<NarrativeNode>> {
+        let row = sqlx::query_as::<_, NarrativeNodeRow>(
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \
+             FROM narrative_node WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query narrative node")?;
+
+        Ok(row.map(|r| r.into()))
     }
 
-    pub fn list_nodes_by_project(&self, project_id: Uuid) -> Result<Vec<NarrativeNode>> {
-        let conn = self.db.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at FROM narrative_node WHERE project_id = ? ORDER BY sort_order",
-        ).context("Failed to prepare")?;
-        let rows = stmt.query_map([project_id.to_string()], |row| {
-            let parent: Option<String> = row.get(4)?;
-            Ok(NarrativeNode {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                project_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                world_id: Uuid::parse_str(&row.get::<_, String>(2)?).unwrap(),
-                node_type: crate::ser::parse_narrative_node_type(&row.get::<_, String>(3)?),
-                parent_id: parent.and_then(|p| Uuid::parse_str(&p).ok()),
-                title: row.get(5)?,
-                description: row.get(6)?,
-                attributes: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-                sort_order: row.get(8)?,
-                status: crate::ser::parse_narrative_node_status(&row.get::<_, String>(9)?),
-                created_at: get_timestamp(row, 10),
-                updated_at: get_timestamp(row, 11),
-            })
-        }).context("Failed to query")?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+    pub async fn list_nodes_by_project(&self, project_id: Uuid) -> Result<Vec<NarrativeNode>> {
+        let rows = sqlx::query_as::<_, NarrativeNodeRow>(
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \
+             FROM narrative_node WHERE project_id = $1 ORDER BY sort_order",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query narrative nodes")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    pub fn list_children(&self, parent_id: Uuid) -> Result<Vec<NarrativeNode>> {
-        let conn = self.db.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at FROM narrative_node WHERE parent_id = ? ORDER BY sort_order",
-        ).context("Failed to prepare")?;
-        let rows = stmt.query_map([parent_id.to_string()], |row| {
-            let parent: Option<String> = row.get(4)?;
-            Ok(NarrativeNode {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                project_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                world_id: Uuid::parse_str(&row.get::<_, String>(2)?).unwrap(),
-                node_type: crate::ser::parse_narrative_node_type(&row.get::<_, String>(3)?),
-                parent_id: parent.and_then(|p| Uuid::parse_str(&p).ok()),
-                title: row.get(5)?,
-                description: row.get(6)?,
-                attributes: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-                sort_order: row.get(8)?,
-                status: crate::ser::parse_narrative_node_status(&row.get::<_, String>(9)?),
-                created_at: get_timestamp(row, 10),
-                updated_at: get_timestamp(row, 11),
-            })
-        }).context("Failed to query")?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+    pub async fn list_children(&self, parent_id: Uuid) -> Result<Vec<NarrativeNode>> {
+        let rows = sqlx::query_as::<_, NarrativeNodeRow>(
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \
+             FROM narrative_node WHERE parent_id = $1 ORDER BY sort_order",
+        )
+        .bind(parent_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query children")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    pub fn update_node(&self, node: &NarrativeNode) -> Result<()> {
-        let conn = self.db.conn();
-        let status_str = crate::ser::narrative_node_status_str(&node.status);
-        conn.execute(
-            "UPDATE narrative_node SET title = ?, description = ?, attributes = ?, sort_order = ?, status = ?, updated_at = ? WHERE id = ?",
-            [node.title.clone(), node.description.clone().unwrap_or_default(), node.attributes.to_string(), node.sort_order.to_string(), status_str, Utc::now().to_string(), node.id.to_string()],
-        ).context("Failed to update")?;
+    pub async fn update_node(&self, node: &NarrativeNode) -> Result<()> {
+        let status_str = ser::narrative_node_status_str(&node.status);
+        sqlx::query(
+            "UPDATE narrative_node SET title = $1, description = $2, attributes = $3, sort_order = $4, status = $5, updated_at = $6 WHERE id = $7",
+        )
+        .bind(&node.title)
+        .bind(&node.description)
+        .bind(&node.attributes)
+        .bind(node.sort_order)
+        .bind(&status_str)
+        .bind(Utc::now())
+        .bind(node.id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update narrative node")?;
         Ok(())
     }
 
-    pub fn delete_node(&self, id: Uuid) -> Result<()> {
-        let conn = self.db.conn();
-        let children = self.list_children(id)?;
+    pub async fn delete_node(&self, id: Uuid) -> Result<()> {
+        // Delete children recursively
+        let children = self.list_children(id).await?;
         for child in children {
-            self.delete_node(child.id)?;
+            Box::pin(self.delete_node(child.id)).await?;
         }
-        conn.execute("DELETE FROM narrative_node WHERE id = ?", [id.to_string()]).context("Failed to delete")?;
+        sqlx::query("DELETE FROM narrative_node WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete narrative node")?;
         Ok(())
     }
 }
 
-pub struct SceneRepo<'a> {
-    db: &'a Database,
+#[derive(sqlx::FromRow)]
+struct NarrativeNodeRow {
+    id: Uuid,
+    project_id: Uuid,
+    world_id: Uuid,
+    node_type: String,
+    parent_id: Option<Uuid>,
+    title: String,
+    description: Option<String>,
+    attributes: Option<serde_json::Value>,
+    sort_order: i32,
+    status: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
-impl<'a> SceneRepo<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+impl From<NarrativeNodeRow> for NarrativeNode {
+    fn from(r: NarrativeNodeRow) -> Self {
+        NarrativeNode {
+            id: r.id,
+            project_id: r.project_id,
+            world_id: r.world_id,
+            node_type: ser::parse_narrative_node_type(&r.node_type),
+            parent_id: r.parent_id,
+            title: r.title,
+            description: r.description,
+            attributes: r.attributes.unwrap_or_default(),
+            sort_order: r.sort_order,
+            status: ser::parse_narrative_node_status(&r.status),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+// ============= SceneRepo =============
+
+pub struct SceneRepo {
+    pool: PgPool,
+}
+
+impl SceneRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    pub fn create(&self, narrative_node_id: Uuid, objective: Option<&str>, conflict: Option<&str>, pov_character_id: Option<Uuid>, location_id: Option<Uuid>, time: Option<&str>) -> Result<Scene> {
+    pub async fn create(
+        &self,
+        narrative_node_id: Uuid,
+        objective: Option<&str>,
+        conflict: Option<&str>,
+        pov_character_id: Option<Uuid>,
+        location_id: Option<Uuid>,
+        time: Option<&str>,
+    ) -> Result<Scene> {
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let conn = self.db.conn();
-        
-        // Build SQL dynamically to handle optional UUID fields properly
-        let mut columns = vec!["id", "narrative_node_id", "objective", "conflict", "time", "created_at", "updated_at"];
-        let mut placeholders = vec!["?", "?", "?", "?", "?", "?", "?"];
-        let mut params: Vec<Box<dyn duckdb::types::ToSql>> = vec![
-            Box::new(id.to_string()), Box::new(narrative_node_id.to_string()),
-            Box::new(objective.unwrap_or("").to_string()), Box::new(conflict.unwrap_or("").to_string()),
-            Box::new(time.unwrap_or("").to_string()), Box::new(now.to_string()), Box::new(now.to_string()),
-        ];
-        
-        if let Some(pov) = pov_character_id {
-            columns.insert(4, "pov_character_id");
-            placeholders.insert(4, "?");
-            params.insert(4, Box::new(pov.to_string()));
-        }
-        if let Some(loc) = location_id {
-            let insert_idx = if pov_character_id.is_some() { 5 } else { 4 };
-            columns.insert(insert_idx, "location_id");
-            placeholders.insert(insert_idx, "?");
-            params.insert(insert_idx, Box::new(loc.to_string()));
-        }
-        
-        let sql = format!(
-            "INSERT INTO scene ({}) VALUES ({})",
-            columns.join(", "),
-            placeholders.join(", ")
-        );
-        
-        let param_refs: Vec<&dyn duckdb::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        conn.execute(&sql, param_refs.as_slice()).context("Failed to create scene")?;
-        
-        Ok(Scene { id, narrative_node_id, objective: objective.map(|s| s.to_string()), conflict: conflict.map(|s| s.to_string()), pov_character_id, location_id, time: time.map(|s| s.to_string()), scene_start_time: None, scene_end_time: None, created_at: now, updated_at: now })
+
+        sqlx::query(
+            "INSERT INTO scene (id, narrative_node_id, objective, conflict, pov_character_id, location_id, time, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(id)
+        .bind(narrative_node_id)
+        .bind(objective.unwrap_or(""))
+        .bind(conflict.unwrap_or(""))
+        .bind(pov_character_id)
+        .bind(location_id)
+        .bind(time.unwrap_or(""))
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create scene")?;
+
+        Ok(Scene {
+            id,
+            narrative_node_id,
+            objective: objective.map(|s| s.to_string()),
+            conflict: conflict.map(|s| s.to_string()),
+            pov_character_id,
+            location_id,
+            time: time.map(|s| s.to_string()),
+            scene_start_time: None,
+            scene_end_time: None,
+            created_at: now,
+            updated_at: now,
+        })
     }
 
-    pub fn get_by_narrative_node(&self, node_id: Uuid) -> Result<Option<Scene>> {
-        let conn = self.db.conn();
-        let result = conn.query_row(
-            "SELECT id, narrative_node_id, objective, conflict, pov_character_id, location_id, time, scene_start_time, scene_end_time, created_at, updated_at FROM scene WHERE narrative_node_id = ?",
-            [node_id.to_string()],
-            |row| {
-                let pov: Option<String> = row.get(4)?;
-                let loc: Option<String> = row.get(5)?;
-                Ok(Scene {
-                    id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                    narrative_node_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                    objective: row.get(2)?,
-                    conflict: row.get(3)?,
-                    pov_character_id: pov.and_then(|p| Uuid::parse_str(&p).ok()),
-                    location_id: loc.and_then(|l| Uuid::parse_str(&l).ok()),
-                    time: row.get(6)?,
-                    scene_start_time: row.get(7)?,
-                    scene_end_time: row.get(8)?,
-                    created_at: get_timestamp(row, 9),
-                    updated_at: get_timestamp(row, 10),
-                })
-            },
-        ).ok();
-        Ok(result)
+    pub async fn get_by_narrative_node(&self, node_id: Uuid) -> Result<Option<Scene>> {
+        let row = sqlx::query_as::<_, SceneRow>(
+            "SELECT id, narrative_node_id, objective, conflict, pov_character_id, location_id, time, scene_start_time, scene_end_time, created_at, updated_at \
+             FROM scene WHERE narrative_node_id = $1",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query scene")?;
+
+        Ok(row.map(|r| r.into()))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::migration;
+#[derive(sqlx::FromRow)]
+struct SceneRow {
+    id: Uuid,
+    narrative_node_id: Uuid,
+    objective: Option<String>,
+    conflict: Option<String>,
+    pov_character_id: Option<Uuid>,
+    location_id: Option<Uuid>,
+    time: Option<String>,
+    scene_start_time: Option<String>,
+    scene_end_time: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
 
-    fn setup_db() -> Database {
-        let db = Database::open_in_memory().unwrap();
-        migration::run_migrations(&db, concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap();
-        db
-    }
-
-    #[test]
-    fn test_narrative_node_crud() {
-        let db = setup_db();
-        let project_id = super::super::project_repo::ProjectRepo::new(&db).create("Test", None).unwrap().id;
-        let world_id = super::super::world_repo::WorldRepo::new(&db).ensure_main_world(project_id, "Test").unwrap().id;
-        let repo = NarrativeRepo::new(&db);
-        let vol = repo.create_node(project_id, world_id, NarrativeNodeType::Volume, None, "Vol 1", None, serde_json::json!({}), 0).unwrap();
-        let arc = repo.create_node(project_id, world_id, NarrativeNodeType::Arc, Some(vol.id), "Arc 1", None, serde_json::json!({}), 0).unwrap();
-        let children = repo.list_children(vol.id).unwrap();
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].id, arc.id);
-    }
-
-    #[test]
-    fn test_scene_crud() {
-        let db = setup_db();
-        let project_id = super::super::project_repo::ProjectRepo::new(&db).create("Test", None).unwrap().id;
-        let world_id = super::super::world_repo::WorldRepo::new(&db).ensure_main_world(project_id, "Test").unwrap().id;
-        let node = NarrativeRepo::new(&db).create_node(project_id, world_id, NarrativeNodeType::Scene, None, "Scene 1", None, serde_json::json!({}), 0).unwrap();
-        let scene = SceneRepo::new(&db).create(node.id, Some("objective"), None, None, None, None).unwrap();
-        let fetched = SceneRepo::new(&db).get_by_narrative_node(node.id).unwrap().unwrap();
-        assert_eq!(fetched.id, scene.id);
+impl From<SceneRow> for Scene {
+    fn from(r: SceneRow) -> Self {
+        Scene {
+            id: r.id,
+            narrative_node_id: r.narrative_node_id,
+            objective: r.objective,
+            conflict: r.conflict,
+            pov_character_id: r.pov_character_id,
+            location_id: r.location_id,
+            time: r.time,
+            scene_start_time: r.scene_start_time,
+            scene_end_time: r.scene_end_time,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
     }
 }

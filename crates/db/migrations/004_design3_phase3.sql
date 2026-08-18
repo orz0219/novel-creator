@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS world_branch (
     parent_branch_id VARCHAR,
     is_main BOOLEAN NOT NULL DEFAULT FALSE,
     status VARCHAR NOT NULL DEFAULT 'Active',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_world_branch_project ON world_branch(project_id);
@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS narrative_branch (
     fork_point_scene_id VARCHAR,
     is_main BOOLEAN NOT NULL DEFAULT FALSE,
     status VARCHAR NOT NULL DEFAULT 'Active',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_narrative_branch_project ON narrative_branch(project_id);
@@ -47,8 +47,8 @@ CREATE TABLE IF NOT EXISTS plot_repair (
     repair_suggestion TEXT NOT NULL,
     repair_type VARCHAR NOT NULL DEFAULT 'Automatic',
     status VARCHAR NOT NULL DEFAULT 'Pending',
-    applied_at TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    applied_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_plot_repair_project ON plot_repair(project_id);

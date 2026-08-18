@@ -1,117 +1,248 @@
 //! Generation Repository
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use domain::{GenerationTask, Skill, SkillStatus, SkillType, TaskStatus};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::connection::Database;
-use crate::time_utils::{get_optional_timestamp, get_timestamp};
+use crate::ser;
 
-pub struct SkillRepo<'a> { db: &'a Database }
+// ============= SkillRepo =============
 
-impl<'a> SkillRepo<'a> {
-    pub fn new(db: &'a Database) -> Self { Self { db } }
+pub struct SkillRepo {
+    pool: PgPool,
+}
 
-    pub fn create(&self, name: &str, description: Option<&str>, skill_type: SkillType, prompt_template: &str, input_schema: Option<serde_json::Value>, output_schema: Option<serde_json::Value>, default_params: serde_json::Value) -> Result<Skill> {
+impl SkillRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        skill_type: SkillType,
+        prompt_template: &str,
+        input_schema: Option<serde_json::Value>,
+        output_schema: Option<serde_json::Value>,
+        default_params: serde_json::Value,
+    ) -> Result<Skill> {
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let type_str = crate::ser::skill_type_str(&skill_type);
-        let conn = self.db.conn();
-        conn.execute("INSERT INTO skill (id, name, description, skill_type, version, prompt_template, input_schema, output_schema, default_params, status, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, 'Draft', ?, ?)", [id.to_string(), name.to_string(), description.unwrap_or("").to_string(), type_str, prompt_template.to_string(), input_schema.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "{}".to_string()), output_schema.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "{}".to_string()), default_params.to_string(), now.to_string(), now.to_string()]).context("Failed to create")?;
-        Ok(Skill { id, name: name.to_string(), description: description.map(|s| s.to_string()), skill_type, version: 1, prompt_template: prompt_template.to_string(), input_schema, output_schema, default_params, status: SkillStatus::Draft, created_at: now, updated_at: now })
+        let type_str = ser::skill_type_str(&skill_type);
+
+        sqlx::query(
+            "INSERT INTO skill (id, name, description, skill_type, version, prompt_template, input_schema, output_schema, default_params, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, 'Draft', $9, $10)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description.unwrap_or(""))
+        .bind(&type_str)
+        .bind(prompt_template)
+        .bind(input_schema.as_ref())
+        .bind(output_schema.as_ref())
+        .bind(&default_params)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create skill")?;
+
+        Ok(Skill {
+            id,
+            name: name.to_string(),
+            description: description.map(|s| s.to_string()),
+            skill_type,
+            version: 1,
+            prompt_template: prompt_template.to_string(),
+            input_schema,
+            output_schema,
+            default_params,
+            status: SkillStatus::Draft,
+            created_at: now,
+            updated_at: now,
+        })
     }
 
-    pub fn get_by_name(&self, name: &str) -> Result<Option<Skill>> {
-        let conn = self.db.conn();
-        let result = conn.query_row("SELECT id, name, description, skill_type, version, prompt_template, input_schema, output_schema, default_params, status, created_at, updated_at FROM skill WHERE name = ?", [name], |row| {
-            Ok(Skill {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                name: row.get(1)?,
-                description: row.get(2)?,
-                skill_type: crate::ser::parse_skill_type(&row.get::<_, String>(3)?),
-                version: row.get(4)?,
-                prompt_template: row.get(5)?,
-                input_schema: row.get::<_, Option<String>>(6)?.and_then(|s| serde_json::from_str(&s).ok()),
-                output_schema: row.get::<_, Option<String>>(7)?.and_then(|s| serde_json::from_str(&s).ok()),
-                default_params: row.get::<_, Option<String>>(8)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
-                status: crate::ser::parse_skill_status(&row.get::<_, String>(9)?),
-                created_at: get_timestamp(row, 10),
-                updated_at: get_timestamp(row, 11),
-            })
-        }).ok();
-        Ok(result)
+    pub async fn get_by_name(&self, name: &str) -> Result<Option<Skill>> {
+        let row = sqlx::query_as::<_, SkillRow>(
+            "SELECT id, name, description, skill_type, version, prompt_template, input_schema, output_schema, default_params, status, created_at, updated_at \
+             FROM skill WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query skill")?;
+
+        Ok(row.map(|r| r.into()))
     }
 
-    pub fn list_all(&self) -> Result<Vec<Skill>> {
-        let conn = self.db.conn();
-        let mut stmt = conn.prepare("SELECT id, name, description, skill_type, version, prompt_template, input_schema, output_schema, default_params, status, created_at, updated_at FROM skill ORDER BY name").context("Failed to prepare")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Skill {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                name: row.get(1)?,
-                description: row.get(2)?,
-                skill_type: crate::ser::parse_skill_type(&row.get::<_, String>(3)?),
-                version: row.get(4)?,
-                prompt_template: row.get(5)?,
-                input_schema: row.get::<_, Option<String>>(6)?.and_then(|s| serde_json::from_str(&s).ok()),
-                output_schema: row.get::<_, Option<String>>(7)?.and_then(|s| serde_json::from_str(&s).ok()),
-                default_params: row.get::<_, Option<String>>(8)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
-                status: crate::ser::parse_skill_status(&row.get::<_, String>(9)?),
-                created_at: get_timestamp(row, 10),
-                updated_at: get_timestamp(row, 11),
-            })
-        }).context("Failed to query")?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+    pub async fn list_all(&self) -> Result<Vec<Skill>> {
+        let rows = sqlx::query_as::<_, SkillRow>(
+            "SELECT id, name, description, skill_type, version, prompt_template, input_schema, output_schema, default_params, status, created_at, updated_at \
+             FROM skill ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query skills")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 }
 
-pub struct TaskRepo<'a> { db: &'a Database }
+#[derive(sqlx::FromRow)]
+struct SkillRow {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    skill_type: String,
+    version: i32,
+    prompt_template: String,
+    input_schema: Option<serde_json::Value>,
+    output_schema: Option<serde_json::Value>,
+    default_params: Option<serde_json::Value>,
+    status: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
 
-impl<'a> TaskRepo<'a> {
-    pub fn new(db: &'a Database) -> Self { Self { db } }
-
-    pub fn create(&self, project_id: Uuid, skill_id: Uuid, scene_id: Option<Uuid>, input: serde_json::Value) -> Result<GenerationTask> {
-        let id = Uuid::new_v4();
-        let now = Utc::now();
-        let conn = self.db.conn();
-        
-        if let Some(sid) = scene_id {
-            conn.execute("INSERT INTO generation_task (id, project_id, skill_id, scene_id, input, status, created_at) VALUES (?, ?, ?, ?, ?, 'Pending', ?)", [id.to_string(), project_id.to_string(), skill_id.to_string(), sid.to_string(), input.to_string(), now.to_string()]).context("Failed to create")?;
-        } else {
-            conn.execute("INSERT INTO generation_task (id, project_id, skill_id, input, status, created_at) VALUES (?, ?, ?, ?, 'Pending', ?)", [id.to_string(), project_id.to_string(), skill_id.to_string(), input.to_string(), now.to_string()]).context("Failed to create")?;
+impl From<SkillRow> for Skill {
+    fn from(r: SkillRow) -> Self {
+        Skill {
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            skill_type: ser::parse_skill_type(&r.skill_type),
+            version: r.version,
+            prompt_template: r.prompt_template,
+            input_schema: r.input_schema,
+            output_schema: r.output_schema,
+            default_params: r.default_params.unwrap_or_default(),
+            status: ser::parse_skill_status(&r.status),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
         }
-        Ok(GenerationTask { id, project_id, skill_id, scene_id, input, output: None, status: TaskStatus::Pending, token_usage: None, error: None, created_at: now, completed_at: None })
+    }
+}
+
+// ============= TaskRepo =============
+
+pub struct TaskRepo {
+    pool: PgPool,
+}
+
+impl TaskRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    pub fn update_status(&self, task_id: Uuid, status: TaskStatus, output: Option<serde_json::Value>, error: Option<&str>) -> Result<()> {
-        let conn = self.db.conn();
-        let status_str = crate::ser::task_status_str(&status);
-        let output_str = output.map(|o| o.to_string()).unwrap_or_else(|| "{}".to_string());
-        conn.execute("UPDATE generation_task SET status = ?, output = ?, error = ?, completed_at = ? WHERE id = ?", [status_str, output_str, error.unwrap_or("").to_string(), Utc::now().to_string(), task_id.to_string()]).context("Failed to update")?;
+    pub async fn create(
+        &self,
+        project_id: Uuid,
+        skill_id: Uuid,
+        scene_id: Option<Uuid>,
+        input: serde_json::Value,
+    ) -> Result<GenerationTask> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+
+        sqlx::query(
+            "INSERT INTO generation_task (id, project_id, skill_id, scene_id, input, status, created_at) \
+             VALUES ($1, $2, $3, $4, $5, 'Pending', $6)",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(skill_id)
+        .bind(scene_id)
+        .bind(&input)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create task")?;
+
+        Ok(GenerationTask {
+            id,
+            project_id,
+            skill_id,
+            scene_id,
+            input,
+            output: None,
+            status: TaskStatus::Pending,
+            token_usage: None,
+            error: None,
+            created_at: now,
+            completed_at: None,
+        })
+    }
+
+    pub async fn update_status(
+        &self,
+        task_id: Uuid,
+        status: TaskStatus,
+        output: Option<serde_json::Value>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let status_str = ser::task_status_str(&status);
+
+        sqlx::query(
+            "UPDATE generation_task SET status = $1, output = $2, error = $3, completed_at = $4 WHERE id = $5",
+        )
+        .bind(&status_str)
+        .bind(output.as_ref())
+        .bind(error.unwrap_or(""))
+        .bind(Utc::now())
+        .bind(task_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update task")?;
         Ok(())
     }
 
-    pub fn get_by_id(&self, task_id: Uuid) -> Result<Option<GenerationTask>> {
-        let conn = self.db.conn();
-        let result = conn.query_row("SELECT id, project_id, skill_id, scene_id, input, output, status, error, created_at, completed_at FROM generation_task WHERE id = ?", [task_id.to_string()], |row| {
-            let scene: Option<String> = row.get(3)?;
-            let output: Option<String> = row.get(5)?;
-            let error: Option<String> = row.get(7)?;
-            Ok(GenerationTask {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                project_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                skill_id: Uuid::parse_str(&row.get::<_, String>(2)?).unwrap(),
-                scene_id: scene.and_then(|s| Uuid::parse_str(&s).ok()),
-                input: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
-                output: output.and_then(|o| serde_json::from_str(&o).ok()),
-                status: TaskStatus::Pending,
-                token_usage: None,
-                error,
-                created_at: get_timestamp(row, 8),
-                completed_at: get_optional_timestamp(row, 9),
-            })
-        }).ok();
-        Ok(result)
+    pub async fn get_by_id(&self, task_id: Uuid) -> Result<Option<GenerationTask>> {
+        let row = sqlx::query_as::<_, GenerationTaskRow>(
+            "SELECT id, project_id, skill_id, scene_id, input, output, status, error, created_at, completed_at \
+             FROM generation_task WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query task")?;
+
+        Ok(row.map(|r| r.into()))
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct GenerationTaskRow {
+    id: Uuid,
+    project_id: Uuid,
+    skill_id: Uuid,
+    scene_id: Option<Uuid>,
+    input: Option<serde_json::Value>,
+    output: Option<serde_json::Value>,
+    status: String,
+    error: Option<String>,
+    created_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+}
+
+impl From<GenerationTaskRow> for GenerationTask {
+    fn from(r: GenerationTaskRow) -> Self {
+        GenerationTask {
+            id: r.id,
+            project_id: r.project_id,
+            skill_id: r.skill_id,
+            scene_id: r.scene_id,
+            input: r.input.unwrap_or_default(),
+            output: r.output,
+            status: ser::parse_task_status(&r.status),
+            token_usage: None,
+            error: r.error,
+            created_at: r.created_at,
+            completed_at: r.completed_at,
+        }
     }
 }

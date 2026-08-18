@@ -1,278 +1,383 @@
 //! Character Profile/State/Goal/Trait Repository
-//!
-//! 对应 migration 007 创建的人物子结构表。
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use domain::*;
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::connection::Database;
-use crate::time_utils;
+// ============= CharacterProfileRepo =============
 
-/// CharacterProfile Repository
-pub struct CharacterProfileRepo<'a> {
-    db: &'a Database,
+pub struct CharacterProfileRepo {
+    pool: PgPool,
 }
 
-impl<'a> CharacterProfileRepo<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+impl CharacterProfileRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    pub fn create(&self, entity_id: Uuid, profile: &CharacterProfile) -> Result<()> {
-        let conn = self.db.conn();
+    pub async fn create(&self, entity_id: Uuid, profile: &CharacterProfile) -> Result<()> {
         let now = Utc::now();
-        conn.execute(
-            "INSERT INTO character_profile (id, entity_id, real_name, nickname, age, gender, identity, appearance, background, social_status, core_personality, values_desc, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                profile.id.to_string(), entity_id.to_string(),
-                profile.real_name.clone().unwrap_or_default(),
-                profile.nickname.clone().unwrap_or_default(),
-                profile.age.clone().unwrap_or_default(),
-                profile.gender.clone().unwrap_or_default(),
-                profile.identity.clone().unwrap_or_default(),
-                profile.appearance.clone().unwrap_or_default(),
-                profile.background.clone().unwrap_or_default(),
-                profile.social_status.clone().unwrap_or_default(),
-                profile.core_personality.clone().unwrap_or_default(),
-                profile.values.clone().unwrap_or_default(),
-                now.to_string(), now.to_string(),
-            ],
-        ).context("Failed to create character_profile")?;
+
+        sqlx::query(
+            "INSERT INTO character_profile (id, entity_id, real_name, nickname, age, gender, identity, appearance, background, social_status, core_personality, values_desc, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+        )
+        .bind(profile.id)
+        .bind(entity_id)
+        .bind(profile.real_name.as_deref().unwrap_or(""))
+        .bind(profile.nickname.as_deref().unwrap_or(""))
+        .bind(profile.age.as_deref().unwrap_or(""))
+        .bind(profile.gender.as_deref().unwrap_or(""))
+        .bind(profile.identity.as_deref().unwrap_or(""))
+        .bind(profile.appearance.as_deref().unwrap_or(""))
+        .bind(profile.background.as_deref().unwrap_or(""))
+        .bind(profile.social_status.as_deref().unwrap_or(""))
+        .bind(profile.core_personality.as_deref().unwrap_or(""))
+        .bind(profile.values.as_deref().unwrap_or(""))
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create character_profile")?;
         Ok(())
     }
 
-    pub fn get_by_entity(&self, entity_id: Uuid) -> Result<Option<CharacterProfile>> {
-        let conn = self.db.conn();
-        let result = conn.query_row(
-            "SELECT id, entity_id, real_name, nickname, age, gender, identity, appearance, background, social_status, core_personality, values_desc, created_at, updated_at FROM character_profile WHERE entity_id = ?",
-            [entity_id.to_string()],
-            |row| {
-                Ok(CharacterProfile {
-                    id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                    entity_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                    real_name: Some(row.get::<_, String>(2)?).filter(|s| !s.is_empty()),
-                    nickname: Some(row.get::<_, String>(3)?).filter(|s| !s.is_empty()),
-                    age: Some(row.get::<_, String>(4)?).filter(|s| !s.is_empty()),
-                    gender: Some(row.get::<_, String>(5)?).filter(|s| !s.is_empty()),
-                    identity: Some(row.get::<_, String>(6)?).filter(|s| !s.is_empty()),
-                    appearance: Some(row.get::<_, String>(7)?).filter(|s| !s.is_empty()),
-                    background: Some(row.get::<_, String>(8)?).filter(|s| !s.is_empty()),
-                    social_status: Some(row.get::<_, String>(9)?).filter(|s| !s.is_empty()),
-                    core_personality: Some(row.get::<_, String>(10)?).filter(|s| !s.is_empty()),
-                    values: Some(row.get::<_, String>(11)?).filter(|s| !s.is_empty()),
-                    created_at: time_utils::get_timestamp(row, 12),
-                    updated_at: time_utils::get_timestamp(row, 13),
-                })
-            },
-        ).ok();
-        Ok(result)
+    pub async fn get_by_entity(&self, entity_id: Uuid) -> Result<Option<CharacterProfile>> {
+        let row = sqlx::query_as::<_, CharacterProfileRow>(
+            "SELECT id, entity_id, real_name, nickname, age, gender, identity, appearance, background, social_status, core_personality, values_desc, created_at, updated_at \
+             FROM character_profile WHERE entity_id = $1",
+        )
+        .bind(entity_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query character_profile")?;
+
+        Ok(row.map(|r| r.into()))
     }
 
-    pub fn update(&self, profile: &CharacterProfile) -> Result<()> {
-        let conn = self.db.conn();
+    pub async fn update(&self, profile: &CharacterProfile) -> Result<()> {
         let now = Utc::now();
-        conn.execute(
-            "UPDATE character_profile SET real_name=?, nickname=?, age=?, gender=?, identity=?, appearance=?, background=?, social_status=?, core_personality=?, values_desc=?, updated_at=? WHERE entity_id=?",
-            [
-                profile.real_name.clone().unwrap_or_default(),
-                profile.nickname.clone().unwrap_or_default(),
-                profile.age.clone().unwrap_or_default(),
-                profile.gender.clone().unwrap_or_default(),
-                profile.identity.clone().unwrap_or_default(),
-                profile.appearance.clone().unwrap_or_default(),
-                profile.background.clone().unwrap_or_default(),
-                profile.social_status.clone().unwrap_or_default(),
-                profile.core_personality.clone().unwrap_or_default(),
-                profile.values.clone().unwrap_or_default(),
-                now.to_string(),
-                profile.entity_id.to_string(),
-            ],
-        ).context("Failed to update character_profile")?;
+
+        sqlx::query(
+            "UPDATE character_profile SET real_name=$1, nickname=$2, age=$3, gender=$4, identity=$5, appearance=$6, background=$7, social_status=$8, core_personality=$9, values_desc=$10, updated_at=$11 WHERE entity_id=$12",
+        )
+        .bind(profile.real_name.as_deref().unwrap_or(""))
+        .bind(profile.nickname.as_deref().unwrap_or(""))
+        .bind(profile.age.as_deref().unwrap_or(""))
+        .bind(profile.gender.as_deref().unwrap_or(""))
+        .bind(profile.identity.as_deref().unwrap_or(""))
+        .bind(profile.appearance.as_deref().unwrap_or(""))
+        .bind(profile.background.as_deref().unwrap_or(""))
+        .bind(profile.social_status.as_deref().unwrap_or(""))
+        .bind(profile.core_personality.as_deref().unwrap_or(""))
+        .bind(profile.values.as_deref().unwrap_or(""))
+        .bind(now)
+        .bind(profile.entity_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update character_profile")?;
         Ok(())
     }
 }
 
-/// CharacterState Repository
-pub struct CharacterStateRepo<'a> {
-    db: &'a Database,
+#[derive(sqlx::FromRow)]
+struct CharacterProfileRow {
+    id: Uuid,
+    entity_id: Uuid,
+    real_name: Option<String>,
+    nickname: Option<String>,
+    age: Option<String>,
+    gender: Option<String>,
+    identity: Option<String>,
+    appearance: Option<String>,
+    background: Option<String>,
+    social_status: Option<String>,
+    core_personality: Option<String>,
+    values_desc: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
-impl<'a> CharacterStateRepo<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+impl From<CharacterProfileRow> for CharacterProfile {
+    fn from(r: CharacterProfileRow) -> Self {
+        let filter_empty = |s: Option<String>| s.filter(|s| !s.is_empty());
+        CharacterProfile {
+            id: r.id,
+            entity_id: r.entity_id,
+            real_name: filter_empty(r.real_name),
+            nickname: filter_empty(r.nickname),
+            age: filter_empty(r.age),
+            gender: filter_empty(r.gender),
+            identity: filter_empty(r.identity),
+            appearance: filter_empty(r.appearance),
+            background: filter_empty(r.background),
+            social_status: filter_empty(r.social_status),
+            core_personality: filter_empty(r.core_personality),
+            values: filter_empty(r.values_desc),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+// ============= CharacterStateRepo =============
+
+pub struct CharacterStateRepo {
+    pool: PgPool,
+}
+
+impl CharacterStateRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    pub fn upsert(&self, entity_id: Uuid, state: &CharacterState) -> Result<()> {
-        let conn = self.db.conn();
+    pub async fn upsert(&self, entity_id: Uuid, state: &CharacterState) -> Result<()> {
         let now = Utc::now();
-        // Try update first, if no rows affected, insert
-        let updated = conn.execute(
-            "UPDATE character_state SET location=?, health=?, cultivation=?, money=?, wanted=?, extra=?, updated_at=? WHERE entity_id=?",
-            [
-                state.location.clone().unwrap_or_default(),
-                state.health.clone().unwrap_or_default(),
-                state.cultivation.clone().unwrap_or_default(),
-                state.money.clone().unwrap_or_default(),
-                state.wanted.to_string(),
-                state.extra.to_string(),
-                now.to_string(),
-                entity_id.to_string(),
-            ],
-        ).context("Failed to update character_state")?;
 
-        if updated == 0 {
-            conn.execute(
-                "INSERT INTO character_state (id, entity_id, location, health, cultivation, money, wanted, extra, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    Uuid::new_v4().to_string(), entity_id.to_string(),
-                    state.location.clone().unwrap_or_default(),
-                    state.health.clone().unwrap_or_default(),
-                    state.cultivation.clone().unwrap_or_default(),
-                    state.money.clone().unwrap_or_default(),
-                    state.wanted.to_string(),
-                    state.extra.to_string(),
-                    now.to_string(), now.to_string(),
-                ],
-            ).context("Failed to insert character_state")?;
+        let result = sqlx::query(
+            "UPDATE character_state SET location=$1, health=$2, cultivation=$3, money=$4, wanted=$5, extra=$6, updated_at=$7 WHERE entity_id=$8",
+        )
+        .bind(state.location.as_deref().unwrap_or(""))
+        .bind(state.health.as_deref().unwrap_or(""))
+        .bind(state.cultivation.as_deref().unwrap_or(""))
+        .bind(state.money.as_deref().unwrap_or(""))
+        .bind(state.wanted)
+        .bind(&state.extra)
+        .bind(now)
+        .bind(entity_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update character_state")?;
+
+        if result.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO character_state (id, entity_id, location, health, cultivation, money, wanted, extra, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(entity_id)
+            .bind(state.location.as_deref().unwrap_or(""))
+            .bind(state.health.as_deref().unwrap_or(""))
+            .bind(state.cultivation.as_deref().unwrap_or(""))
+            .bind(state.money.as_deref().unwrap_or(""))
+            .bind(state.wanted)
+            .bind(&state.extra)
+            .bind(now)
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .context("Failed to insert character_state")?;
         }
         Ok(())
     }
 
-    pub fn get_by_entity(&self, entity_id: Uuid) -> Result<Option<CharacterState>> {
-        let conn = self.db.conn();
-        let result = conn.query_row(
-            "SELECT id, entity_id, location, health, cultivation, money, wanted, extra, created_at, updated_at FROM character_state WHERE entity_id = ?",
-            [entity_id.to_string()],
-            |row| {
-                let extra_str: String = row.get(7)?;
-                Ok(CharacterState {
-                    id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                    entity_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                    location: Some(row.get::<_, String>(2)?).filter(|s| !s.is_empty()),
-                    health: Some(row.get::<_, String>(3)?).filter(|s| !s.is_empty()),
-                    cultivation: Some(row.get::<_, String>(4)?).filter(|s| !s.is_empty()),
-                    money: Some(row.get::<_, String>(5)?).filter(|s| !s.is_empty()),
-                    wanted: row.get(6)?,
-                    extra: serde_json::from_str(&extra_str).unwrap_or_default(),
-                    created_at: time_utils::get_timestamp(row, 8),
-                    updated_at: time_utils::get_timestamp(row, 9),
-                })
-            },
-        ).ok();
-        Ok(result)
+    pub async fn get_by_entity(&self, entity_id: Uuid) -> Result<Option<CharacterState>> {
+        let row = sqlx::query_as::<_, CharacterStateRow>(
+            "SELECT id, entity_id, location, health, cultivation, money, wanted, extra, created_at, updated_at \
+             FROM character_state WHERE entity_id = $1",
+        )
+        .bind(entity_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query character_state")?;
+
+        Ok(row.map(|r| r.into()))
     }
 }
 
-/// CharacterGoal Repository
-pub struct CharacterGoalRepo<'a> {
-    db: &'a Database,
+#[derive(sqlx::FromRow)]
+struct CharacterStateRow {
+    id: Uuid,
+    entity_id: Uuid,
+    location: Option<String>,
+    health: Option<String>,
+    cultivation: Option<String>,
+    money: Option<String>,
+    wanted: bool,
+    extra: Option<serde_json::Value>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
-impl<'a> CharacterGoalRepo<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+impl From<CharacterStateRow> for CharacterState {
+    fn from(r: CharacterStateRow) -> Self {
+        let filter_empty = |s: Option<String>| s.filter(|s| !s.is_empty());
+        CharacterState {
+            id: r.id,
+            entity_id: r.entity_id,
+            location: filter_empty(r.location),
+            health: filter_empty(r.health),
+            cultivation: filter_empty(r.cultivation),
+            money: filter_empty(r.money),
+            wanted: r.wanted,
+            extra: r.extra.unwrap_or_default(),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+// ============= CharacterGoalRepo =============
+
+pub struct CharacterGoalRepo {
+    pool: PgPool,
+}
+
+impl CharacterGoalRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    pub fn upsert(&self, entity_id: Uuid, goal: &CharacterGoal) -> Result<()> {
-        let conn = self.db.conn();
+    pub async fn upsert(&self, entity_id: Uuid, goal: &CharacterGoal) -> Result<()> {
         let now = Utc::now();
-        let updated = conn.execute(
-            "UPDATE character_goal SET long_term=?, current_goal=?, immediate=?, updated_at=? WHERE entity_id=?",
-            [
-                goal.long_term.clone().unwrap_or_default(),
-                goal.current.clone().unwrap_or_default(),
-                goal.immediate.clone().unwrap_or_default(),
-                now.to_string(),
-                entity_id.to_string(),
-            ],
-        ).context("Failed to update character_goal")?;
 
-        if updated == 0 {
-            conn.execute(
-                "INSERT INTO character_goal (id, entity_id, long_term, current_goal, immediate, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [
-                    Uuid::new_v4().to_string(), entity_id.to_string(),
-                    goal.long_term.clone().unwrap_or_default(),
-                    goal.current.clone().unwrap_or_default(),
-                    goal.immediate.clone().unwrap_or_default(),
-                    now.to_string(), now.to_string(),
-                ],
-            ).context("Failed to insert character_goal")?;
+        let result = sqlx::query(
+            "UPDATE character_goal SET long_term=$1, current_goal=$2, immediate=$3, updated_at=$4 WHERE entity_id=$5",
+        )
+        .bind(goal.long_term.as_deref().unwrap_or(""))
+        .bind(goal.current.as_deref().unwrap_or(""))
+        .bind(goal.immediate.as_deref().unwrap_or(""))
+        .bind(now)
+        .bind(entity_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update character_goal")?;
+
+        if result.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO character_goal (id, entity_id, long_term, current_goal, immediate, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(entity_id)
+            .bind(goal.long_term.as_deref().unwrap_or(""))
+            .bind(goal.current.as_deref().unwrap_or(""))
+            .bind(goal.immediate.as_deref().unwrap_or(""))
+            .bind(now)
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .context("Failed to insert character_goal")?;
         }
         Ok(())
     }
 
-    pub fn get_by_entity(&self, entity_id: Uuid) -> Result<Option<CharacterGoal>> {
-        let conn = self.db.conn();
-        let result = conn.query_row(
-            "SELECT id, entity_id, long_term, current_goal, immediate, created_at, updated_at FROM character_goal WHERE entity_id = ?",
-            [entity_id.to_string()],
-            |row| {
-                Ok(CharacterGoal {
-                    id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                    entity_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                    long_term: Some(row.get::<_, String>(2)?).filter(|s| !s.is_empty()),
-                    current: Some(row.get::<_, String>(3)?).filter(|s| !s.is_empty()),
-                    immediate: Some(row.get::<_, String>(4)?).filter(|s| !s.is_empty()),
-                    created_at: time_utils::get_timestamp(row, 5),
-                    updated_at: time_utils::get_timestamp(row, 6),
-                })
-            },
-        ).ok();
-        Ok(result)
+    pub async fn get_by_entity(&self, entity_id: Uuid) -> Result<Option<CharacterGoal>> {
+        let row = sqlx::query_as::<_, CharacterGoalRow>(
+            "SELECT id, entity_id, long_term, current_goal, immediate, created_at, updated_at \
+             FROM character_goal WHERE entity_id = $1",
+        )
+        .bind(entity_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query character_goal")?;
+
+        Ok(row.map(|r| r.into()))
     }
 }
 
-/// CharacterTrait Repository
-pub struct CharacterTraitRepo<'a> {
-    db: &'a Database,
+#[derive(sqlx::FromRow)]
+struct CharacterGoalRow {
+    id: Uuid,
+    entity_id: Uuid,
+    long_term: Option<String>,
+    current_goal: Option<String>,
+    immediate: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
-impl<'a> CharacterTraitRepo<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+impl From<CharacterGoalRow> for CharacterGoal {
+    fn from(r: CharacterGoalRow) -> Self {
+        let filter_empty = |s: Option<String>| s.filter(|s| !s.is_empty());
+        CharacterGoal {
+            id: r.id,
+            entity_id: r.entity_id,
+            long_term: filter_empty(r.long_term),
+            current: filter_empty(r.current_goal),
+            immediate: filter_empty(r.immediate),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+// ============= CharacterTraitRepo =============
+
+pub struct CharacterTraitRepo {
+    pool: PgPool,
+}
+
+impl CharacterTraitRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    pub fn create(&self, entity_id: Uuid, trait_item: &CharacterTrait) -> Result<()> {
-        let conn = self.db.conn();
+    pub async fn create(&self, entity_id: Uuid, trait_item: &CharacterTrait) -> Result<()> {
         let now = Utc::now();
-        conn.execute(
-            "INSERT INTO character_trait (id, entity_id, trait_type, name, description, parent_trait_id, intensity, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                trait_item.id.to_string(), entity_id.to_string(),
-                serde_json::to_string(&trait_item.trait_type).unwrap_or_default().trim_matches('"').to_string(),
-                trait_item.name.clone(),
-                trait_item.description.clone().unwrap_or_default(),
-                trait_item.parent_trait_id.map(|u| u.to_string()).unwrap_or_default(),
-                trait_item.intensity.unwrap_or(5).to_string(),
-                now.to_string(), now.to_string(),
-            ],
-        ).context("Failed to create character_trait")?;
+
+        sqlx::query(
+            "INSERT INTO character_trait (id, entity_id, trait_type, name, description, parent_trait_id, intensity, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(trait_item.id)
+        .bind(entity_id)
+        .bind(serde_json::to_value(&trait_item.trait_type).unwrap_or_default())
+        .bind(&trait_item.name)
+        .bind(trait_item.description.as_deref().unwrap_or(""))
+        .bind(trait_item.parent_trait_id)
+        .bind(trait_item.intensity.unwrap_or(5))
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create character_trait")?;
         Ok(())
     }
 
-    pub fn list_by_entity(&self, entity_id: Uuid) -> Result<Vec<CharacterTrait>> {
-        let conn = self.db.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, entity_id, trait_type, name, description, parent_trait_id, intensity, created_at, updated_at FROM character_trait WHERE entity_id = ? ORDER BY created_at"
-        ).context("Failed to prepare")?;
-        let rows = stmt.query_map([entity_id.to_string()], |row| {
-            let trait_type_str: String = row.get(2)?;
-            let parent_str: Option<String> = row.get::<_, Option<String>>(5)?;
-            Ok(CharacterTrait {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                entity_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                trait_type: serde_json::from_str(&format!("\"{}\"", trait_type_str)).unwrap_or(TraitType::Personality),
-                name: row.get(3)?,
-                description: row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty()),
-                parent_trait_id: parent_str.and_then(|s| Uuid::parse_str(&s).ok()),
-                intensity: row.get::<_, Option<i32>>(6)?,
-                created_at: time_utils::get_timestamp(row, 7),
-                updated_at: time_utils::get_timestamp(row, 8),
-            })
-        }).context("Failed to query")?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+    pub async fn list_by_entity(&self, entity_id: Uuid) -> Result<Vec<CharacterTrait>> {
+        let rows = sqlx::query_as::<_, CharacterTraitRow>(
+            "SELECT id, entity_id, trait_type, name, description, parent_trait_id, intensity, created_at, updated_at \
+             FROM character_trait WHERE entity_id = $1 ORDER BY created_at",
+        )
+        .bind(entity_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query character traits")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct CharacterTraitRow {
+    id: Uuid,
+    entity_id: Uuid,
+    trait_type: Option<serde_json::Value>,
+    name: String,
+    description: Option<String>,
+    parent_trait_id: Option<Uuid>,
+    intensity: Option<i32>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<CharacterTraitRow> for CharacterTrait {
+    fn from(r: CharacterTraitRow) -> Self {
+        CharacterTrait {
+            id: r.id,
+            entity_id: r.entity_id,
+            trait_type: r.trait_type
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or(TraitType::Personality),
+            name: r.name,
+            description: r.description.filter(|s| !s.is_empty()),
+            parent_trait_id: r.parent_trait_id,
+            intensity: r.intensity,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
     }
 }

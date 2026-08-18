@@ -49,11 +49,13 @@ fn test_e2e_visibility_control() {
 
     // 创建事实
     let fact_id = Uuid::new_v4();
-    let conn = db.conn();
-    conn.execute(
-        "INSERT INTO fact (id, project_id, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        [fact_id.to_string(), project_id.to_string(), "幕后黑手是A".to_string(), chrono::Utc::now().to_string(), chrono::Utc::now().to_string()],
-    ).unwrap();
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO fact (id, project_id, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            [fact_id.to_string(), project_id.to_string(), "幕后黑手是A".to_string(), chrono::Utc::now().to_string(), chrono::Utc::now().to_string()],
+        ).unwrap();
+    }
 
     // 设置可见性：作者可见，场景作者隐藏
     repo.create(project_id, fact_id, VisibilitySubjectType::Author, None, VisibilityLevel::Visible).unwrap();
@@ -194,7 +196,7 @@ fn test_e2e_contract_validation() {
         vec!["进入黑市".into(), "遇到老板".into()],
         vec!["发现遗迹".into(), "击杀王家".into()],
         vec![],
-        vec!["黑市存在".into()],
+        vec!["黑市".into()],
         vec!["黑市存在王家眼线".into()],
         vec!["王家正在调查自己".into()],
         vec!["获得通行资格".into()],

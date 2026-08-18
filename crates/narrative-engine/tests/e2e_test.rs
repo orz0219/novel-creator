@@ -42,8 +42,8 @@ mod e2e_tests {
         world.set_entity_state(project.id, lin_fan.id, "location", serde_json::json!("outside city")).unwrap();
         world.set_entity_state(project.id, lin_fan.id, "cultivation", serde_json::json!("Qi Refining Level 3")).unwrap();
 
-        world.create_fact(project.id, "Underground ruins exist beneath Black Stone City", Some("secret"), &[city.id]).unwrap();
-        world.create_fact(project.id, "The Wang family controls the black iron mines", Some("public"), &[city.id, wang_head.id]).unwrap();
+        world.create_fact(project.id, "Underground ruins exist beneath Black Stone City", Some("secret"), "CANON", &[city.id]).unwrap();
+        world.create_fact(project.id, "The Wang family controls the black iron mines", Some("public"), "CANON", &[city.id, wang_head.id]).unwrap();
 
         // 3. Create narrative structure
         let narrative = NarrativeService::new(&db);

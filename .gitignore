@@ -1,1 +1,7 @@
 /target
+.env
+/tmp
+*.duckdb
+*.duckdb.wal
+.cargo/
+.reasonix/tasks/

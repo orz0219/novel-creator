@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS storyline (
     importance VARCHAR NOT NULL DEFAULT 'Normal',
     created_volume_id VARCHAR,
     resolved_volume_id VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_storyline_project ON storyline(project_id);
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS storyline_scene (
     storyline_id VARCHAR NOT NULL REFERENCES storyline(id),
     scene_id VARCHAR NOT NULL,
     significance VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_storyline_scene_storyline ON storyline_scene(storyline_id);
@@ -43,8 +43,8 @@ CREATE TABLE IF NOT EXISTS fact_visibility (
     subject_type VARCHAR NOT NULL,
     subject_id VARCHAR,
     visibility_level VARCHAR NOT NULL DEFAULT 'Hidden',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_fact_visibility_project ON fact_visibility(project_id);
@@ -59,12 +59,12 @@ CREATE TABLE IF NOT EXISTS approval_record (
     target_type VARCHAR NOT NULL,
     target_id VARCHAR NOT NULL,
     proposed_by VARCHAR NOT NULL,
-    proposal_content JSON,
+    proposal_content JSONB,
     status VARCHAR NOT NULL DEFAULT 'Pending',
     reviewer_id VARCHAR,
     reviewer_comment TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    reviewed_at TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_approval_project ON approval_record(project_id);

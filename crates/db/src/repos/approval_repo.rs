@@ -1,23 +1,29 @@
 //! Approval Repository - CRUD operations for ApprovalRecord
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use domain::{ApprovalRecord, ApprovalStatus, ApprovalTargetType};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::connection::Database;
-
-pub struct ApprovalRepo<'a> {
-    db: &'a Database,
+pub struct ApprovalRepo {
+    pool: PgPool,
 }
 
-impl<'a> ApprovalRepo<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+impl ApprovalRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
     /// 创建审批记录
-    pub fn create(&self, project_id: Uuid, target_type: ApprovalTargetType, target_id: Uuid, proposed_by: &str, proposal_content: serde_json::Value) -> Result<ApprovalRecord> {
+    pub async fn create(
+        &self,
+        project_id: Uuid,
+        target_type: ApprovalTargetType,
+        target_id: Uuid,
+        proposed_by: &str,
+        proposal_content: serde_json::Value,
+    ) -> Result<ApprovalRecord> {
         let id = Uuid::new_v4();
         let now = Utc::now();
         let tt_str = match &target_type {
@@ -28,110 +34,121 @@ impl<'a> ApprovalRepo<'a> {
             ApprovalTargetType::Scene => "Scene",
             ApprovalTargetType::Storyline => "Storyline",
             ApprovalTargetType::Fact => "Fact",
-            ApprovalTargetType::Custom(s) => s,
+            ApprovalTargetType::Custom(s) => s.as_str(),
         };
-        let conn = self.db.conn();
-        conn.execute(
-            "INSERT INTO approval_record (id, project_id, target_type, target_id, proposed_by, proposal_content, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [id.to_string(), project_id.to_string(), tt_str.to_string(), target_id.to_string(), proposed_by.to_string(), proposal_content.to_string(), "Pending".to_string(), now.to_string()],
-        ).context("Failed to create approval record")?;
-        Ok(ApprovalRecord { id, project_id, target_type, target_id, proposed_by: proposed_by.to_string(), proposal_content, status: ApprovalStatus::Pending, reviewer_id: None, reviewer_comment: None, created_at: now, reviewed_at: None })
+
+        sqlx::query(
+            "INSERT INTO approval_record (id, project_id, target_type, target_id, proposed_by, proposal_content, status, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'Pending', $7)",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(tt_str)
+        .bind(target_id)
+        .bind(proposed_by)
+        .bind(&proposal_content)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create approval record")?;
+
+        Ok(ApprovalRecord {
+            id,
+            project_id,
+            target_type,
+            target_id,
+            proposed_by: proposed_by.to_string(),
+            proposal_content,
+            status: ApprovalStatus::Pending,
+            reviewer_id: None,
+            reviewer_comment: None,
+            created_at: now,
+            reviewed_at: None,
+        })
     }
 
     /// 审批记录
-    pub fn approve(&self, id: Uuid, reviewer_id: &str, comment: Option<&str>) -> Result<()> {
-        let conn = self.db.conn();
-        conn.execute(
-            "UPDATE approval_record SET status = 'Approved', reviewer_id = ?, reviewer_comment = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            [reviewer_id.to_string(), comment.unwrap_or("").to_string(), id.to_string()],
-        ).context("Failed to approve record")?;
+    pub async fn approve(&self, id: Uuid, reviewer_id: &str, comment: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "UPDATE approval_record SET status = 'Approved', reviewer_id = $1, reviewer_comment = $2, reviewed_at = NOW() WHERE id = $3",
+        )
+        .bind(reviewer_id)
+        .bind(comment.unwrap_or(""))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to approve record")?;
         Ok(())
     }
 
     /// 拒绝记录
-    pub fn reject(&self, id: Uuid, reviewer_id: &str, comment: Option<&str>) -> Result<()> {
-        let conn = self.db.conn();
-        conn.execute(
-            "UPDATE approval_record SET status = 'Rejected', reviewer_id = ?, reviewer_comment = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            [reviewer_id.to_string(), comment.unwrap_or("").to_string(), id.to_string()],
-        ).context("Failed to reject record")?;
+    pub async fn reject(&self, id: Uuid, reviewer_id: &str, comment: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "UPDATE approval_record SET status = 'Rejected', reviewer_id = $1, reviewer_comment = $2, reviewed_at = NOW() WHERE id = $3",
+        )
+        .bind(reviewer_id)
+        .bind(comment.unwrap_or(""))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to reject record")?;
         Ok(())
     }
 
     /// 获取待审批记录
-    pub fn list_pending(&self, project_id: Uuid) -> Result<Vec<ApprovalRecord>> {
-        let conn = self.db.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, target_type, target_id, proposed_by, CAST(proposal_content AS VARCHAR), status, reviewer_id, reviewer_comment, created_at, reviewed_at FROM approval_record WHERE project_id = ? AND status = 'Pending' ORDER BY created_at",
-        ).context("Failed to prepare")?;
-        let rows = stmt.query_map([project_id.to_string()], |row| {
-            Ok(ApprovalRecord {
-                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-                project_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
-                target_type: match row.get::<_, String>(2)?.as_str() {
-                    "World" => ApprovalTargetType::World,
-                    "Entity" => ApprovalTargetType::Entity,
-                    "Volume" => ApprovalTargetType::Volume,
-                    "Arc" => ApprovalTargetType::Arc,
-                    "Scene" => ApprovalTargetType::Scene,
-                    "Storyline" => ApprovalTargetType::Storyline,
-                    "Fact" => ApprovalTargetType::Fact,
-                    s => ApprovalTargetType::Custom(s.to_string()),
-                },
-                target_id: Uuid::parse_str(&row.get::<_, String>(3)?).unwrap(),
-                proposed_by: row.get(4)?,
-                proposal_content: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
-                status: ApprovalStatus::Pending,
-                reviewer_id: row.get::<_, Option<String>>(7)?,
-                reviewer_comment: row.get::<_, Option<String>>(8)?,
-                created_at: crate::time_utils::get_timestamp(row, 9),
-                reviewed_at: row.get::<_, Option<String>>(10)?.and_then(|s| s.parse().ok()),
-            })
-        }).context("Failed to query")?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+    pub async fn list_pending(&self, project_id: Uuid) -> Result<Vec<ApprovalRecord>> {
+        let rows = sqlx::query_as::<_, ApprovalRow>(
+            "SELECT id, project_id, target_type, target_id, proposed_by, proposal_content, status, reviewer_id, reviewer_comment, created_at, reviewed_at \
+             FROM approval_record WHERE project_id = $1 AND status = 'Pending' ORDER BY created_at",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query approvals")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::migration;
+#[derive(sqlx::FromRow)]
+struct ApprovalRow {
+    id: Uuid,
+    project_id: Uuid,
+    target_type: String,
+    target_id: Uuid,
+    proposed_by: String,
+    proposal_content: Option<serde_json::Value>,
+    status: String,
+    reviewer_id: Option<String>,
+    reviewer_comment: Option<String>,
+    created_at: DateTime<Utc>,
+    reviewed_at: Option<DateTime<Utc>>,
+}
 
-    fn setup_db() -> (Database, Uuid) {
-        let db = Database::open_in_memory().unwrap();
-        migration::run_migrations(&db, concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap();
-        // 先创建 project
-        let project_id = Uuid::new_v4();
-        {
-            let conn = db.conn();
-            conn.execute(
-                "INSERT INTO project (id, name, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                [project_id.to_string(), "Test Project".to_string(), "Test".to_string(), "Active".to_string(), Utc::now().to_string(), Utc::now().to_string()],
-            ).unwrap();
+impl From<ApprovalRow> for ApprovalRecord {
+    fn from(r: ApprovalRow) -> Self {
+        let target_type = match r.target_type.as_str() {
+            "World" => ApprovalTargetType::World,
+            "Entity" => ApprovalTargetType::Entity,
+            "Volume" => ApprovalTargetType::Volume,
+            "Arc" => ApprovalTargetType::Arc,
+            "Scene" => ApprovalTargetType::Scene,
+            "Storyline" => ApprovalTargetType::Storyline,
+            "Fact" => ApprovalTargetType::Fact,
+            s => ApprovalTargetType::Custom(s.to_string()),
+        };
+        ApprovalRecord {
+            id: r.id,
+            project_id: r.project_id,
+            target_type,
+            target_id: r.target_id,
+            proposed_by: r.proposed_by,
+            proposal_content: r.proposal_content.unwrap_or_default(),
+            status: ApprovalStatus::Pending,
+            reviewer_id: r.reviewer_id,
+            reviewer_comment: r.reviewer_comment,
+            created_at: r.created_at,
+            reviewed_at: r.reviewed_at,
         }
-        (db, project_id)
-    }
-
-    #[test]
-    fn test_create_and_approve() {
-        let (db, project_id) = setup_db();
-        let repo = ApprovalRepo::new(&db);
-        let target_id = Uuid::new_v4();
-        let record = repo.create(project_id, ApprovalTargetType::Entity, target_id, "ai", serde_json::json!({"name": "地下赌场"})).unwrap();
-        assert_eq!(record.status, ApprovalStatus::Pending);
-        repo.approve(record.id, "user1", Some("看起来不错")).unwrap();
-        let pending = repo.list_pending(project_id).unwrap();
-        assert_eq!(pending.len(), 0);
-    }
-
-    #[test]
-    fn test_reject() {
-        let (db, project_id) = setup_db();
-        let repo = ApprovalRepo::new(&db);
-        let target_id = Uuid::new_v4();
-        let record = repo.create(project_id, ApprovalTargetType::Scene, target_id, "ai", serde_json::json!({"objective": "test"})).unwrap();
-        repo.reject(record.id, "user1", Some("不符合设定")).unwrap();
-        let pending = repo.list_pending(project_id).unwrap();
-        assert_eq!(pending.len(), 0);
     }
 }

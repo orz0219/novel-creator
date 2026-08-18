@@ -1,19 +1,22 @@
-//! Schema helper functions
+//! Schema helper functions for PostgreSQL
 //!
 //! 提供数据库 schema 的查询和验证功能。
 
 use anyhow::{Context, Result};
-use crate::connection::Database;
+use sqlx::PgPool;
 
 /// 获取所有表名
-pub fn list_tables(db: &Database) -> Result<Vec<String>> {
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' AND table_type = 'BASE TABLE' ORDER BY table_name")
-        .context("Failed to query tables")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))
-        .context("Failed to read tables")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+pub async fn list_tables(pool: &PgPool) -> Result<Vec<String>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT table_name FROM information_schema.tables \
+         WHERE table_schema = 'public' AND table_type = 'BASE TABLE' \
+         ORDER BY table_name",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to query tables")?;
+
+    Ok(rows)
 }
 
 /// 获取指定表的列信息
@@ -24,31 +27,31 @@ pub struct ColumnInfo {
     pub column_default: Option<String>,
 }
 
-pub fn describe_table(db: &Database, table_name: &str) -> Result<Vec<ColumnInfo>> {
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare(
-            "SELECT column_name, data_type, is_nullable, column_default
-             FROM information_schema.columns
-             WHERE table_schema = 'main' AND table_name = ?
-             ORDER BY ordinal_position",
-        )
-        .context("Failed to query columns")?;
-    let rows = stmt
-        .query_map([table_name], |row| {
-            Ok(ColumnInfo {
-                name: row.get(0)?,
-                data_type: row.get(1)?,
-                is_nullable: row.get::<_, String>(2)? == "YES",
-                column_default: row.get(3).ok(),
-            })
+pub async fn describe_table(pool: &PgPool, table_name: &str) -> Result<Vec<ColumnInfo>> {
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT column_name, data_type, is_nullable, column_default \
+         FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = $1 \
+         ORDER BY ordinal_position",
+    )
+    .bind(table_name)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query columns")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(name, data_type, nullable, default)| ColumnInfo {
+            name,
+            data_type,
+            is_nullable: nullable == "YES",
+            column_default: default,
         })
-        .context("Failed to read columns")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+        .collect())
 }
 
 /// 验证所有核心表是否存在
-pub fn validate_schema(db: &Database) -> Result<Vec<String>> {
+pub async fn validate_schema(pool: &PgPool) -> Result<Vec<String>> {
     let expected_tables = vec![
         "project",
         "entity_type",
@@ -92,7 +95,6 @@ pub fn validate_schema(db: &Database) -> Result<Vec<String>> {
         "world_branch",
         "narrative_branch",
         "plot_repair",
-        // migration 007 new tables
         "character_profile",
         "character_state",
         "character_goal",
@@ -109,7 +111,7 @@ pub fn validate_schema(db: &Database) -> Result<Vec<String>> {
         "narrative_thread_participant",
     ];
 
-    let existing = list_tables(db)?;
+    let existing = list_tables(pool).await?;
     let mut missing = Vec::new();
 
     for table in &expected_tables {
@@ -125,10 +127,16 @@ pub fn validate_schema(db: &Database) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_list_tables_empty() {
-        let db = Database::open_in_memory().unwrap();
-        let tables = list_tables(&db).unwrap();
-        assert!(tables.is_empty());
+    #[tokio::test]
+    async fn test_list_tables_requires_connection() {
+        // This test requires DATABASE_URL to be set
+        if std::env::var("DATABASE_URL").is_err() {
+            eprintln!("Skipping test: DATABASE_URL not set");
+            return;
+        }
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let _tables = list_tables(&pool).await.unwrap();
     }
 }

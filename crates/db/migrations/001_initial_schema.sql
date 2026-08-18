@@ -14,11 +14,11 @@ CREATE TABLE IF NOT EXISTS project (
     system_setting TEXT,
     default_model VARCHAR,
     default_style VARCHAR,
-    default_params JSON,
-    config JSON,
+    default_params JSONB,
+    config JSONB,
     status VARCHAR NOT NULL DEFAULT 'Concept',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ============================================================
@@ -30,10 +30,10 @@ CREATE TABLE IF NOT EXISTS world (
     name VARCHAR NOT NULL,
     description TEXT,
     world_rules TEXT,
-    config JSON,
+    config JSONB,
     is_main BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_world_project ON world(project_id);
@@ -45,9 +45,9 @@ CREATE TABLE IF NOT EXISTS entity_type (
     id VARCHAR PRIMARY KEY,
     name VARCHAR NOT NULL,
     description TEXT,
-    schema JSON,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    schema JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ============================================================
@@ -61,9 +61,9 @@ CREATE TABLE IF NOT EXISTS entity (
     name VARCHAR NOT NULL,
     summary TEXT,
     description TEXT,
-    attributes JSON,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    attributes JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_entity_project ON entity(project_id);
@@ -80,11 +80,11 @@ CREATE TABLE IF NOT EXISTS relation (
     target_entity_id VARCHAR NOT NULL REFERENCES entity(id),
     relation_type VARCHAR NOT NULL,
     description TEXT,
-    attributes JSON,
+    attributes JSONB,
     valid_from VARCHAR,
     valid_until VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_relation_project ON relation(project_id);
@@ -100,8 +100,8 @@ CREATE TABLE IF NOT EXISTS fact (
     project_id VARCHAR NOT NULL REFERENCES project(id),
     content TEXT NOT NULL,
     category VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_fact_project ON fact(project_id);
@@ -132,8 +132,8 @@ CREATE TABLE IF NOT EXISTS event (
     event_time VARCHAR,
     duration VARCHAR,
     timeline_id VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_project ON event(project_id);
@@ -160,9 +160,9 @@ CREATE TABLE IF NOT EXISTS state_change (
     change_type VARCHAR NOT NULL,
     target_entity_id VARCHAR NOT NULL REFERENCES entity(id),
     state_key VARCHAR NOT NULL,
-    old_value JSON,
-    new_value JSON NOT NULL,
-    committed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    old_value JSONB,
+    new_value JSONB NOT NULL,
+    committed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     committed_by VARCHAR
 );
 
@@ -177,11 +177,11 @@ CREATE TABLE IF NOT EXISTS current_state (
     project_id VARCHAR NOT NULL REFERENCES project(id),
     entity_id VARCHAR NOT NULL REFERENCES entity(id),
     state_key VARCHAR NOT NULL,
-    state_value JSON NOT NULL,
-    effective_from TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    effective_to TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    state_value JSONB NOT NULL,
+    effective_from TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    effective_to TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_current_state_entity ON current_state(entity_id);
@@ -195,11 +195,11 @@ CREATE TABLE IF NOT EXISTS resource_state (
     project_id VARCHAR NOT NULL REFERENCES project(id),
     location_id VARCHAR NOT NULL REFERENCES entity(id),
     resource_name VARCHAR NOT NULL,
-    quantity DOUBLE,
-    production_rate DOUBLE,
+    quantity DOUBLE PRECISION,
+    production_rate DOUBLE PRECISION,
     controlled_by_entity_id VARCHAR REFERENCES entity(id),
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_resource_location ON resource_state(location_id);
@@ -215,11 +215,11 @@ CREATE TABLE IF NOT EXISTS narrative_node (
     parent_id VARCHAR REFERENCES narrative_node(id),
     title VARCHAR NOT NULL,
     description TEXT,
-    attributes JSON,
+    attributes JSONB,
     sort_order INTEGER NOT NULL DEFAULT 0,
     status VARCHAR NOT NULL DEFAULT 'Draft',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_narrative_project ON narrative_node(project_id);
@@ -236,8 +236,8 @@ CREATE TABLE IF NOT EXISTS plot (
     description TEXT,
     plot_type VARCHAR,
     status VARCHAR NOT NULL DEFAULT 'Draft',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_plot_project ON plot(project_id);
@@ -255,8 +255,8 @@ CREATE TABLE IF NOT EXISTS scene (
     time VARCHAR,
     scene_start_time VARCHAR,
     scene_end_time VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_scene_node ON scene(narrative_node_id);
@@ -284,7 +284,7 @@ CREATE TABLE IF NOT EXISTS scene_requirement (
     requirement_type VARCHAR NOT NULL,
     content TEXT NOT NULL,
     priority VARCHAR NOT NULL DEFAULT 'Should',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_scene_req_scene ON scene_requirement(scene_id);
@@ -301,9 +301,9 @@ CREATE TABLE IF NOT EXISTS character_arc (
     start_state TEXT,
     mid_state TEXT,
     end_state TEXT,
-    key_moments JSON,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    key_moments JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_char_arc_character ON character_arc(character_id);
@@ -321,10 +321,10 @@ CREATE TABLE IF NOT EXISTS knowledge_state (
     knows BOOLEAN NOT NULL DEFAULT FALSE,
     knowledge_level VARCHAR NOT NULL DEFAULT 'Unknown',
     source TEXT,
-    effective_from TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    effective_to TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    effective_from TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    effective_to TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_fact ON knowledge_state(fact_id);
@@ -341,7 +341,7 @@ CREATE TABLE IF NOT EXISTS revelation (
     scene_id VARCHAR NOT NULL REFERENCES scene(id),
     revelation_method VARCHAR,
     narrative_significance TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_revelation_scene ON revelation(scene_id);
@@ -370,12 +370,12 @@ CREATE TABLE IF NOT EXISTS skill (
     skill_type VARCHAR NOT NULL,
     version INTEGER NOT NULL DEFAULT 1,
     prompt_template TEXT NOT NULL,
-    input_schema JSON,
-    output_schema JSON,
-    default_params JSON,
+    input_schema JSONB,
+    output_schema JSONB,
+    default_params JSONB,
     status VARCHAR NOT NULL DEFAULT 'Draft',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ============================================================
@@ -386,11 +386,11 @@ CREATE TABLE IF NOT EXISTS skill_version (
     skill_id VARCHAR NOT NULL REFERENCES skill(id),
     version INTEGER NOT NULL,
     prompt_template TEXT NOT NULL,
-    input_schema JSON,
-    output_schema JSON,
-    default_params JSON,
+    input_schema JSONB,
+    output_schema JSONB,
+    default_params JSONB,
     changelog TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_skill_ver_skill ON skill_version(skill_id);
@@ -403,13 +403,13 @@ CREATE TABLE IF NOT EXISTS generation_task (
     project_id VARCHAR NOT NULL REFERENCES project(id),
     skill_id VARCHAR NOT NULL REFERENCES skill(id),
     scene_id VARCHAR REFERENCES scene(id),
-    input JSON NOT NULL,
-    output JSON,
+    input JSONB NOT NULL,
+    output JSONB,
     status VARCHAR NOT NULL DEFAULT 'Pending',
-    token_usage JSON,
+    token_usage JSONB,
     error TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_gen_task_project ON generation_task(project_id);
@@ -428,9 +428,9 @@ CREATE TABLE IF NOT EXISTS generation_run (
     provider VARCHAR,
     prompt_sent TEXT NOT NULL,
     response_received TEXT NOT NULL,
-    token_usage JSON,
+    token_usage JSONB,
     latency_ms BIGINT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_gen_run_task ON generation_run(task_id);
@@ -443,15 +443,15 @@ CREATE TABLE IF NOT EXISTS context_snapshot (
     project_id VARCHAR NOT NULL,
     scene_id VARCHAR NOT NULL,
     token_budget INTEGER NOT NULL,
-    l0_essential JSON,
-    l1_scene_relevant JSON,
-    l2_recent_history JSON,
-    l3_narrative_context JSON,
-    l4_character_knowledge JSON,
-    l5_world_background JSON,
-    l6_optional_supplement JSON,
+    l0_essential JSONB,
+    l1_scene_relevant JSONB,
+    l2_recent_history JSONB,
+    l3_narrative_context JSONB,
+    l4_character_knowledge JSONB,
+    l5_world_background JSONB,
+    l6_optional_supplement JSONB,
     actual_tokens INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_ctx_snap_scene ON context_snapshot(scene_id);
@@ -466,10 +466,10 @@ CREATE TABLE IF NOT EXISTS proposed_change (
     change_type VARCHAR NOT NULL,
     target_entity_id VARCHAR NOT NULL,
     description TEXT NOT NULL,
-    payload JSON NOT NULL,
+    payload JSONB NOT NULL,
     status VARCHAR NOT NULL DEFAULT 'Pending',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    resolved_at TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_prop_change_project ON proposed_change(project_id);
@@ -487,8 +487,8 @@ CREATE TABLE IF NOT EXISTS validation_run (
     changes_approved INTEGER NOT NULL DEFAULT 0,
     changes_rejected INTEGER NOT NULL DEFAULT 0,
     status VARCHAR NOT NULL DEFAULT 'Running',
-    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP
+    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_val_run_task ON validation_run(task_id);
@@ -504,7 +504,7 @@ CREATE TABLE IF NOT EXISTS validation_issue (
     severity VARCHAR NOT NULL DEFAULT 'Warning',
     message TEXT NOT NULL,
     suggestion TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_val_issue_run ON validation_issue(validation_run_id);
@@ -520,8 +520,8 @@ CREATE TABLE IF NOT EXISTS scene_document (
     word_count INTEGER,
     version INTEGER NOT NULL DEFAULT 1,
     status VARCHAR NOT NULL DEFAULT 'Draft',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_scene_doc_scene ON scene_document(scene_id);
@@ -537,7 +537,7 @@ CREATE TABLE IF NOT EXISTS timeline_event (
     narrative_node_id VARCHAR REFERENCES narrative_node(id),
     sort_key VARCHAR NOT NULL,
     label TEXT NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_timeline_project ON timeline_event(project_id);
@@ -559,8 +559,8 @@ CREATE TABLE IF NOT EXISTS character_profile (
     social_status VARCHAR,
     core_personality TEXT,
     values TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_char_profile_entity ON character_profile(entity_id);
@@ -576,9 +576,9 @@ CREATE TABLE IF NOT EXISTS character_state (
     cultivation VARCHAR,
     money VARCHAR,
     wanted BOOLEAN NOT NULL DEFAULT FALSE,
-    extra JSON,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    extra JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_char_state_entity ON character_state(entity_id);
@@ -592,8 +592,8 @@ CREATE TABLE IF NOT EXISTS character_goal (
     long_term TEXT,
     current TEXT,
     immediate TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_char_goal_entity ON character_goal(entity_id);
@@ -609,8 +609,8 @@ CREATE TABLE IF NOT EXISTS character_trait (
     description TEXT,
     parent_trait_id VARCHAR,
     intensity INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_char_trait_entity ON character_trait(entity_id);
@@ -633,8 +633,8 @@ CREATE TABLE IF NOT EXISTS faction_profile (
     internal_conflicts TEXT,
     secrets TEXT,
     modus_operandi TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_faction_profile_entity ON faction_profile(entity_id);
@@ -650,8 +650,8 @@ CREATE TABLE IF NOT EXISTS location_identity (
     climate VARCHAR,
     era VARCHAR,
     accessibility TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_loc_identity_entity ON location_identity(entity_id);
@@ -666,8 +666,8 @@ CREATE TABLE IF NOT EXISTS location_geography (
     climate TEXT,
     natural_resources TEXT,
     hazards TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ============================================================
@@ -680,8 +680,8 @@ CREATE TABLE IF NOT EXISTS location_facilities (
     facility_type VARCHAR,
     description TEXT,
     controlled_by VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_loc_facilities_entity ON location_facilities(entity_id);
@@ -695,7 +695,7 @@ CREATE TABLE IF NOT EXISTS location_rules (
     rule_text TEXT NOT NULL,
     rule_type VARCHAR,
     enforced_by VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_loc_rules_entity ON location_rules(entity_id);
@@ -710,7 +710,7 @@ CREATE TABLE IF NOT EXISTS location_threats (
     threat_type VARCHAR,
     severity VARCHAR,
     description TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_loc_threats_entity ON location_threats(entity_id);
@@ -724,7 +724,7 @@ CREATE TABLE IF NOT EXISTS location_secrets (
     secret_text TEXT NOT NULL,
     discovered_by VARCHAR,
     narrative_importance VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_loc_secrets_entity ON location_secrets(entity_id);
@@ -737,8 +737,8 @@ CREATE TABLE IF NOT EXISTS location_narrative_hooks (
     entity_id VARCHAR NOT NULL REFERENCES entity(id),
     hook_text TEXT NOT NULL,
     hook_type VARCHAR,
-    related_entities JSON,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    related_entities JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_loc_hooks_entity ON location_narrative_hooks(entity_id);
@@ -752,7 +752,7 @@ CREATE TABLE IF NOT EXISTS standard_relation_type (
     description TEXT,
     category VARCHAR,
     is_symmetric BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 预置标准关系类型
@@ -793,8 +793,8 @@ CREATE TABLE IF NOT EXISTS authorial_intent (
     perspective VARCHAR,
     narrative_distance VARCHAR,
     additional_notes TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_authorial_project ON authorial_intent(project_id);

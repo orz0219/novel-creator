@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS foreshadowing (
     introduced_at VARCHAR,
     expected_reveal_at VARCHAR,
     actual_reveal_at VARCHAR,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_foreshadowing_project ON foreshadowing(project_id);
@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS causal_relation (
     relation_type VARCHAR NOT NULL DEFAULT 'DirectCause',
     strength VARCHAR NOT NULL DEFAULT 'Strong',
     description TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_causal_project ON causal_relation(project_id);
@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS reader_knowledge (
     knowledge_level VARCHAR NOT NULL DEFAULT 'Unknown',
     source_scene_id VARCHAR,
     confidence VARCHAR NOT NULL DEFAULT 'Certain',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_reader_knowledge_project ON reader_knowledge(project_id);
@@ -65,15 +65,15 @@ CREATE INDEX IF NOT EXISTS idx_reader_knowledge_fact ON reader_knowledge(fact_id
 CREATE TABLE IF NOT EXISTS scene_contract (
     id VARCHAR PRIMARY KEY,
     scene_id VARCHAR NOT NULL,
-    required_events JSON,
-    forbidden_events JSON,
-    required_characters JSON,
-    required_facts JSON,
-    reader_learns JSON,
-    protagonist_learns JSON,
-    world_changes JSON,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    required_events JSONB,
+    forbidden_events JSONB,
+    required_characters JSONB,
+    required_facts JSONB,
+    reader_learns JSONB,
+    protagonist_learns JSONB,
+    world_changes JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_scene_contract_scene ON scene_contract(scene_id);
@@ -93,8 +93,8 @@ CREATE TABLE IF NOT EXISTS quality_score (
     world_score INTEGER,
     style_score INTEGER,
     overall_score INTEGER,
-    issues JSON,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    issues JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_quality_score_project ON quality_score(project_id);

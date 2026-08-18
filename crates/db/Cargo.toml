@@ -1,16 +1,22 @@
 [package]
 name = "db"
-description = "DuckDB storage and migration for the AI Narrative Engine"
+description = "PostgreSQL storage and migration for the AI Narrative Engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 domain = { workspace = true }
-duckdb = { workspace = true }
+sqlx = { workspace = true }
+dotenvy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

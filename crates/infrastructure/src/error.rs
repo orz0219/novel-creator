@@ -56,7 +56,7 @@ pub enum ApplicationError {
 #[derive(Error, Debug)]
 pub enum InfrastructureError {
     #[error("Database error: {0}")]
-    Database(#[from] duckdb::Error),
+    Database(String),
 
     #[error("LLM error: {0}")]
     Llm(String),

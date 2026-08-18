@@ -9,19 +9,19 @@ CREATE TABLE IF NOT EXISTS story_contract (
     project_id VARCHAR NOT NULL,
     narrative_node_id VARCHAR NOT NULL,
     mission TEXT,
-    objectives JSON,
-    required_events JSON,
-    required_revelations JSON,
-    required_character_changes JSON,
-    required_world_changes JSON,
-    forbidden_events JSON,
-    exit_conditions JSON,
-    completion_progress DOUBLE NOT NULL DEFAULT 0.0,
-    completed_events JSON,
-    completed_character_changes JSON,
-    completed_world_changes JSON,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    objectives JSONB,
+    required_events JSONB,
+    required_revelations JSONB,
+    required_character_changes JSONB,
+    required_world_changes JSONB,
+    forbidden_events JSONB,
+    exit_conditions JSONB,
+    completion_progress DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    completed_events JSONB,
+    completed_character_changes JSONB,
+    completed_world_changes JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_story_contract_project ON story_contract(project_id);

@@ -39,8 +39,10 @@ impl JobStatus {
                 | (JobStatus::Running, JobStatus::Completed)
                 | (JobStatus::Running, JobStatus::Failed)
                 | (JobStatus::Running, JobStatus::Timeout)
+                | (JobStatus::Running, JobStatus::Cancelled)
                 | (JobStatus::WaitingInput, JobStatus::Running)
                 | (JobStatus::WaitingInput, JobStatus::Cancelled)
+                | (JobStatus::Timeout, JobStatus::Cancelled)
         )
     }
 }
