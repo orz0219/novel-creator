@@ -36,7 +36,13 @@ pub mod narrative_thread;
 pub mod novel_snapshot;
 
 // Re-export commonly used types
+pub mod memory;
+pub mod agent_run;
+pub mod system_event;
 pub use entity::*;
+pub use system_event::*;
+pub use agent_run::*;
+pub use memory::*;
 pub use world::*;
 pub use character::*;
 pub use faction::*;

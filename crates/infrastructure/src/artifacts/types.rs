@@ -4,24 +4,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Artifact type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ArtifactType {
-    /// LLM response
     LlmResponse,
-    /// Context snapshot
     ContextSnapshot,
-    /// Draft content
     Draft,
-    /// Prompt template
     Prompt,
-    /// Generated image
     Image,
-    /// Other
     Other(String),
 }
 
-/// Artifact - stored content outside DuckDB
+/// Artifact - stored content outside the database (large files on disk)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artifact {
     pub id: Uuid,

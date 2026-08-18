@@ -107,6 +107,9 @@ pub async fn validate_schema(pool: &PgPool) -> Result<Vec<String>> {
         "location_connection",
         "narrative_budget",
         "novel_state_snapshot",
+        "memories",
+        "agent_runs",
+        "system_events",
         "narrative_thread",
         "narrative_thread_participant",
     ];

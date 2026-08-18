@@ -1,4 +1,4 @@
-//! Database layer - DuckDB implementations with connection pooling
+//! Database layer - PostgreSQL implementations with connection pooling
 
 pub mod connection;
 pub mod unit_of_work;

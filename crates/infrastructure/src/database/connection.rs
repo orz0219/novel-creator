@@ -1,89 +1,53 @@
-//! Database connection pool for DuckDB
+//! Database connection pool for PostgreSQL
 
-use duckdb::{Connection, DuckdbConnectionManager};
-use r2d2::Pool;
-use std::sync::Arc;
+use anyhow::{Context, Result};
+use sqlx::postgres::{PgPool, PgPoolOptions};
+use std::time::Duration;
 use tracing::info;
 
-/// Database connection pool wrapper
+/// Database connection pool wrapper for PostgreSQL
+#[derive(Clone)]
 pub struct DatabasePool {
-    pool: Pool<DuckdbConnectionManager>,
+    pool: PgPool,
 }
 
 impl DatabasePool {
-    /// Create a new database connection pool
-    pub fn new(database_path: &str, max_connections: u32) -> Result<Self, Box<dyn std::error::Error>> {
-        let manager = DuckdbConnectionManager::file(database_path)?;
-        let pool = Pool::builder()
-            .max_size(max_connections)
-            .build(manager)
-            .map_err(|e| format!("Failed to create connection pool: {}", e))?;
+    /// Create pool from DATABASE_URL environment variable
+    pub async fn from_env() -> Result<Self> {
+        let url = std::env::var("DATABASE_URL").context("DATABASE_URL not set")?;
+        Self::new(&url, 10, 2).await
+    }
 
-        info!("Database pool created with {} connections to {}", max_connections, database_path);
-
+    /// Create pool with custom config
+    pub async fn new(database_url: &str, max_conn: u32, min_conn: u32) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_conn)
+            .min_connections(min_conn)
+            .acquire_timeout(Duration::from_secs(30))
+            .idle_timeout(Duration::from_secs(300))
+            .max_lifetime(Duration::from_secs(1800))
+            .connect(database_url)
+            .await
+            .context(format!("Failed to connect to PostgreSQL: {}", database_url))?;
+        info!("PostgreSQL pool created (max={}, min={})", max_conn, min_conn);
         Ok(Self { pool })
     }
 
-    /// Create an in-memory database pool (for testing)
-    pub fn new_in_memory(max_connections: u32) -> Result<Self, Box<dyn std::error::Error>> {
-        let manager = DuckdbConnectionManager::file(":memory:")?;
-        let pool = Pool::builder()
-            .max_size(max_connections)
-            .build(manager)
-            .map_err(|e| format!("Failed to create in-memory pool: {}", e))?;
+    pub fn pool(&self) -> &PgPool { &self.pool }
 
-        info!("In-memory database pool created with {} connections", max_connections);
-
-        Ok(Self { pool })
+    pub async fn health_check(&self) -> Result<()> {
+        sqlx::query("SELECT 1").execute(&self.pool).await.context("Health check failed")?;
+        Ok(())
     }
 
-    /// Get a connection from the pool
-    pub fn get(&self) -> Result<r2d2::PooledConnection<DuckdbConnectionManager>, Box<dyn std::error::Error>> {
-        self.pool.get().map_err(|e| format!("Failed to get connection: {}", e).into())
-    }
+    pub async fn close(&self) { self.pool.close().await; }
 
-    /// Get pool statistics
     pub fn statistics(&self) -> PoolStatistics {
-        PoolStatistics {
-            max_connections: self.pool.max_size(),
-            idle_connections: self.pool.idle(),
-        }
+        PoolStatistics { size: self.pool.size(), idle: self.pool.num_idle() }
     }
 }
 
-/// Pool statistics
 pub struct PoolStatistics {
-    pub max_connections: u32,
-    pub idle_connections: u32,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_in_memory_pool() {
-        let pool = DatabasePool::new_in_memory(5).unwrap();
-        let stats = pool.statistics();
-        assert_eq!(stats.max_connections, 5);
-
-        // Get a connection
-        let conn = pool.get().unwrap();
-        conn.execute_batch("CREATE TABLE test (id INTEGER, name VARCHAR)").unwrap();
-        conn.execute_batch("INSERT INTO test VALUES (1, 'hello')").unwrap();
-    }
-
-    #[test]
-    fn test_multiple_connections() {
-        let pool = DatabasePool::new_in_memory(3).unwrap();
-
-        let conn1 = pool.get().unwrap();
-        let conn2 = pool.get().unwrap();
-
-        conn1.execute_batch("CREATE TABLE shared (id INTEGER)").unwrap();
-        conn2.execute_batch("INSERT INTO shared VALUES (1)").unwrap();
-
-        let stats = pool.statistics();
-        assert_eq!(stats.max_connections, 3);
-    }
+    pub size: u32,
+    pub idle: usize,
 }
