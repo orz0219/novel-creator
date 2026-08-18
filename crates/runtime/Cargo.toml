@@ -1,0 +1,18 @@
+[package]
+name = "runtime"
+description = "Runtime components for the AI Narrative Engine (Context Engine, Validator, Extractors)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+domain = { workspace = true }
+db = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+application = { workspace = true }

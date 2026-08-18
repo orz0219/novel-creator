@@ -1,0 +1,31 @@
+[package]
+name = "narrative-engine"
+description = "AI Narrative Engine - a general-purpose novel generation framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "narrative-engine"
+path = "src/main.rs"
+
+[lib]
+name = "narrative_engine"
+path = "src/lib.rs"
+
+[dependencies]
+domain = { workspace = true }
+db = { workspace = true }
+application = { workspace = true }
+runtime = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

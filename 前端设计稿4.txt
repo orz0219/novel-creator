@@ -1,0 +1,1931 @@
+可以。我建议这次直接把前面讨论的内容**收敛成一份真正能作为开发基线的《Novel Engine Architecture & Development Specification》**。
+
+我会刻意做两件事：
+
+1. **冻结 Core 架构**，避免继续无限加功能。
+2. 明确 **V1 / V2 / Future**，让 CodeAgent 知道什么现在必须做、什么只能预留、什么暂时不要碰。
+
+下面这份可以直接作为后续 CodeAgent 的项目级技术规范。
+
+# Novel Engine
+
+## Architecture & Development Specification
+
+> 版本：V1.0
+> 定位：小说创作 IDE / Story Engine Client
+> 核心理念：**让小说世界成为一个可持续运行、可验证、可追踪、可演化的系统。**
+
+---
+
+# 1. 产品定位
+
+Novel Engine 不是传统的小说管理后台，也不是简单的 AI Chat + 小说编辑器。
+
+它是一个：
+
+> **World State + Story State + Context Engine + AI Generation + Validation + Versioning**
+
+组成的小说创作工作台。
+
+用户面对的不是一个聊天机器人，而是一个：
+
+> **正在运行的小说世界。**
+
+核心工作流：
+
+```text
+World
+  ↓
+Story
+  ↓
+Context
+  ↓
+Generation
+  ↓
+Proposal
+  ↓
+Validation
+  ↓
+Command
+  ↓
+Commit
+  ↓
+Event
+  ↓
+Version
+```
+
+---
+
+# 2. 技术基线
+
+## Frontend
+
+```text
+Vue 3
+TypeScript
+Vite
+Pinia
+Vue Router
+CSS Variables / Tailwind CSS
+```
+
+前端定位：
+
+> UI、交互、编辑、可视化、状态展示。
+
+前端不得承担核心业务规则。
+
+---
+
+## Backend
+
+```text
+Rust
+Tokio
+Axum
+Serde
+Tower
+```
+
+后端定位：
+
+> Domain Logic、业务规则、Context、Validation、Generation Orchestration、Persistence。
+
+---
+
+## Database
+
+```text
+DuckDB
+```
+
+数据库是持久化实现，不是 Domain Model。
+
+前端不得直接依赖数据库表结构。
+
+---
+
+## Communication
+
+普通请求：
+
+```text
+HTTP / REST-like API
+```
+
+长时间 AI / Engine Task：
+
+```text
+SSE
+```
+
+未来如有强实时协作需求，再考虑 WebSocket。
+
+V1 不需要 WebSocket。
+
+---
+
+# 3. 总体架构
+
+```text
+                    ┌──────────────────┐
+                    │    Vue Client    │
+                    └────────┬─────────┘
+                             │
+                    HTTP / SSE
+                             │
+                    ┌────────▼─────────┐
+                    │   Rust API       │
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │ Application Layer │
+                    └────────┬─────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        │                    │                    │
+        ▼                    ▼                    ▼
+     World Domain       Story Domain        Context Engine
+        │                    │                    │
+        └────────────────────┼────────────────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │ Generation       │
+                    │ Proposal         │
+                    │ Validation       │
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │ Command / Event  │
+                    │ Version / Snap   │
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │     DuckDB       │
+                    └──────────────────┘
+```
+
+---
+
+# 4. 核心架构原则
+
+## 4.1 前端不拥有业务真相
+
+Vue 保存：
+
+```text
+Workspace State
+UI State
+Temporary Editing State
+Cache
+```
+
+Rust 保存：
+
+```text
+Domain State
+Business Rules
+Validation Rules
+Canonical State
+```
+
+---
+
+# 5. Domain State 与 Workspace State
+
+必须严格区分。
+
+## Domain State
+
+代表小说世界真实状态：
+
+```text
+Character
+Location
+Faction
+Event
+Timeline
+Story
+Scene
+Relationship
+Knowledge
+Constraint
+Proposal
+```
+
+---
+
+## Workspace State
+
+代表用户当前如何使用软件：
+
+```text
+currentProject
+currentChapter
+selectedEntity
+openedPanels
+editorSelection
+graphZoom
+graphPosition
+activeTab
+filters
+drawerState
+```
+
+Workspace State 不得污染 Domain State。
+
+---
+
+# 6. Core Domain Model
+
+Novel Engine 第一阶段只冻结以下核心 Domain。
+
+```text
+Entity
+State
+Relationship
+Timeline
+Knowledge
+Constraint
+Context
+Generation
+Proposal
+Validation
+Command
+Event
+Version
+Snapshot
+```
+
+---
+
+# 7. Entity
+
+所有具有独立身份、可以被引用的对象统一抽象为 Entity。
+
+例如：
+
+```text
+Character
+Location
+Faction
+Item
+Event
+Story
+Chapter
+Scene
+Thread
+Foreshadow
+```
+
+每个 Entity 必须具有稳定 ID。
+
+推荐：
+
+```text
+entity_id
+entity_type
+created_at
+updated_at
+version
+```
+
+Entity ID 一旦创建，不允许因为名称变化而改变。
+
+---
+
+# 8. State
+
+State 表示 Entity 在某个时间点的状态。
+
+例如 Character：
+
+```text
+alive
+location
+health
+age
+emotion
+inventory
+relationships
+```
+
+重要原则：
+
+> 不要把所有状态都简单存成静态字段。
+
+可以由：
+
+```text
+Canonical State
++
+Timeline
++
+Events
+```
+
+推导：
+
+```text
+Derived State
+```
+
+---
+
+# 9. Canonical State 与 Derived State
+
+## Canonical State
+
+真正需要持久化的事实：
+
+```text
+出生日期
+死亡事件
+移动事件
+关系变化
+获得物品事件
+```
+
+## Derived State
+
+根据事实计算：
+
+```text
+当前年龄
+当前地点
+当前持有物
+当前状态
+```
+
+尽量避免重复存储 Derived State。
+
+目标：
+
+> **减少世界状态不一致。**
+
+---
+
+# 10. Relationship
+
+Relationship 是一等 Domain 对象。
+
+例如：
+
+```text
+Character → Character
+Character → Location
+Character → Faction
+Event → Location
+Story → Character
+```
+
+关系必须具有：
+
+```text
+source
+target
+type
+state
+time_range
+metadata
+```
+
+例如：
+
+```text
+林凡
+  --enemy-->
+王家
+```
+
+关系也可以发生变化。
+
+---
+
+# 11. Timeline
+
+Timeline 是 Core Domain，而不是简单 UI 时间线。
+
+至少需要支持：
+
+```text
+World Time
+Event Time
+Story Time
+Scene Time
+Character Experience Time
+```
+
+时间必须能够参与 Context 和 Validation。
+
+例如：
+
+```text
+当前 Scene 时间：
+381-03-12 18:30
+
+事件：
+黑石城大火
+381-03-10
+```
+
+系统可以据此判断：
+
+```text
+角色是否已经经历该事件？
+角色是否可能知道该事件？
+某人物此时是否已经死亡？
+```
+
+---
+
+# 12. Knowledge
+
+Character Knowledge 是核心能力。
+
+至少区分：
+
+```text
+Known
+Unknown
+Suspected
+False Belief
+```
+
+例如：
+
+```text
+林凡
+
+Known:
+王家正在追杀自己
+
+Unknown:
+王家真正目的
+
+Suspected:
+苏晚晴与王家有关
+
+False Belief:
+城主已经死亡
+```
+
+Knowledge 必须具有时间维度。
+
+因为：
+
+> 角色现在知道什么，不代表角色过去知道什么。
+
+---
+
+# 13. Constraint
+
+Constraint 表示世界必须遵守的规则。
+
+分级：
+
+```text
+System
+World
+Story
+Character
+Scene
+```
+
+例如：
+
+```text
+World:
+死人不能复活
+
+Story:
+第三卷结束前不能揭露幕后 Boss
+
+Character:
+林凡不会主动杀无辜者
+
+Scene:
+当前场景必须发生在黑石城
+```
+
+Constraint 不只是提示词。
+
+它必须能够参与：
+
+```text
+Generation
+Validation
+Proposal
+Commit
+```
+
+---
+
+# 14. Story Domain
+
+Story 层级：
+
+```text
+Project
+ └── Volume
+      └── Arc
+           └── Chapter
+                └── Scene
+```
+
+扩展对象：
+
+```text
+Story Thread
+Foreshadow
+Plot Event
+Narrative Goal
+```
+
+---
+
+# 15. Scene 是写作的基本单元
+
+Chapter 是组织结构。
+
+Scene 是真正的创作执行单元。
+
+Scene 至少包含：
+
+```text
+scene_id
+chapter_id
+time
+location
+characters
+purpose
+story_threads
+content
+state
+```
+
+未来 AI Generation 优先以 Scene 为上下文边界。
+
+---
+
+# 16. Editor Model
+
+第一版可以使用成熟的富文本 / Markdown 编辑器。
+
+但内部架构不得把正文永久绑定为单纯 textarea。
+
+目标模型：
+
+```text
+Chapter
+ └── Scene
+      ├── Paragraph
+      ├── Dialogue
+      ├── Action
+      ├── Narration
+      └── ...
+```
+
+这样未来可以实现：
+
+```text
+段落级 AI
+角色出场统计
+Dialogue Analysis
+Context Mapping
+局部重写
+局部生成
+```
+
+---
+
+# 17. Entity Reference
+
+正文中的实体应该可以被识别为内部引用。
+
+例如：
+
+```text
+林凡
+```
+
+对应：
+
+```text
+Character:char_xxx
+```
+
+```text
+黑石城
+```
+
+对应：
+
+```text
+Location:loc_xxx
+```
+
+UI 可以：
+
+```text
+点击实体
+    ↓
+打开 Inspector
+```
+
+这也是 Context 自动构建的重要基础。
+
+---
+
+# 18. Context Engine
+
+Context 不等于 Prompt。
+
+Context 是一个结构化对象：
+
+```text
+Context
+├── Entities
+├── Relationships
+├── Timeline
+├── Knowledge
+├── Constraints
+├── Story State
+├── History
+└── Selection Reasons
+```
+
+Context Engine 负责：
+
+```text
+用户当前目标
++
+当前 Scene
++
+Story State
++
+World State
++
+Timeline
++
+Knowledge
++
+Constraints
++
+Relevant History
+```
+
+生成最终 Context。
+
+---
+
+# 19. Context Selection
+
+Context 必须可解释。
+
+例如：
+
+```text
+林凡
+
+Relevance: 0.94
+
+Reasons:
+- 当前 Scene 主角
+- 当前 Story Thread 参与者
+- 当前 Location 相关角色
+- 最近 3 个 Scene 出现
+```
+
+系统必须尽可能告诉用户：
+
+> 为什么这个 Entity 被加入 Context？
+
+---
+
+# 20. Context Policy
+
+Context 至少支持：
+
+```text
+Automatic
+Pinned
+Excluded
+```
+
+最终：
+
+```text
+Final Context
+=
+Automatic
++
+Pinned
+-
+Excluded
+```
+
+Pinned：
+
+> 用户明确要求 AI 必须知道。
+
+Excluded：
+
+> 用户明确要求当前任务不要加入。
+
+---
+
+# 21. Generation
+
+Generation 是任务，不是简单 API 调用。
+
+模型：
+
+```text
+GenerationTask
+```
+
+包含：
+
+```text
+task_id
+type
+target
+context
+model
+parameters
+status
+result
+validation
+```
+
+例如：
+
+```text
+Generate Scene
+Rewrite Selection
+Expand Paragraph
+Generate Location
+Analyze Character
+Check Consistency
+```
+
+---
+
+# 22. Proposal
+
+AI 不允许直接修改 Canonical Domain State。
+
+统一流程：
+
+```text
+AI
+ ↓
+Proposal
+ ↓
+Validation
+ ↓
+User Review
+ ↓
+Accept
+ ↓
+Command
+ ↓
+Commit
+```
+
+Proposal 必须能够展示：
+
+```text
+Added
+Removed
+Modified
+```
+
+以及：
+
+```text
+Reason
+Evidence
+Validation
+Risk
+```
+
+---
+
+# 23. Command
+
+所有会改变 Domain State 的操作统一抽象为 Command。
+
+例如：
+
+```text
+CreateCharacter
+UpdateCharacter
+MoveCharacter
+CreateLocation
+CreateRelationship
+CreateScene
+AcceptProposal
+RejectProposal
+```
+
+统一：
+
+```text
+Command
+ ↓
+Validate
+ ↓
+Execute
+ ↓
+Event
+ ↓
+Version
+```
+
+AI 和用户最终都应该进入同一套 Domain Mutation Pipeline。
+
+---
+
+# 24. Event
+
+Command 成功后产生 Event。
+
+例如：
+
+```text
+CharacterCreated
+CharacterUpdated
+CharacterMoved
+RelationshipCreated
+SceneCreated
+ProposalAccepted
+```
+
+Event 的意义：
+
+> 记录世界发生过什么。
+
+V1 不要求完整 Event Sourcing。
+
+但 Domain API 必须为未来 Event Log 保留接口。
+
+---
+
+# 25. Version
+
+Entity 需要版本。
+
+例如：
+
+```text
+Character #123
+
+v15
+v16
+v17
+```
+
+Version 用于：
+
+```text
+History
+Diff
+Undo
+Audit
+Proposal
+Rollback
+```
+
+---
+
+# 26. Snapshot
+
+Snapshot 是整个项目的世界状态快照。
+
+例如：
+
+```text
+Snapshot #42
+
+World:
+128 Characters
+43 Locations
+17 Factions
+
+Story:
+Volume 3
+Chapter 127
+
+Timeline:
+381-03-12
+```
+
+用途：
+
+```text
+Rollback
+Compare
+Branch
+Backup
+Debug
+```
+
+---
+
+# 27. Branch
+
+V1 暂不完整实现 Branch。
+
+但是 Domain 架构需要预留：
+
+```text
+Main
+ ├── Experiment A
+ ├── Experiment B
+ └── Alternative Ending
+```
+
+Branch 可以基于 Snapshot 创建。
+
+未来支持：
+
+```text
+Create Branch
+Experiment
+Compare
+Merge
+Discard
+```
+
+---
+
+# 28. Validation
+
+Validation 分层。
+
+```text
+Schema Validation
+Domain Validation
+World Constraint Validation
+Timeline Validation
+Story Validation
+Character Validation
+```
+
+例如：
+
+```text
+ERROR:
+角色在死亡后又出现在 Scene 127
+
+WARNING:
+角色行为与既有 Character Constraint 不一致
+
+INFO:
+当前 Scene 使用了未固定的地点描述
+```
+
+Validation 必须产生结构化结果。
+
+---
+
+# 29. Frontend 页面架构
+
+V1 页面：
+
+```text
+Home
+Project Dashboard
+World
+Story
+Graph
+Writing Editor
+Context
+Proposal
+History
+```
+
+---
+
+# 30. World UI
+
+```text
+World
+├── Characters
+├── Locations
+├── Factions
+├── Items
+├── Rules
+├── Relationships
+└── Timeline
+```
+
+主要交互：
+
+```text
+List
+Search
+Filter
+Graph
+Inspector
+Edit
+History
+```
+
+---
+
+# 31. Story UI
+
+```text
+Story
+├── Volumes
+├── Arcs
+├── Chapters
+├── Scenes
+├── Threads
+└── Foreshadow
+```
+
+核心 UI：
+
+```text
+Tree
+Board
+Timeline
+Inspector
+```
+
+---
+
+# 32. Writing Workspace
+
+推荐布局：
+
+```text
+┌──────────┬────────────────────────┬──────────────┐
+│ Story    │                        │ Context      │
+│ Tree     │        Editor          │ Inspector    │
+│          │                        │              │
+│ Volume   │        Scene           │ Characters   │
+│ Arc      │                        │ Locations    │
+│ Chapter  │                        │ Timeline     │
+│ Scene    │                        │ Threads      │
+│          │                        │ Constraints  │
+└──────────┴────────────────────────┴──────────────┘
+```
+
+核心原则：
+
+> **编辑器是主角，AI 是工作流能力。**
+
+---
+
+# 33. Inspector
+
+统一 Inspector 系统。
+
+支持：
+
+```text
+Character Inspector
+Location Inspector
+Scene Inspector
+Event Inspector
+Context Inspector
+Proposal Inspector
+History Inspector
+```
+
+Inspector 应该成为整个前端最重要的复用组件之一。
+
+---
+
+# 34. Graph
+
+Graph 用于：
+
+```text
+Character
+Location
+Faction
+Event
+Story Thread
+Relationship
+```
+
+支持：
+
+```text
+Zoom
+Pan
+Filter
+Select
+Expand
+Collapse
+Focus
+```
+
+Graph 只是可视化层。
+
+Graph 不负责修改 Domain Rule。
+
+---
+
+# 35. AI UI
+
+不要以“大聊天框”为核心。
+
+AI 主要通过：
+
+```text
+Command Palette
+Context Actions
+Selection Actions
+Generation Panel
+Proposal Panel
+```
+
+进入。
+
+例如选择正文：
+
+```text
+AI
+├── Rewrite
+├── Expand
+├── Shorten
+├── Continue
+├── Change Tone
+├── Analyze
+└── Check Consistency
+```
+
+---
+
+# 36. Command Palette
+
+快捷键：
+
+```text
+⌘K / Ctrl+K
+```
+
+支持：
+
+```text
+创建角色
+创建地点
+搜索人物
+打开章节
+生成 Scene
+检查当前剧情
+查看 Context
+查看 Proposal
+跳转实体
+```
+
+---
+
+# 37. Generation Inspector
+
+每次 AI Generation 都应该可以查看：
+
+```text
+Model
+Context
+Context Tokens
+Entities
+Constraints
+Story State
+Parameters
+Result
+Validation
+Proposal
+```
+
+目标：
+
+> AI 输出必须尽可能可解释。
+
+---
+
+# 38. Activity Center
+
+统一显示后台任务：
+
+```text
+Generation
+Validation
+Context Building
+Import
+Export
+Indexing
+```
+
+例如：
+
+```text
+✓ Scene Generation completed
+
+✓ Validation completed
+
+⚠ 1 warning
+
+● Building Context...
+```
+
+---
+
+# 39. Search
+
+V1：
+
+```text
+Exact Search
+Fuzzy Search
+Entity Search
+Content Search
+```
+
+V2：
+
+```text
+Semantic Search
+```
+
+不要第一版就引入复杂向量数据库。
+
+---
+
+# 40. API 分层
+
+前端：
+
+```text
+api/
+├── project.ts
+├── world.ts
+├── character.ts
+├── location.ts
+├── story.ts
+├── context.ts
+├── generation.ts
+├── proposal.ts
+├── validation.ts
+└── history.ts
+```
+
+禁止在 Vue Component 内直接散落：
+
+```text
+fetch(...)
+```
+
+统一通过 API Layer。
+
+---
+
+# 41. HTTP 与 SSE
+
+CRUD：
+
+```text
+HTTP
+```
+
+长任务：
+
+```text
+SSE
+```
+
+Generation Event 示例：
+
+```text
+task.created
+context.building
+context.ready
+generation.started
+generation.progress
+generation.completed
+validation.started
+validation.completed
+proposal.created
+```
+
+---
+
+# 42. Pinia
+
+Pinia 主要管理：
+
+```text
+projectStore
+worldStore
+storyStore
+contextStore
+generationStore
+proposalStore
+editorStore
+uiStore
+```
+
+但必须明确：
+
+> Pinia 不是 Domain Database。
+
+它是：
+
+```text
+Cache
+Workspace State
+Temporary State
+UI State
+```
+
+---
+
+# 43. 前端目录
+
+推荐：
+
+```text
+src/
+├── app/
+├── layouts/
+├── pages/
+├── features/
+├── components/
+├── stores/
+├── api/
+├── types/
+├── composables/
+└── styles/
+```
+
+Feature 按业务能力组织：
+
+```text
+features/
+├── character/
+├── location/
+├── faction/
+├── timeline/
+├── story-thread/
+├── foreshadow/
+├── context/
+├── generation/
+├── proposal/
+└── validation/
+```
+
+---
+
+# 44. Design System
+
+视觉方向：
+
+```text
+克制
+安静
+编辑器
+出版物
+东方感
+```
+
+避免：
+
+```text
+赛博朋克
+霓虹
+过度 AI 科技感
+传统 SaaS 后台感
+```
+
+基础设计 Token：
+
+```text
+Background
+Panel
+Panel Secondary
+Border
+Text
+Text Secondary
+Primary
+Warning
+Error
+Success
+```
+
+全部使用 CSS Variables。
+
+---
+
+# 45. V1 范围
+
+V1 必须完成：
+
+```text
+Project
+World
+Character
+Location
+Faction
+Timeline
+
+Volume
+Arc
+Chapter
+Scene
+Thread
+Foreshadow
+
+Editor
+Graph
+Inspector
+
+Context
+Generation
+Proposal
+Validation
+
+Command
+Version
+History
+```
+
+---
+
+# 46. V1 暂不完整实现
+
+只预留架构：
+
+```text
+Branch
+Snapshot UI
+Semantic Search
+复杂 Knowledge Graph
+自动剧情模拟
+多 Agent 协作
+多人实时协作
+高级 Event Sourcing
+```
+
+---
+
+# 47. V2
+
+V2 可以加入：
+
+```text
+Branch
+Snapshot UI
+Semantic Search
+高级 Knowledge Graph
+自动剧情模拟
+复杂 AI Agent
+批量 Generation
+高级 Timeline
+Story Simulation
+```
+
+---
+
+# 48. Future
+
+暂不设计具体实现：
+
+```text
+多人协作
+实时同步
+云端项目
+插件系统
+第三方模型市场
+复杂自动 Agent 社会
+```
+
+---
+
+# 49. 工程边界
+
+必须遵守：
+
+```text
+Vue
+    ↓
+API
+    ↓
+Rust Application
+    ↓
+Domain
+    ↓
+Persistence
+```
+
+禁止：
+
+```text
+Vue
+ ↓
+Database
+```
+
+禁止：
+
+```text
+Vue
+ ↓
+业务规则
+```
+
+禁止：
+
+```text
+AI
+ ↓
+直接修改 Database
+```
+
+统一：
+
+```text
+AI
+ ↓
+Proposal
+ ↓
+Validation
+ ↓
+Command
+ ↓
+Domain
+ ↓
+Event
+ ↓
+Persistence
+```
+
+---
+
+# 50. CodeAgent 开发原则
+
+CodeAgent 不应该一次性生成整个项目。
+
+必须遵循：
+
+```text
+Analyze
+ ↓
+Plan
+ ↓
+Implement
+ ↓
+Compile
+ ↓
+Test
+ ↓
+Inspect
+ ↓
+Fix
+```
+
+每次修改前：
+
+> 优先读取当前真实代码。
+
+不要依赖上一轮 Agent 自己声称：
+
+```text
+“我已经修改了 xxx”
+```
+
+因为文件才是当前真实状态。
+
+---
+
+# 51. CodeAgent 修改原则
+
+每次修改：
+
+```text
+1. 找到真实实现
+2. 理解调用链
+3. 最小范围修改
+4. 保持现有架构
+5. 编译
+6. 测试
+7. 检查副作用
+```
+
+禁止为了完成局部功能：
+
+```text
+重构整个项目
+重新设计已有架构
+随意新增依赖
+绕过 Domain Layer
+复制业务逻辑
+```
+
+---
+
+# 52. 当前开发优先级
+
+严格按照：
+
+```text
+P0
+Core Domain
+API
+Project
+World
+Story
+Editor
+```
+
+然后：
+
+```text
+P1
+Context
+Generation
+Proposal
+Validation
+Inspector
+History
+```
+
+然后：
+
+```text
+P2
+Graph
+Command Palette
+Activity Center
+高级搜索
+```
+
+最后：
+
+```text
+P3
+Branch
+Snapshot UI
+Semantic Search
+Simulation
+```
+
+---
+
+# 53. 最重要的开发策略
+
+不要先追求：
+
+```text
+“功能最多”
+```
+
+而应该先确保：
+
+```text
+World State 正确
+        ↓
+Story State 正确
+        ↓
+Context 正确
+        ↓
+AI Generation 可控
+        ↓
+Proposal 可审查
+        ↓
+Validation 可靠
+        ↓
+Commit 可追踪
+        ↓
+History 可恢复
+```
+
+这条链路是 Novel Engine 的真正核心。
+
+---
+
+# 54. Novel Engine 的核心价值
+
+最终产品不是：
+
+> AI 帮我写小说。
+
+而是：
+
+> **AI 在一个结构化、可验证、可追踪的小说世界中帮助我创作。**
+
+因此最重要的资产不是：
+
+```text
+Prompt
+```
+
+而是：
+
+```text
+World State
+Story State
+Timeline
+Knowledge
+Constraint
+Context
+History
+```
+
+AI 是运行在这些数据之上的能力层。
+
+---
+
+# 55. 当前架构冻结点
+
+从现在开始，除非出现明确的架构问题，不再继续向 Core 增加新的核心概念。
+
+Core 冻结为：
+
+```text
+Entity
+State
+Relationship
+Timeline
+Knowledge
+Constraint
+
+Story
+Scene
+
+Context
+Generation
+Proposal
+Validation
+
+Command
+Event
+Version
+Snapshot
+```
+
+其中：
+
+```text
+Snapshot
+Branch
+Event Sourcing
+```
+
+第一版可以只做接口与基础能力预留。
+
+---
+
+# 56. 最终架构
+
+```text
+                           NOVEL ENGINE
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+      WORLD                   STORY                   TIME
+        │                       │                       │
+    Character                Volume                 Timeline
+    Location                 Arc                    Events
+    Faction                  Chapter                States
+    Item                     Scene
+        │                       │
+        └───────────────┬───────┘
+                        │
+                     ENTITY
+                        │
+              ┌─────────┼─────────┐
+              │         │         │
+            State   Knowledge  Relation
+              │         │         │
+              └─────────┼─────────┘
+                        │
+                    CONTEXT
+                        │
+              ┌─────────┼─────────┐
+              │         │         │
+           Auto       Pin      Exclude
+              └─────────┼─────────┘
+                        │
+                    GENERATION
+                        │
+                    PROPOSAL
+                        │
+                   VALIDATION
+                        │
+                     COMMAND
+                        │
+                      EVENT
+                        │
+                    VERSION
+                        │
+                   SNAPSHOT
+                        │
+                    STORAGE
+
+
+                      VUE CLIENT
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+      WORLD            STORY            EDITOR
+        │                │                │
+      Graph            Board            Scene
+      List             Tree             Chapter
+      Timeline          Thread           Selection
+        │                │                │
+        └────────────────┼────────────────┘
+                         │
+                      INSPECTOR
+                         │
+          ┌──────────────┼──────────────┐
+          │              │              │
+       Context        Proposal        History
+          │              │              │
+          └──────────────┼──────────────┘
+                         │
+                  COMMAND PALETTE
+                         │
+                    AI WORKFLOW
+```
+
+---
+
+# 57. 开发完成的判断标准
+
+Novel Engine V1 不以“页面做完”为完成标准。
+
+而以这条链路真正跑通为完成标准：
+
+```text
+创建 Project
+    ↓
+创建 World
+    ↓
+创建 Character / Location / Faction
+    ↓
+建立 Relationship
+    ↓
+建立 Timeline
+    ↓
+创建 Volume / Arc / Chapter / Scene
+    ↓
+进入 Editor
+    ↓
+Context Engine 自动构建 Context
+    ↓
+用户 Pin / Exclude Context
+    ↓
+执行 AI Generation
+    ↓
+生成 Proposal
+    ↓
+Validation
+    ↓
+用户 Review
+    ↓
+Accept
+    ↓
+Command
+    ↓
+Commit
+    ↓
+Event
+    ↓
+Version
+    ↓
+History 可查看
+```
+
+如果这一条链路完整、稳定、可追踪，那么 Novel Engine V1 就已经成立。
+
+否则，即使有：
+
+```text
+Graph
+漂亮 UI
+几十个 AI 功能
+几十个设置页面
+```
+
+也不算真正完成。
+
+---
+
+# 58. 一句话架构原则
+
+> **World 是事实，Story 是结构，Timeline 是时间，Knowledge 是认知，Constraint 是规则，Context 是 AI 看到的世界，Generation 是 AI 的推演，Proposal 是 AI 的建议，Validation 是系统的审查，Command 是状态变化的入口，Event 是变化的记录，Version 是对象历史，Snapshot 是世界快照。**
+
+而：
+
+> **Vue 是这个世界的工作台，Rust 是这个世界的运行引擎。**
+
+这就是 Novel Engine 的最终技术定位。
+

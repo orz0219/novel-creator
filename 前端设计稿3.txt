@@ -1,0 +1,675 @@
+有，而且这次我会再往**“产品最终形态 + 工程落地”**审一遍。
+
+前面那一轮解决的是 **架构能力**；这一轮我更关注：
+
+> **哪些东西现在不设计，未来一定会返工？哪些东西虽然现在看不见，但会决定 Novel Engine 能不能真正长期使用？**
+
+我认为还有 **9 个值得补充的点**。
+
+---
+
+## 1. 增加「Snapshot」概念
+
+前面我们已经有：
+
+```text
+Command
+   ↓
+Event
+   ↓
+Version
+```
+
+但对于小说项目，我还建议增加：
+
+```text
+Snapshot
+```
+
+它和 Version 不完全一样。
+
+### Version
+
+描述：
+
+> 某一个对象发生了什么变化。
+
+例如：
+
+```text
+Character #12
+
+v17
+v16
+v15
+```
+
+### Snapshot
+
+描述：
+
+> **整个小说世界在某一个时间点是什么状态。**
+
+例如：
+
+```text
+Snapshot #42
+
+World
+  Characters: 128
+  Locations: 43
+  Factions: 17
+
+Story
+  Volume: 3
+  Chapter: 127
+
+Timeline
+  Current Event: 381-03-12
+```
+
+这样以后你可以做非常有价值的东西：
+
+```text
+恢复到昨天晚上
+```
+
+或者：
+
+```text
+比较：
+第三卷完成时
+vs
+现在
+```
+
+甚至：
+
+```text
+从这个世界状态创建一个分支
+```
+
+---
+
+# 2. 正式引入 Branch
+
+这个我认为非常适合 Novel Engine。
+
+因为写小说经常出现：
+
+> “如果这里这么写会怎么样？”
+
+例如：
+
+```text
+当前世界
+    │
+    ├── Main Timeline
+    │
+    └── Experiment A
+```
+
+AI 可以在：
+
+```text
+Branch A
+```
+
+里面尝试：
+
+```text
+杀死角色 A
+修改事件 B
+改变人物关系
+```
+
+然后看看：
+
+```text
+剧情会怎么发展？
+```
+
+最终：
+
+```text
+Merge
+```
+
+或者：
+
+```text
+Discard
+```
+
+这其实非常符合 AI 辅助创作。
+
+---
+
+# 3. 把「时间」提升成一等公民
+
+我们现在有 Timeline。
+
+但如果让我重新设计，我会把：
+
+> **时间系统**
+
+提升到和 World、Story 同一级。
+
+因为小说世界里面存在：
+
+```text
+世界时间
+剧情时间
+Scene 时间
+角色经历时间
+事件时间
+```
+
+例如：
+
+```text
+世界时间
+381年3月12日
+
+Scene
+381年3月12日 18:30
+
+角色林凡
+年龄：23
+
+事件
+黑石城大火
+381年3月10日
+```
+
+然后 Context Engine 可以判断：
+
+```text
+这个角色在这个时间点
+是否知道这件事？
+```
+
+这会直接影响：
+
+```text
+Knowledge
+Character State
+Story Logic
+```
+
+---
+
+# 4. 增加「Knowledge State」
+
+这个甚至可以和 Context Engine 深度结合。
+
+人物不是简单：
+
+```text
+Character
+```
+
+而是：
+
+```text
+Character
+ └── Knowledge
+      ├── Known
+      ├── Unknown
+      ├── Suspected
+      └── False Belief
+```
+
+例如：
+
+```text
+林凡
+
+知道：
+✓ 王家正在追杀自己
+
+不知道：
+✗ 王家真正目的
+
+怀疑：
+? 苏晚晴与王家有关
+
+错误认知：
+✗ 黑石城城主已经死亡
+```
+
+这样 AI 写作时才能真正做到：
+
+> **角色只能按照角色知道的信息行动。**
+
+这个能力我认为是 Novel Engine 和普通“AI 小说生成器”之间非常大的区别。
+
+---
+
+# 5. 增加「Constraint」系统
+
+前面我们有 Validation。
+
+但 Validation 解决的是：
+
+> **现在有没有违反规则？**
+
+Constraint 解决的是：
+
+> **这个世界必须遵守什么规则？**
+
+例如：
+
+```text
+World Constraint
+
+魔法不能复活死人
+
+Character Constraint
+
+林凡不会主动杀无辜者
+
+Timeline Constraint
+
+黑石城大火发生于 381-03-10
+
+Story Constraint
+
+第三卷结束前不能揭露幕后 Boss
+```
+
+然后：
+
+```text
+Generation
+     ↓
+Constraint
+     ↓
+Validation
+```
+
+AI 生成时就可以把 Constraint 纳入 Context。
+
+---
+
+# 6. Constraint 最好分等级
+
+否则以后规则会爆炸。
+
+可以：
+
+```text
+System
+World
+Story
+Character
+Scene
+```
+
+例如：
+
+```text
+SYSTEM
+不能修改已经 Commit 的历史
+
+WORLD
+死人不能复活
+
+STORY
+第三卷不能揭露 Boss
+
+CHARACTER
+林凡不会杀儿童
+
+SCENE
+当前场景发生在黑石城
+```
+
+然后 Validation 可以知道：
+
+> 哪个规则违反了。
+
+---
+
+# 7. 增加「Derived State」
+
+这个是工程层面的补充。
+
+不要把所有东西都存成数据库字段。
+
+例如：
+
+```text
+Character Age
+```
+
+可能应该由：
+
+```text
+Birth Date
++
+Current World Time
+```
+
+计算出来。
+
+又比如：
+
+```text
+Character Current Location
+```
+
+可能来自：
+
+```text
+Timeline Events
+```
+
+而不是到处重复存。
+
+所以可以区分：
+
+```text
+Canonical State
+```
+
+和：
+
+```text
+Derived State
+```
+
+例如：
+
+```text
+Canonical
+
+出生日期
+移动事件
+死亡事件
+```
+
+Derived：
+
+```text
+当前年龄
+当前地点
+当前状态
+当前拥有物品
+```
+
+这样能极大减少世界状态不一致。
+
+---
+
+# 8. 前端增加「Inspector」体系
+
+我们之前说了 Context Inspector。
+
+我现在建议进一步统一成：
+
+```text
+Inspector
+```
+
+任何对象都可以 Inspector。
+
+例如：
+
+```text
+Character Inspector
+Location Inspector
+Scene Inspector
+Event Inspector
+Proposal Inspector
+Context Inspector
+```
+
+统一结构：
+
+```text
+┌──────────────────────┐
+│ Character             │
+├──────────────────────┤
+│ Identity              │
+│ State                 │
+│ Knowledge             │
+│ Relationships         │
+│ Timeline              │
+│ Constraints           │
+│ History               │
+└──────────────────────┘
+```
+
+这样 UI 会非常统一。
+
+---
+
+# 9. 最后一个：建立「统一引用系统」
+
+这个非常容易被忽略。
+
+例如正文中出现：
+
+> 林凡走进了黑石城。
+
+那么：
+
+```text
+林凡
+```
+
+应该可以成为一个内部 Entity Reference。
+
+```text
+Character:char_123
+```
+
+而：
+
+```text
+黑石城
+```
+
+是：
+
+```text
+Location:loc_42
+```
+
+于是编辑器里面：
+
+```text
+林凡 → Character Inspector
+黑石城 → Location Inspector
+```
+
+这会带来非常强的能力：
+
+### 点击实体
+
+直接打开 Inspector。
+
+### 修改实体
+
+所有引用自动保持。
+
+### 搜索实体
+
+可以看到：
+
+```text
+林凡出现在哪些章节？
+```
+
+### AI Context
+
+自动知道：
+
+```text
+当前 Scene 引用了哪些 Entity。
+```
+
+---
+
+# 现在整个 Novel Engine 就越来越清晰了
+
+如果把目前所有设计压缩成一张图，我会变成：
+
+```text
+                         NOVEL ENGINE
+                              │
+       ┌──────────────────────┼──────────────────────┐
+       │                      │                      │
+     WORLD                  STORY                  TIME
+       │                      │                      │
+ Character                 Volume                Timeline
+ Location                  Arc                   Events
+ Faction                   Chapter               States
+ Rule                      Scene
+       │                      │
+       └──────────────┬───────┘
+                      │
+                   ENTITY
+                      │
+              ┌───────┼────────┐
+              │       │        │
+           State   Knowledge  Relation
+              │       │        │
+              └───────┼────────┘
+                      │
+                  CONTEXT
+                      │
+          ┌───────────┼───────────┐
+          │           │           │
+       Automatic     Pin       Exclude
+          │           │           │
+          └───────────┼───────────┘
+                      │
+                  GENERATION
+                      │
+                   Proposal
+                      │
+                  Constraint
+                      │
+                  Validation
+                      │
+                   Command
+                      │
+                    Event
+                      │
+                   Version
+                      │
+                  Snapshot
+                      │
+                   Branch
+                      │
+                   Commit
+```
+
+而 Vue：
+
+```text
+                         VUE WORKBENCH
+                              │
+       ┌──────────────────────┼──────────────────────┐
+       │                      │                      │
+     WORLD                  STORY                  EDITOR
+       │                      │                      │
+     Graph                  Board                 Scene
+     List                   Tree                  Chapter
+     Timeline               Thread                Selection
+       │                      │                      │
+       └──────────────────────┼──────────────────────┘
+                              │
+                         INSPECTOR
+                              │
+               ┌──────────────┼──────────────┐
+               │              │              │
+            Context        Proposal       History
+               │              │              │
+               └──────────────┼──────────────┘
+                              │
+                       COMMAND PALETTE
+                              │
+                         AI WORKFLOW
+```
+
+---
+
+## 但我反而建议：现在先不要继续加功能了
+
+这是我这次最想提醒你的。
+
+我们已经从最开始的：
+
+> “做一个 AI 小说工具”
+
+发展到了：
+
+> **一个具有 World State、Story State、Temporal State、Knowledge State、Context Engine、Generation、Proposal、Validation、Command、Event、Version、Snapshot、Branch 的小说世界运行引擎。**
+
+再继续往上堆功能，很容易开始**架构过度设计**。
+
+我现在认为最应该冻结的是下面这套 **Core**：
+
+### 必须进入核心架构
+
+```text
+Entity
+State
+Relationship
+Timeline
+Knowledge
+Constraint
+
+Context
+Generation
+Proposal
+Validation
+
+Command
+Event
+Version
+Snapshot
+```
+
+### 第一版 UI
+
+```text
+Project
+World
+Story
+Editor
+Graph
+Context
+Proposal
+Inspector
+History
+```
+
+### 第二阶段再做
+
+```text
+Branch
+Semantic Search
+高级 Knowledge Graph
+自动剧情模拟
+高级 AI Agent
+复杂 World Simulation
+```
+
+这样就比较稳。
+
+**尤其是 Branch、完整 Event Sourcing、复杂语义搜索，我建议“现在设计接口，但不要现在实现”。**
+
+否则你的第一版很可能会陷入一个非常典型的问题：
+
+> **架构越来越漂亮，但半年后还没有一个真正可以写小说的 Editor。**
+
+所以如果现在让我做下一步，我不会再继续扩展功能树了，而是会开始做一件更重要的事情：
+
+**把目前这些东西收敛成一份真正可以交给 CodeAgent 开发的「Novel Engine 前端 + 后端核心架构规范」**，把哪些是 **Core / V1 / V2 / Future** 分层，并把 Domain Model、API、事件、前端页面和它们之间的边界一次性定下来。
+
+这一步做完，你后面让 CodeAgent 开发，稳定性会高很多。
+

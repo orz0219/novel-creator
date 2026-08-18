@@ -1,0 +1,1533 @@
+可以。那我们就**完全不做文件、不调用代码工具**，直接把这一版设计整理成一份你可以原封不动交给 CodeAgent 的「工程设计规格」。
+
+而且我建议这次不要继续在你现有结构上修补。你前面已经明确了：**这是一个通用小说生成框架，不是为了某一本小说服务，也不考虑旧数据兼容**。所以我会按照“重新定义一个真正可长期扩展的 AI Narrative Engine”来设计。
+
+---
+
+# 一、先确定整个系统的核心思想
+
+你现在真正遇到的问题，其实不是 DuckDB，也不是 Prompt。
+
+而是：
+
+> **小说世界太大，而一次生成所需要的信息太少；系统必须负责把“大世界”转换成“当前这一幕 AI 应该知道的世界”。**
+
+所以整个系统不要设计成：
+
+```text
+世界观
+ ↓
+大纲
+ ↓
+AI写小说
+```
+
+而应该是：
+
+```text
+                  ┌──────────────┐
+                  │   World      │
+                  │ 世界真实状态  │
+                  └──────┬───────┘
+                         │
+             ┌───────────┴──────────┐
+             ↓                      ↓
+       Narrative                  Knowledge
+       故事结构                   角色认知
+             │                      │
+             └───────────┬──────────┘
+                         ↓
+                    Current Scene
+                         ↓
+                   Context Engine
+                         ↓
+                   Context Package
+                         ↓
+                       Skill
+                         ↓
+                        LLM
+                         ↓
+                 Draft / Analysis
+                         ↓
+                    Validator
+                         ↓
+                Proposed Changes
+                         ↓
+                  State Commit
+                         ↓
+                   World State
+```
+
+这应该成为整个项目最重要的架构原则。
+
+---
+
+# 二、最重要的一个概念：世界和小说不是一回事
+
+这个一定要建立起来。
+
+例如：
+
+```text
+世界：
+
+天玄大陆存在三大帝国。
+魔族已经存在三千年。
+北境有一座黑石城。
+黑石城地下存在远古遗迹。
+主角不知道遗迹存在。
+作者知道遗迹存在。
+反派知道一部分。
+```
+
+这些都是 **World Model**。
+
+但是：
+
+```text
+第一卷第 12 章：
+
+主角第一次来到黑石城。
+他只知道黑石城是一座边境城市。
+他不知道地下遗迹。
+读者也不知道。
+```
+
+这是 **Narrative State / Knowledge State**。
+
+所以不能把所有东西直接塞给 Writer。
+
+---
+
+# 三、建议最终采用 5 层模型
+
+整个系统我建议明确划成：
+
+```text
+Layer 1：World Model
+Layer 2：World State
+Layer 3：Narrative Model
+Layer 4：Knowledge Model
+Layer 5：Generation Runtime
+```
+
+分别负责不同事情。
+
+---
+
+# 四、Layer 1：World Model
+
+这是：
+
+> “这个世界究竟是什么样。”
+
+包含：
+
+### Entity
+
+所有世界实体。
+
+例如：
+
+```text
+人物
+地点
+势力
+怪物
+物品
+组织
+国家
+城市
+宗门
+种族
+神祇
+科技
+概念
+```
+
+不要写死。
+
+应该是：
+
+```text
+EntityType
+```
+
+然后：
+
+```text
+Entity
+```
+
+例如：
+
+```text
+EntityType:
+    Character
+
+Entity:
+    林凡
+```
+
+或者：
+
+```text
+EntityType:
+    Location
+
+Entity:
+    黑石城
+```
+
+---
+
+# 五、人物不要只是一个 JSON
+
+这是非常重要的一点。
+
+人物至少应该拆成：
+
+```text
+Character
+Character Profile
+Character Traits
+Character Relationships
+Character Goals
+Character Knowledge
+Character State
+Character Arc
+Character Appearance
+Character History
+```
+
+也就是说：
+
+```text
+人物是谁
+```
+
+和：
+
+```text
+人物现在是什么状态
+```
+
+必须分开。
+
+例如：
+
+```text
+林凡
+
+Profile:
+    27岁
+    男
+    身份：散修
+
+Traits:
+    谨慎
+    利益优先
+    不轻易相信别人
+
+Goals:
+    当前目标：进入黑石城
+
+Relationships:
+    与李青：陌生
+    与王家：敌对
+
+State:
+    location = 黑石城外
+    injury = 轻伤
+    cultivation = 炼气三层
+```
+
+这才适合长篇小说。
+
+---
+
+# 六、地点也不能只保存“地点描述”
+
+你之前最纠结的地点设计，我建议采用：
+
+```text
+Location
+├── Identity
+├── Appearance
+├── Geography
+├── Resources
+├── Facilities
+├── Population
+├── Factions
+├── Characters
+├── Rules
+├── Threats
+├── Secrets
+├── History
+├── Economy
+├── Current State
+└── Narrative Usage
+```
+
+但注意：
+
+**不是所有这些信息每次都给 AI。**
+
+数据库里可以有。
+
+Context Engine 决定：
+
+> 当前 Scene 到底需要哪些。
+
+---
+
+# 七、地点最关键的是“资源”和“关系”
+
+例如：
+
+```text
+黑石城
+```
+
+不是只有：
+
+> 一座古老边境城市。
+
+而应该知道：
+
+```text
+Resources:
+    黑铁矿
+    灵石矿
+    魔兽材料
+
+Facilities:
+    城主府
+    黑市
+    丹药铺
+    佣兵公会
+
+Factions:
+    城主府
+    王家
+    青云宗
+
+Threats:
+    夜间魔兽
+    黑市冲突
+
+Secrets:
+    地下遗迹
+
+Connections:
+    北门 → 荒原
+    南门 → 帝国腹地
+    地下 → 远古遗迹
+```
+
+这些数据才真正可以被后续剧情使用。
+
+---
+
+# 八、Layer 2：World State
+
+World Model 是：
+
+> 世界有什么。
+
+World State 是：
+
+> 世界现在发生了什么。
+
+比如：
+
+```text
+黑石城
+```
+
+本身属于 World Model。
+
+但是：
+
+```text
+城门已经关闭
+城主死亡
+黑市被查封
+林凡现在在城内
+王家正在搜捕林凡
+```
+
+属于 World State。
+
+因此：
+
+```text
+Entity
+```
+
+不要承担所有状态。
+
+应该有：
+
+```text
+StateChange
+```
+
+例如：
+
+```text
+Event:
+    王家开始搜捕林凡
+
+StateChange:
+    王家.status = ACTIVE_SEARCH
+
+StateChange:
+    林凡.status = WANTED
+
+StateChange:
+    林凡.location = 黑石城
+```
+
+---
+
+# 九、不要让 AI 直接修改数据库
+
+这是整个系统非常重要的一条原则。
+
+Writer：
+
+```text
+不能：
+
+UPDATE character
+UPDATE location
+UPDATE relationship
+```
+
+Writer 只能提出：
+
+```text
+ProposedChange
+```
+
+例如：
+
+```json
+{
+  "change_type": "STATE_CHANGE",
+  "target": "林凡",
+  "state": "location",
+  "old": "城外",
+  "new": "黑石城"
+}
+```
+
+然后：
+
+```text
+Validator
+    ↓
+通过
+    ↓
+Commit
+```
+
+才真正修改世界。
+
+---
+
+# 十、Layer 3：Narrative Model
+
+这一层才是你现在所谓的：
+
+> 卷、阶段、大纲、章节、场景。
+
+我建议结构：
+
+```text
+Narrative
+    │
+    ├── Volume
+    │      │
+    │      ├── Arc
+    │      │     │
+    │      │     ├── Sequence
+    │      │     │       │
+    │      │     │       ├── Chapter
+    │      │     │       │       │
+    │      │     │       │       └── Scene
+    │      │     │       │
+    │      │     │       └── Chapter
+    │      │     │
+    │      │     └── Sequence
+    │      │
+    │      └── Arc
+    │
+    └── Volume
+```
+
+但是数据库不要把这些做成六套完全不同的表。
+
+建议统一：
+
+```text
+NarrativeNode
+```
+
+然后：
+
+```text
+node_type =
+    VOLUME
+    ARC
+    SEQUENCE
+    CHAPTER
+    SCENE
+    BEAT
+```
+
+这样未来你想增加：
+
+```text
+STORYLINE
+SUB_ARC
+SPECIAL
+```
+
+不需要改数据库。
+
+---
+
+# 十一、Volume 是什么？
+
+你现在的“阶段”其实很接近 Volume。
+
+Volume 不应该只是：
+
+> 第 1 卷。
+
+而应该有：
+
+```text
+Volume Mission
+Volume Theme
+Volume Conflict
+Volume Goal
+Volume Start State
+Volume End State
+Volume Important Characters
+Volume Important Locations
+Volume Major Events
+Volume Secrets
+Volume Foreshadowing
+Volume Resolution
+```
+
+例如：
+
+```text
+第一卷：黑石城
+
+Mission:
+    让主角进入修炼体系
+
+Starting State:
+    主角只是普通人
+
+Ending State:
+    主角正式踏入修炼世界
+
+Main Conflict:
+    王家与主角冲突
+
+Important Location:
+    黑石城
+    黑石矿区
+    地下遗迹
+
+Major Characters:
+    林凡
+    王家家主
+    苏青
+
+Hidden Truth:
+    黑石城地下存在远古遗迹
+```
+
+---
+
+# 十二、但这里有一个非常重要的优化
+
+**Volume 不应该直接成为 Writer 的 Context。**
+
+它应该经过压缩：
+
+```text
+Volume
+ ↓
+Volume Summary
+ ↓
+Arc Summary
+ ↓
+Scene Context
+```
+
+比如 Writer 当前生成：
+
+```text
+第一卷第 12 章 Scene 2
+```
+
+它不需要知道第一卷完整 20 万字规划。
+
+它只需要：
+
+```text
+Volume Mission:
+    进入修炼世界
+
+Current Arc:
+    黑石城事件
+
+Current Chapter:
+    王家开始调查
+
+Current Scene:
+    林凡进入黑市
+
+Required Facts:
+    黑市存在
+    林凡不知道王家已经发现他
+
+Current State:
+    林凡位于城内
+
+Relevant Characters:
+    林凡
+    黑市老板
+
+Relevant Location:
+    黑市
+
+Previous Scene Summary:
+    ...
+```
+
+这样上下文会非常小。
+
+---
+
+# 十三、Layer 4：Knowledge Model
+
+这是我认为你这个系统区别于普通小说 Agent 的关键。
+
+因为：
+
+> **世界知道什么 ≠ 人物知道什么 ≠ 读者知道什么。**
+
+必须单独建模。
+
+例如：
+
+```text
+Fact:
+
+地下遗迹存在。
+```
+
+然后：
+
+```text
+Author:
+    知道
+
+王家家主:
+    知道
+
+林凡:
+    不知道
+
+读者:
+    不知道
+```
+
+到了某个 Scene：
+
+```text
+林凡发现地下入口
+```
+
+然后：
+
+```text
+Revelation
+```
+
+发生：
+
+```text
+林凡 Knowledge:
+    获得“地下遗迹存在”
+
+Reader Knowledge:
+    获得“地下遗迹存在”
+```
+
+这样才能控制：
+
+```text
+伏笔
+悬念
+信息差
+揭秘
+误导
+```
+
+---
+
+# 十四、Layer 5：Generation Runtime
+
+最后才是 AI。
+
+不要让 AI 自己决定：
+
+> 我要读取整个数据库。
+
+而是：
+
+```text
+Scene
+ ↓
+Context Engine
+ ↓
+Context Package
+ ↓
+Skill
+ ↓
+LLM
+```
+
+---
+
+# 十五、Context Engine 才是你这个项目的核心
+
+它实际上是整个系统的：
+
+> “信息调度器”。
+
+例如当前 Scene：
+
+```text
+林凡进入黑市
+```
+
+Context Engine 自动查：
+
+### 必须知道
+
+```text
+Scene
+当前人物
+当前地点
+当前时间
+当前目标
+当前冲突
+```
+
+### 相关信息
+
+```text
+黑市描述
+黑市老板
+林凡当前状态
+王家当前状态
+最近事件
+相关关系
+```
+
+### 不能知道
+
+```text
+地下遗迹
+真正幕后黑手
+作者秘密设定
+未来剧情
+```
+
+最后形成：
+
+```text
+ContextPackage
+```
+
+再给 Writer。
+
+---
+
+# 十六、所以你的数据库不是给 AI “读”的
+
+这是一个非常重要的认知转变。
+
+不要：
+
+```text
+AI → 数据库 → 把所有东西拿出来
+```
+
+而应该：
+
+```text
+AI
+ ↓
+告诉系统：
+“我要生成 Scene X”
+ ↓
+Context Engine
+ ↓
+数据库查询
+ ↓
+过滤
+ ↓
+排序
+ ↓
+压缩
+ ↓
+组装
+ ↓
+ContextPackage
+ ↓
+AI
+```
+
+---
+
+# 十七、Context Package 建议分层
+
+我建议最终生成：
+
+```text
+L0：绝对必须知道
+L1：当前场景相关
+L2：近期历史
+L3：当前剧情上下文
+L4：角色知识
+L5：世界背景
+L6：可选补充
+```
+
+例如：
+
+```text
+L0
+Scene Objective
+Scene Conflict
+Characters
+Location
+Required Events
+
+L1
+Character State
+Location State
+Relevant Relations
+
+L2
+Previous Scene
+Previous Chapter Summary
+
+L3
+Current Arc
+Current Volume Mission
+
+L4
+POV Character Knowledge
+
+L5
+World Rules
+
+L6
+Optional Lore
+```
+
+然后根据 Token Budget：
+
+```text
+8000 tokens
+12000 tokens
+20000 tokens
+```
+
+动态选择。
+
+---
+
+# 十八、你最担心的“上下文爆炸”就这样解决
+
+例如世界观：
+
+```text
+20,000 字
+```
+
+金手指：
+
+```text
+3,000 字
+```
+
+Volume：
+
+```text
+5,000 字
+```
+
+人物：
+
+```text
+10,000 字
+```
+
+地点：
+
+```text
+10,000 字
+```
+
+如果全部给：
+
+```text
+48,000 字
+```
+
+当然炸。
+
+但 Context Engine 可以变成：
+
+```text
+World Rules        800 tokens
+Volume Summary     500 tokens
+Arc Summary        600 tokens
+Scene              800 tokens
+Characters         1,500 tokens
+Location           800 tokens
+Recent History     1,000 tokens
+Knowledge          500 tokens
+Requirements       300 tokens
+────────────────────────────
+≈ 6,800 tokens
+```
+
+这才是正确架构。
+
+---
+
+# 十九、你之前问的“小说是不是分段生成”
+
+我的答案是：
+
+**必须分层、分阶段生成。**
+
+但不是：
+
+```text
+一章一章简单生成
+```
+
+而应该：
+
+```text
+世界
+ ↓
+Narrative Plan
+ ↓
+Volume
+ ↓
+Arc
+ ↓
+Sequence
+ ↓
+Chapter
+ ↓
+Scene
+ ↓
+Beat
+ ↓
+Paragraph
+```
+
+真正调用 Writer 的核心单位：
+
+> **Scene**
+
+---
+
+# 二十、Scene 再拆成 Beat
+
+例如：
+
+```text
+Scene：
+
+林凡进入黑市。
+```
+
+拆成：
+
+```text
+Beat 1
+进入黑市
+
+Beat 2
+发现黑市异常
+
+Beat 3
+遇到老板
+
+Beat 4
+双方试探
+
+Beat 5
+林凡发现王家的人
+
+Beat 6
+离开
+```
+
+Writer 可以：
+
+```text
+Scene Context
++
+Beat Plan
+```
+
+生成正文。
+
+这样比让模型一次写 5000 字稳定很多。
+
+---
+
+# 二十一、你的“设定包”应该是什么？
+
+你前面提出：
+
+> 每个阶段生成一个设定包。
+
+这个思路我认为可以保留，但要升级成：
+
+# Stage Design Package
+
+结构：
+
+```text
+StagePackage
+│
+├── Stage Identity
+│
+├── Stage Mission
+│
+├── Narrative Goals
+│
+├── Characters
+│
+├── Locations
+│
+├── Factions
+│
+├── Creatures
+│
+├── Items
+│
+├── Events
+│
+├── Relationships
+│
+├── Resources
+│
+├── Threats
+│
+├── Secrets
+│
+├── Knowledge Boundaries
+│
+├── Timeline
+│
+├── Map
+│
+├── Plot Hooks
+│
+├── Foreshadowing
+│
+└── Exit Conditions
+```
+
+但是：
+
+**这是数据库层面的结构，不是一次全部塞给 AI。**
+
+---
+
+# 二十二、地点生成 Skill
+
+你现在真正想做的 Skill，我建议不要叫：
+
+```text
+地点生成器
+```
+
+而叫：
+
+> `location_designer`
+
+输入：
+
+```text
+World Context
+Volume Context
+Arc Context
+Narrative Requirements
+Existing Locations
+Required Relationships
+```
+
+输出：
+
+```text
+Location Design Package
+```
+
+结构：
+
+```json
+{
+  "name": "",
+  "type": "",
+  "purpose": "",
+  "summary": "",
+  "visual_identity": {},
+  "geography": {},
+  "resources": [],
+  "facilities": [],
+  "population": {},
+  "factions": [],
+  "characters": [],
+  "creatures": [],
+  "threats": [],
+  "rules": [],
+  "history": [],
+  "secrets": [],
+  "connections": [],
+  "plot_hooks": [],
+  "narrative_usage": [],
+  "state_variables": []
+}
+```
+
+---
+
+# 二十三、人物生成 Skill
+
+同样：
+
+```text
+character_designer
+```
+
+输入：
+
+```text
+World
+Volume
+Arc
+Existing Characters
+Plot Requirements
+Location
+```
+
+输出：
+
+```text
+Character Design Package
+```
+
+包含：
+
+```text
+Identity
+Role
+Appearance
+Personality
+Values
+Motivation
+Goal
+Fear
+Conflict
+Ability
+Weakness
+Background
+Relationships
+Secrets
+Knowledge
+Current State
+Arc
+Narrative Function
+```
+
+---
+
+# 二十四、地图不要让 LLM 直接“画”
+
+第一版我甚至建议不要真的生成图片地图。
+
+先生成：
+
+```text
+Location Graph
+```
+
+例如：
+
+```text
+黑石城
+ ├── 城主府
+ ├── 黑市
+ │    └── 地下入口
+ ├── 佣兵公会
+ ├── 王家府邸
+ └── 北门
+      └── 黑石矿区
+```
+
+数据库存：
+
+```text
+Location A
+Relation
+Location B
+```
+
+之后 UI 再把 Graph 可视化。
+
+这样你的地图天然和剧情一致。
+
+---
+
+# 二十五、资源系统也一样
+
+例如：
+
+```text
+黑石城
+```
+
+拥有：
+
+```text
+黑铁矿
+灵石
+魔兽材料
+人口
+商贸
+兵力
+```
+
+不要写成：
+
+```json
+"description": "这里有很多矿..."
+```
+
+而是：
+
+```text
+Resource
+```
+
+例如：
+
+```text
+resource:
+    黑铁矿
+
+quantity:
+    10000
+
+production_rate:
+    100
+
+location:
+    黑石矿区
+
+controlled_by:
+    王家
+```
+
+未来剧情：
+
+```text
+王家失去矿区
+```
+
+系统就可以真正改变：
+
+```text
+Resource State
+```
+
+---
+
+# 二十六、这样一来，剧情 AI 就可以真正“利用世界”
+
+例如剧情要求：
+
+```text
+王家突然变穷
+```
+
+AI 不需要凭空编。
+
+Context Engine 可以发现：
+
+```text
+王家主要收入：
+黑铁矿
+
+黑铁矿：
+被主角摧毁
+
+生产量：
+0
+```
+
+于是 Writer 自然可以写：
+
+> 王家最近开始削减护卫开支……
+
+这才是：
+
+**World-driven storytelling。**
+
+---
+
+# 二十七、最终数据库我建议控制在这几个核心模块
+
+不要一开始搞 100 张表。
+
+V1 核心：
+
+```text
+PROJECT
+WORLD
+ENTITY
+ENTITY_TYPE
+RELATION
+FACT
+EVENT
+STATE_CHANGE
+CURRENT_STATE
+
+NARRATIVE
+NARRATIVE_NODE
+PLOT
+SCENE
+SCENE_ENTITY
+SCENE_REQUIREMENT
+CHARACTER_ARC
+
+KNOWLEDGE
+REVELATION
+
+SKILL
+SKILL_VERSION
+GENERATION_TASK
+GENERATION_RUN
+CONTEXT_SNAPSHOT
+
+PROPOSED_CHANGE
+VALIDATION_RUN
+VALIDATION_ISSUE
+
+SCENE_DOCUMENT
+```
+
+大约：
+
+> **30 张左右的核心表。**
+
+这已经足够做一个非常强的 V1。
+
+---
+
+# 二十八、DuckDB 可以继续用
+
+结合你现在的项目，我不会因为“这是 Agent 系统”就强行让你换 PostgreSQL。
+
+你的情况：
+
+```text
+个人工具
+本地运行
+大量分析查询
+结构化数据
+AI 生成
+需要复杂查询
+暂时不是多人高并发 SaaS
+```
+
+DuckDB 是合理的。
+
+尤其你的系统有大量：
+
+```text
+Timeline 查询
+Entity 查询
+关系分析
+统计
+上下文检索
+Generation Log 分析
+```
+
+DuckDB 很适合。
+
+我会建议：
+
+```text
+Rust
+ +
+DuckDB
+ +
+Axum
+ +
+Tokio
+ +
+Serde
+```
+
+先把领域模型做好。
+
+---
+
+# 二十九、最重要的是不要让 CodeAgent 一次写完整系统
+
+你把这份设计交给 CodeAgent 后，不要说：
+
+> “把整个系统实现出来。”
+
+而应该让它：
+
+```text
+Phase 1
+Domain + Migration
+
+↓
+
+Phase 2
+Repository
+
+↓
+
+Phase 3
+World Service
+
+↓
+
+Phase 4
+Narrative Service
+
+↓
+
+Phase 5
+Context Engine
+
+↓
+
+Phase 6
+Generation Runtime
+
+↓
+
+Phase 7
+Validator
+
+↓
+
+Phase 8
+End-to-End Test
+```
+
+每完成一层：
+
+```text
+编译
+↓
+单元测试
+↓
+Integration Test
+↓
+再进入下一层
+```
+
+---
+
+# 三十、我建议你下一步真正做的事情
+
+**先不要写 Prompt。**
+
+这是我现在最建议你调整的地方。
+
+你之前卡在：
+
+> “地点 Prompt 怎么设计？”
+
+其实顺序反了。
+
+正确顺序应该是：
+
+```text
+① 定义 Domain Model
+        ↓
+② 定义 Stage Package
+        ↓
+③ 定义 Scene
+        ↓
+④ 定义 Context Package
+        ↓
+⑤ 定义 Skill Interface
+        ↓
+⑥ 最后才写 Location Designer Prompt
+```
+
+否则很容易出现：
+
+```text
+Prompt 写得很漂亮
+        ↓
+生成结果不错
+        ↓
+过 50 章
+        ↓
+人物关系乱了
+        ↓
+地点状态乱了
+        ↓
+时间线乱了
+        ↓
+AI 不知道自己知道什么
+        ↓
+整个系统崩掉
+```
+
+而你现在实际上已经走到了一个很好的节点——**先把底层世界模型和 Context 架构重新设计好，再让 AI 去生成内容。**
+
+---
+
+## 最终我建议你的 CodeAgent 目标
+
+可以直接把下面这句话作为总目标：
+
+> **构建一个通用的 AI Narrative Engine，而不是一个小说 Prompt 工具。系统必须能够持久化世界模型、世界状态、叙事结构、角色知识和剧情状态，并通过 Context Engine 根据当前 Scene 动态构建最小充分上下文，再由可版本化 Skill 驱动 LLM 进行规划、设定生成、正文生成和验证；LLM 只能提出世界状态变更，不能直接修改世界，所有变更必须经过验证并事务化提交。**
+
+这句话其实就是你整个项目的**技术宪法**。
+
+接下来如果继续往下做，我建议我们直接进入 **V1.1 的「Domain Model 精确设计」**：把 `World / Entity / Character / Location / Event / State / Narrative / Volume / Arc / Scene / Knowledge / Context` 每一个对象的**字段、关系、生命周期、谁能创建、谁能修改、谁能读取**全部定义清楚。这个做完以后，你再让 CodeAgent 写 Rust，基本就不会再出现“边写边改架构”的问题了。
+

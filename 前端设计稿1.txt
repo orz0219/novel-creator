@@ -1,0 +1,1005 @@
+可以。结合我们前面已经确定的 **Novel Engine 架构**，以及你现在的技术路线，我会把前端定成：
+
+> **Vue 3 + TypeScript + Vite，Rust 后端，DuckDB 数据层。**
+>
+> 前端不是传统 CRUD 管理后台，而是一个类似 **“小说创作 IDE / Story Engine Client”** 的工作台。
+
+下面这版可以直接作为你后续 CodeAgent 的**前端设计基线**。
+
+---
+
+# 一、整体技术架构
+
+```text
+┌─────────────────────────────────────────────┐
+│                  Vue 3                     │
+│             TypeScript + Vite               │
+├─────────────────────────────────────────────┤
+│                                             │
+│  UI Layer                                   │
+│  ├── Layout                                 │
+│  ├── Components                             │
+│  ├── Editor                                 │
+│  ├── Graph / Map                            │
+│  └── Panels                                 │
+│                                             │
+│  State Layer                                │
+│  └── Pinia                                  │
+│                                             │
+│  Routing                                    │
+│  └── Vue Router                             │
+│                                             │
+│  Domain API                                 │
+│  ├── Project API                            │
+│  ├── World API                              │
+│  ├── Story API                              │
+│  ├── Context API                            │
+│  ├── Generation API                         │
+│  └── Proposal API                           │
+│                                             │
+└──────────────────────┬──────────────────────┘
+                       │ HTTP / SSE / WebSocket
+                       ▼
+┌─────────────────────────────────────────────┐
+│                  Rust                       │
+│                                             │
+│              Application API                │
+│                    │                        │
+│              Story Engine                   │
+│                    │                        │
+│              Context Engine                 │
+│                    │                        │
+│             Generation Engine               │
+│                    │                        │
+│              Validation                     │
+│                    │                        │
+│                  DuckDB                     │
+└─────────────────────────────────────────────┘
+```
+
+这里有一个原则：
+
+> **Vue 不负责业务规则。**
+
+例如：
+
+```text
+“这个人物能不能知道这件事？”
+```
+
+不能由 Vue 判断。
+
+应该：
+
+```text
+Vue
+ ↓
+请求 Context
+ ↓
+Rust
+ ↓
+Context Engine
+ ↓
+返回结果
+```
+
+前端只负责：
+
+> 展示、交互、编辑、发起操作。
+
+---
+
+# 二、Vue 技术栈
+
+我建议第一版直接采用：
+
+```text
+Vue 3
+TypeScript
+Vite
+Vue Router
+Pinia
+```
+
+组件库方面，我反而**不建议重度依赖 Element Plus**。
+
+因为你现在的视觉风格和 Element Plus 那种标准后台感会冲突。
+
+可以：
+
+```text
+Vue 3
++
+Tailwind CSS
++
+自定义 Design System
+```
+
+或者：
+
+```text
+Vue 3
++
+原生 CSS Variables
++
+自定义组件
+```
+
+如果你的 CodeAgent 能稳定维护 CSS，我更倾向于第二种。
+
+因为你的 UI 有比较强的品牌视觉。
+
+---
+
+# 三、前端目录结构
+
+我会采用**领域驱动的 Vue 目录结构**，而不是：
+
+```text
+components/
+pages/
+utils/
+```
+
+然后所有东西全部塞进去。
+
+建议：
+
+```text
+src/
+│
+├── app/
+│   ├── App.vue
+│   ├── router.ts
+│   └── providers/
+│
+├── layouts/
+│   ├── AppLayout.vue
+│   ├── ProjectLayout.vue
+│   └── WritingLayout.vue
+│
+├── pages/
+│   ├── Home/
+│   ├── Project/
+│   ├── World/
+│   ├── Story/
+│   └── Writing/
+│
+├── features/
+│   ├── character/
+│   ├── location/
+│   ├── faction/
+│   ├── timeline/
+│   ├── story-thread/
+│   ├── foreshadow/
+│   ├── context/
+│   ├── generation/
+│   ├── proposal/
+│   └── validation/
+│
+├── components/
+│   ├── ui/
+│   ├── editor/
+│   ├── graph/
+│   └── layout/
+│
+├── stores/
+│   ├── project.ts
+│   ├── world.ts
+│   ├── story.ts
+│   ├── editor.ts
+│   └── ui.ts
+│
+├── api/
+│   ├── client.ts
+│   ├── project.ts
+│   ├── world.ts
+│   ├── story.ts
+│   ├── context.ts
+│   ├── generation.ts
+│   └── proposal.ts
+│
+├── types/
+│   ├── world.ts
+│   ├── character.ts
+│   ├── location.ts
+│   ├── story.ts
+│   ├── context.ts
+│   └── generation.ts
+│
+├── composables/
+│   ├── useProject.ts
+│   ├── useContext.ts
+│   ├── useGeneration.ts
+│   └── useKeyboard.ts
+│
+└── styles/
+    ├── variables.css
+    ├── global.css
+    └── editor.css
+```
+
+这里有一个非常重要的设计：
+
+> `features/` 代表业务能力，而不是页面。
+
+例如：
+
+```text
+features/location/
+```
+
+里面可以同时存在：
+
+```text
+LocationCard.vue
+LocationDetail.vue
+LocationEditor.vue
+LocationGraph.vue
+useLocation.ts
+location.api.ts
+location.types.ts
+```
+
+这样后面不会因为页面越来越多而失控。
+
+---
+
+# 四、UI 的总体结构
+
+我建议保留你现在顶部导航的感觉，但重新组织。
+
+```text
+┌───────────────────────────────────────────────────────────┐
+│ 创  小说创作工坊       项目   世界   故事   创作   设置    │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│                                                           │
+│                     当前工作区域                          │
+│                                                           │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
+```
+
+进入项目以后：
+
+```text
+┌────────────┬───────────────────────────────────┐
+│            │                                   │
+│ 项目导航   │          Main Workspace           │
+│            │                                   │
+│ 世界       │                                   │
+│  ├ 人物    │                                   │
+│  ├ 地点    │                                   │
+│  ├ 势力    │                                   │
+│  ├ 规则    │                                   │
+│  ├ 时间线  │                                   │
+│            │                                   │
+│ 故事       │                                   │
+│  ├ 卷      │                                   │
+│  ├ 篇      │                                   │
+│  ├ 剧情线  │                                   │
+│  ├ 伏笔    │                                   │
+│  └ 章节    │                                   │
+│            │                                   │
+└────────────┴───────────────────────────────────┘
+```
+
+但注意：
+
+**左侧导航不要一直占很宽。**
+
+你的产品应该保持“编辑器感”，而不是后台管理系统感。
+
+---
+
+# 五、六个核心页面
+
+第一版我只做这 6 个。
+
+## 1. 项目首页
+
+```text
+Project Dashboard
+```
+
+负责：
+
+* 最近项目
+* 当前卷
+* 当前章节
+* 故事进度
+* 剧情状态
+* 最近生成任务
+* 最近编辑
+
+---
+
+# 六、世界总览
+
+```text
+World Overview
+```
+
+视觉：
+
+```text
+┌──────────────┬────────────────────────────────┐
+│ 世界导航     │                                │
+│              │       世界状态                 │
+│ 人物         │                                │
+│ 地点         │      人物：84                  │
+│ 势力         │      地点：31                  │
+│ 规则         │      势力：12                  │
+│ 关系         │      事件：431                 │
+│ 时间线       │                                │
+│              │                                │
+└──────────────┴────────────────────────────────┘
+```
+
+---
+
+# 七、地图 / Story Graph
+
+这是我建议重点投入的一个页面。
+
+技术上可以独立设计：
+
+```text
+GraphCanvas
+```
+
+节点：
+
+```text
+Character
+Location
+Faction
+Event
+Thread
+```
+
+关系：
+
+```text
+located_in
+belongs_to
+enemy
+ally
+travels_to
+happens_at
+related_to
+```
+
+前端负责：
+
+```text
+拖动
+缩放
+筛选
+选择节点
+展开关系
+```
+
+而不是负责判断关系是否合法。
+
+---
+
+# 八、故事规划页面
+
+```text
+Story Workspace
+```
+
+左：
+
+```text
+Volume
+ ├ Arc
+ │ ├ Chapter
+ │ ├ Chapter
+ │ └ Chapter
+ └ Arc
+```
+
+中间：
+
+```text
+Story Board
+```
+
+右：
+
+```text
+Story State
+```
+
+例如：
+
+```text
+当前卷
+━━━━━━━━━━━━
+
+使命
+让主角离开黑石城
+
+Story Contract
+
+✓ 获得线索
+✓ 第一次冲突
+
+○ 地下遗迹事件
+
+○ 离开黑石城
+```
+
+---
+
+# 九、真正写作页面
+
+这是整个产品最重要的 UI。
+
+我建议采用：
+
+```text
+┌──────────┬───────────────────────────────┬─────────────┐
+│ Story    │                               │ Context     │
+│ Tree     │          Editor               │             │
+│          │                               │ Characters  │
+│ Volume   │          第127章              │ Locations   │
+│ Arc      │                               │ Timeline    │
+│ Chapter  │          正文                 │ Threads     │
+│ Scene    │                               │ Foreshadow  │
+│          │                               │             │
+└──────────┴───────────────────────────────┴─────────────┘
+```
+
+这其实就是：
+
+> **小说版 IDE。**
+
+---
+
+# 十、Context 面板
+
+这是我们前面讨论的架构在 UI 上的直接体现。
+
+例如：
+
+```text
+CURRENT CONTEXT
+
+世界
+✓ 当前世界规则
+
+人物
+✓ 林凡
+✓ 苏晚晴
+
+地点
+✓ 黑石城
+✓ 黑市
+
+剧情
+✓ 王家追杀线
+
+伏笔
+✓ 古井
+
+时间
+✓ 天玄历381年3月12日
+
+──────────────
+
+Context Tokens
+8,421
+```
+
+点击某个 Context：
+
+```text
+来源：
+Character #12
+
+加入原因：
+当前 Scene 主角
+
+相关度：
+0.96
+
+[查看原始设定]
+```
+
+这会让整个 AI 系统变得**可解释**。
+
+---
+
+# 十一、AI Generation UI
+
+不要做聊天窗口。
+
+而是：
+
+```text
+Generation Task
+```
+
+例如：
+
+```text
+┌─────────────────────────────────────────┐
+│ 生成本阶段地点                           │
+│                                         │
+│ 目标                                     │
+│ 为第三卷设计 5 个重要地点                │
+│                                         │
+│ Context                                 │
+│ ✓ 世界观                                 │
+│ ✓ 当前卷                                 │
+│ ✓ 当前剧情                               │
+│ ✓ 已有地点                               │
+│                                         │
+│ Skill                                   │
+│ Location Designer                       │
+│                                         │
+│ Model                                   │
+│ mimo-v2.5                               │
+│                                         │
+│              [开始生成]                  │
+└─────────────────────────────────────────┘
+```
+
+然后：
+
+```text
+Generation Result
+```
+
+---
+
+# 十二、Proposal UI
+
+这一层我认为是整个系统非常重要的交互。
+
+AI 不应该直接修改数据库。
+
+而应该：
+
+```text
+AI
+ ↓
+Proposal
+ ↓
+User
+ ↓
+Accept / Reject
+ ↓
+Commit
+```
+
+UI：
+
+```text
+AI Proposal #182
+
++ 新增地点：黑市
++ 新增地点：古井
+~ 修改黑石城资源
++ 新增伏笔：黑色令牌
+
+Validation
+
+✓ World Rule
+✓ Timeline
+✓ Location
+✓ Character
+⚠ 1 warning
+
+[全部接受]   [逐项审核]
+```
+
+---
+
+# 十三、前端状态管理
+
+Pinia 不应该做成：
+
+```text
+一个巨大 store
+```
+
+而应该按领域拆。
+
+```text
+projectStore
+worldStore
+storyStore
+editorStore
+contextStore
+generationStore
+proposalStore
+uiStore
+```
+
+例如：
+
+```ts
+const location = worldStore.currentLocation
+```
+
+而：
+
+```text
+Location 的真实数据
+```
+
+最终来源还是 Rust API。
+
+Pinia 主要负责：
+
+> 当前 UI 状态 + 缓存 + 临时编辑状态。
+
+---
+
+# 十四、API 层
+
+Vue 不允许到处：
+
+```ts
+fetch('/api/xxx')
+```
+
+统一：
+
+```text
+api/
+```
+
+例如：
+
+```text
+projectApi
+worldApi
+characterApi
+locationApi
+storyApi
+contextApi
+generationApi
+proposalApi
+```
+
+调用：
+
+```ts
+locationApi.get(id)
+locationApi.create(...)
+locationApi.update(...)
+```
+
+以后 Rust API 修改，前端只改 API 层。
+
+---
+
+# 十五、AI 生成最好使用 SSE
+
+你这个系统有大量：
+
+```text
+AI Generation
+Validation
+Planning
+Writing
+```
+
+所以我建议：
+
+```text
+HTTP
+```
+
+用于普通 CRUD：
+
+```text
+GET
+POST
+PATCH
+DELETE
+```
+
+而 AI 长任务：
+
+```text
+SSE
+```
+
+例如：
+
+```text
+POST /generation/tasks
+
+        ↓
+
+SSE
+
+task.created
+context.building
+context.ready
+model.thinking
+generation.started
+generation.progress
+generation.completed
+validation.started
+validation.completed
+proposal.created
+```
+
+前端就可以实时显示：
+
+```text
+生成中……
+
+✓ Context
+✓ Story Analysis
+● Location Generation
+○ Validation
+○ Proposal
+```
+
+比单纯 Loading 好很多。
+
+---
+
+# 十六、视觉设计系统
+
+你的当前视觉我建议直接继承。
+
+核心：
+
+```text
+Background
+#090C11
+
+Panel
+#0D1118
+
+Panel Secondary
+#11151C
+
+Border
+低透明度
+
+Primary
+暗红 / 朱砂
+
+Text
+高亮灰白
+
+Secondary Text
+灰色
+```
+
+整体关键词：
+
+> **克制、安静、编辑器、出版物、东方感。**
+
+而不是：
+
+> 科技、AI、霓虹、SaaS。
+
+---
+
+# 十七、组件设计
+
+基础组件：
+
+```text
+Button
+Input
+Textarea
+Select
+Dialog
+Dropdown
+Tabs
+Tooltip
+Toast
+CommandPalette
+```
+
+业务组件：
+
+```text
+CharacterCard
+LocationCard
+FactionCard
+
+StoryNode
+StoryTree
+StoryGraph
+
+ContextPanel
+ContextItem
+
+GenerationPanel
+GenerationProgress
+
+ProposalPanel
+ProposalDiff
+
+Timeline
+SceneEditor
+ChapterEditor
+```
+
+---
+
+# 十八、最重要的一个原则：前端不要绑定数据库结构
+
+例如后端数据库可能有：
+
+```text
+characters
+character_states
+character_knowledge
+character_relationships
+```
+
+前端不要照着数据库做：
+
+```text
+CharacterTable.vue
+CharacterStateTable.vue
+CharacterKnowledgeTable.vue
+```
+
+前端看到的是：
+
+```text
+Character
+```
+
+然后 Rust API 把多个数据库实体组合成：
+
+```json
+{
+  "character": {},
+  "current_state": {},
+  "knowledge": [],
+  "relationships": []
+}
+```
+
+也就是说：
+
+> **后端负责 Domain Model，前端负责 User Model。**
+
+这一点非常重要。
+
+---
+
+# 十九、我建议你把前端最终定位成
+
+```text
+Novel Atelier
+       │
+       ├── Project Workspace
+       │
+       ├── World Builder
+       │
+       ├── Story Planner
+       │
+       ├── Story Graph
+       │
+       ├── Writing Editor
+       │
+       ├── Context Inspector
+       │
+       ├── AI Generation
+       │
+       └── Proposal / Validation
+```
+
+而不是：
+
+```text
+小说管理后台
+```
+
+---
+
+# 二十、V1 我建议只实现这些
+
+不要一上来把所有东西都做了。
+
+### Phase 1：基础框架
+
+```text
+Vue 3
+TypeScript
+Vite
+Pinia
+Vue Router
+
+AppLayout
+ProjectLayout
+WritingLayout
+
+Design System
+```
+
+### Phase 2：项目
+
+```text
+Project Dashboard
+Project CRUD
+```
+
+### Phase 3：世界
+
+```text
+World
+Character
+Location
+Faction
+Timeline
+```
+
+### Phase 4：故事
+
+```text
+Volume
+Arc
+Chapter
+Scene
+Thread
+Foreshadow
+```
+
+### Phase 5：Story Graph
+
+```text
+人物
+地点
+势力
+事件
+剧情线
+关系
+```
+
+### Phase 6：AI
+
+```text
+Context Panel
+Generation Task
+SSE Progress
+Proposal
+Validation
+Commit
+```
+
+### Phase 7：真正的写作工作台
+
+```text
+Chapter Editor
+Scene Editor
+Context Inspector
+AI Command Palette
+```
+
+---
+
+## 最终效果我希望是这种感觉
+
+不是：
+
+> **“我打开一个 AI 小说网站，然后输入提示词。”**
+
+而是：
+
+> **“我打开我的小说工作台，我的世界正在这里运行。”**
+
+左边是**故事结构**，中间是**当前创作空间**，右边是**世界状态与 AI Context**；AI 不直接乱改世界，而是产生 Proposal，经过 Validation 后提交。
+
+这套 UI 和我们前面设计的 **World → Story → Context → Generation → Proposal → Validation → Commit** 是完全统一的。
+
+而且我认为你现在这张首页的视觉方向是对的，**不需要重新找设计风格，下一步应该做的是把这套视觉语言沉淀成 Vue 的 Design System，然后围绕 Story Engine 展开页面。**
+

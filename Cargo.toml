@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/db",
+    "crates/application",
+    "crates/runtime",
+    "crates/infrastructure",
+    "crates/narrative-engine",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database
+duckdb = { version = "1.1", features = ["bundled"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# HTTP (for future API)
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Chrono for time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Internal crates
+domain = { path = "crates/domain" }
+db = { path = "crates/db" }
+application = { path = "crates/application" }
+runtime = { path = "crates/runtime" }
+infrastructure = { path = "crates/infrastructure" }

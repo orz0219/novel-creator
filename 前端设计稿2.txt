@@ -1,0 +1,796 @@
+有，而且我觉得现在反而到了一个很关键的阶段。
+
+你前面的架构已经比较完整了，但如果让我站在**“真正把 Novel Engine 做成长期可用的软件”**这个角度再审一遍，我会补充下面这些。它们不是为了让架构变复杂，而是为了避免你做到中后期以后再返工。
+
+---
+
+# 1. 我最想补充的是：把「工作台状态」和「领域状态」彻底分开
+
+我们之前已经说了 Pinia，但我觉得还可以再明确一层。
+
+不要让前端状态全部变成：
+
+```text
+projectStore
+worldStore
+storyStore
+...
+```
+
+实际上应该存在两种完全不同的状态：
+
+### Domain State
+
+来自后端：
+
+```text
+Character
+Location
+Story
+Scene
+Timeline
+Context
+Proposal
+...
+```
+
+它们代表：
+
+> **小说世界实际上是什么样。**
+
+### Workspace State
+
+来自前端：
+
+```text
+当前打开哪个项目
+当前选中的人物
+当前打开哪个章节
+哪个面板展开
+Graph 当前缩放
+Editor 光标位置
+当前筛选条件
+当前 Tab
+当前 Drawer
+```
+
+它们代表：
+
+> **用户现在正在怎么看这个世界。**
+
+例如：
+
+```text
+Domain State
+    Character = 林凡
+
+Workspace State
+    selectedCharacter = 林凡
+    characterPanel = open
+    graphZoom = 0.72
+```
+
+这个区分非常重要。
+
+否则以后很容易出现：
+
+> “用户只是关闭了右侧面板，为什么 Character Store 被修改了？”
+
+---
+
+# 2. 增加一个「Command」概念
+
+这个我认为值得加入 Novel Engine。
+
+现在我们有：
+
+```text
+Generation
+Proposal
+Validation
+Commit
+```
+
+但是 UI 层最好不要直接操作：
+
+```text
+updateCharacter()
+createLocation()
+deleteForeshadow()
+```
+
+而是逐渐抽象成：
+
+```text
+Command
+```
+
+例如：
+
+```text
+CreateCharacter
+UpdateCharacter
+MoveCharacter
+CreateRelationship
+CreateScene
+AcceptProposal
+RejectProposal
+```
+
+于是系统变成：
+
+```text
+User
+ ↓
+Command
+ ↓
+Rust Domain
+ ↓
+Validation
+ ↓
+State Change
+ ↓
+Event
+```
+
+AI 也一样：
+
+```text
+AI
+ ↓
+Proposal
+ ↓
+Command
+ ↓
+Validation
+ ↓
+Commit
+```
+
+这样未来你就能做到：
+
+**Undo / Redo、操作历史、审计、AI 操作回放。**
+
+---
+
+# 3. 我强烈建议加入 Event / Event Log
+
+这和上面的 Command 是配套的。
+
+例如用户：
+
+```text
+创建角色：林凡
+```
+
+系统记录：
+
+```text
+CharacterCreated
+```
+
+然后：
+
+```text
+林凡加入黑石城
+```
+
+记录：
+
+```text
+CharacterLocationChanged
+```
+
+再比如 AI：
+
+```text
+Proposal #182 accepted
+```
+
+记录：
+
+```text
+ProposalAccepted
+```
+
+这会让你的 Novel Engine 获得一个非常重要的能力：
+
+> **“我可以知道这个世界是怎么一步一步变成现在这样的。”**
+
+以后甚至可以做：
+
+```text
+World History
+```
+
+看到：
+
+```text
+08-17 19:21
+用户创建林凡
+
+08-17 19:26
+用户创建黑石城
+
+08-17 19:32
+AI 提议增加古井
+
+08-17 19:33
+用户接受 Proposal #182
+```
+
+这对于小说这种长期演化的数据非常有价值。
+
+---
+
+# 4. 再进一步：给对象增加 Version
+
+例如：
+
+```text
+Character #123
+Version 17
+```
+
+而不是只有：
+
+```text
+updated_at
+```
+
+这样你以后可以做到：
+
+```text
+当前版本
+    ↓
+Version 17
+
+历史版本
+    ↓
+Version 16
+Version 15
+Version 14
+```
+
+然后 UI 可以出现：
+
+```text
+Character History
+
+v17  当前
+v16  AI Proposal #182
+v15  手动修改
+v14  初始创建
+```
+
+甚至：
+
+```text
+Compare v17 ↔ v15
+```
+
+这对 AI 自动创作尤其重要。
+
+因为 AI 很容易：
+
+> “帮你改好了，但是你不知道它到底改了什么。”
+
+Version + Diff 就解决了这个问题。
+
+---
+
+# 5. Context Engine 最好做成一个独立的「可解释系统」
+
+这是我认为 Novel Engine 和普通 AI 写作软件真正拉开差距的地方。
+
+不要让：
+
+```text
+Context = 一段拼接出来的 Prompt
+```
+
+而应该：
+
+```text
+Context
+├── Entities
+├── Relationships
+├── Timeline
+├── Knowledge
+├── Constraints
+├── Story State
+├── Relevant History
+└── Selection Reason
+```
+
+尤其是最后这个：
+
+```text
+Selection Reason
+```
+
+例如：
+
+```text
+林凡
+相关度：0.94
+
+原因：
+✓ 当前 Scene 主角
+✓ 当前剧情线参与者
+✓ 当前地点相关人物
+✓ 最近 3 个 Scene 出现
+```
+
+这样 AI Context 就从：
+
+> 黑盒 Prompt
+
+变成：
+
+> **可检查的上下文系统。**
+
+---
+
+# 6. Context 应该允许用户“钉住”
+
+这个我很推荐。
+
+例如 AI 自动算出来：
+
+```text
+Context
+
+林凡
+苏晚晴
+黑石城
+王家
+地下遗迹
+```
+
+但是用户可以手动：
+
+```text
+📌 Pin
+```
+
+于是：
+
+```text
+Auto Context
++
+Pinned Context
+```
+
+最终：
+
+```text
+Final Context
+```
+
+这样用户可以明确告诉系统：
+
+> “这个东西虽然当前相关度不高，但是**我就是要求 AI 必须知道它**。”
+
+这是非常自然的人机协作机制。
+
+---
+
+# 7. 再增加一个「Context Exclusion」
+
+和 Pin 是对应的。
+
+例如：
+
+```text
+自动 Context：
+
+林凡
+苏晚晴
+王家
+黑石城
+地下遗迹
+古井
+龙族
+帝国
+...
+```
+
+用户认为：
+
+```text
+龙族
+```
+
+当前完全没必要。
+
+可以：
+
+```text
+🚫 Exclude
+```
+
+于是：
+
+```text
+Context Policy
+
+Pinned
+Excluded
+Automatic
+```
+
+这套机制我认为以后会非常好用。
+
+---
+
+# 8. Editor 不要只是 Markdown Editor
+
+这是我对之前设计最大的一个补充。
+
+如果你最终的核心是：
+
+> 小说创作 IDE
+
+那么 Scene Editor 最好从一开始就考虑：
+
+```text
+Document Model
+```
+
+而不是：
+
+```text
+一个 textarea
+```
+
+例如：
+
+```text
+Chapter
+ ├── Scene
+ │    ├── Paragraph
+ │    ├── Paragraph
+ │    ├── Dialogue
+ │    ├── Action
+ │    └── Narration
+```
+
+当然**第一版完全可以先用 Markdown / 富文本编辑器实现**。
+
+但数据模型不要被 textarea 限死。
+
+否则以后想实现：
+
+```text
+对话分析
+人物出场
+场景统计
+情绪曲线
+AI 局部改写
+段落级 Context
+```
+
+都会比较痛苦。
+
+---
+
+# 9. AI 操作最好做到“局部化”
+
+不要只有：
+
+```text
+生成本章
+```
+
+应该允许：
+
+```text
+生成
+改写
+扩写
+缩写
+润色
+改变视角
+改变情绪
+继续写
+检查逻辑
+检查人物一致性
+```
+
+而且作用范围可以是：
+
+```text
+当前段落
+当前选区
+当前 Scene
+当前 Chapter
+当前 Arc
+```
+
+例如：
+
+```text
+选中这一段
+
+右键：
+
+AI
+ ├── 改写
+ ├── 扩写
+ ├── 缩写
+ ├── 改变语气
+ ├── 增加环境描写
+ └── 检查人物行为
+```
+
+这个会比单纯的 Chat Panel 好很多。
+
+---
+
+# 10. 我甚至不建议第一版加入一个“大聊天框”
+
+这是一个比较强的观点。
+
+因为你这个产品最终不是：
+
+> AI Chat + 小说
+
+而应该是：
+
+> **Novel Engine + AI 操作层**
+
+聊天只是 AI 的一种交互方式。
+
+所以主 UI 应该是：
+
+```text
+World
+Story
+Editor
+Context
+Graph
+Proposal
+```
+
+而不是：
+
+```text
+Chat
+Chat
+Chat
+Chat
+```
+
+AI 应该**融入工作流**。
+
+---
+
+# 11. Command Palette 非常值得做
+
+类似：
+
+```text
+⌘K
+```
+
+打开：
+
+```text
+Search or Command
+
+> 创建角色
+> 创建地点
+> 打开第三卷
+> 查找林凡
+> 生成当前 Scene
+> 检查当前剧情
+> 查看 Context
+> 查看 Proposal
+> 跳转黑石城
+```
+
+这会非常符合你想要的：
+
+> **IDE 感。**
+
+而且以后 AI Command 也可以接进去。
+
+---
+
+# 12. 全局 Search 不应该只是数据库搜索
+
+建议最终做成：
+
+```text
+Search
+```
+
+搜索：
+
+```text
+人物
+地点
+势力
+章节
+Scene
+剧情线
+伏笔
+事件
+Proposal
+```
+
+甚至：
+
+```text
+“黑石城地下发生了什么？”
+```
+
+可以进入语义检索。
+
+但这个属于后期能力。
+
+第一版先：
+
+```text
+Exact Search
++
+Fuzzy Search
+```
+
+即可。
+
+---
+
+# 13. 需要一个统一的 Notification / Activity Center
+
+因为后台会有很多异步操作：
+
+```text
+AI Generation
+Validation
+Indexing
+Context Building
+Import
+Export
+```
+
+所以右上角可以：
+
+```text
+🔔
+```
+
+点击：
+
+```text
+Activity
+
+✓ Proposal #182 已完成验证
+✓ 第127章生成完成
+⚠ 世界规则冲突
+● 正在构建 Context
+```
+
+这样用户不会因为后台任务而迷失。
+
+---
+
+# 14. 最后一个我认为很重要：把“可观测性”直接设计进 UI
+
+以后一定会出现：
+
+> “为什么 AI 这次写得这么奇怪？”
+
+这时候如果只有：
+
+```text
+AI 写出来了
+```
+
+你根本不知道问题在哪。
+
+所以可以提供：
+
+```text
+Generation Inspector
+```
+
+里面看到：
+
+```text
+Model
+Context
+Context Tokens
+System Rules
+Story State
+Selected Entities
+Generation Parameters
+Validation Result
+Proposal
+```
+
+甚至：
+
+```text
+Context
+  8,421 tokens
+
+Characters
+  4
+
+Locations
+  2
+
+Story Threads
+  3
+
+Timeline Events
+  12
+```
+
+这会让整个系统从“AI 玩具”变成真正的 **Engine**。
+
+---
+
+# 如果让我重新给这套架构加一层
+
+我现在会把它理解成：
+
+```text
+                    Novel Engine
+                         │
+          ┌──────────────┼──────────────┐
+          │              │              │
+       Domain         Context         AI
+          │              │              │
+     World/Story     Selection       Generation
+          │              │              │
+          └──────────────┼──────────────┘
+                         │
+                      Command
+                         │
+                    Validation
+                         │
+                       Event
+                         │
+                     Version
+                         │
+                      Storage
+```
+
+而前端：
+
+```text
+                 Vue Workbench
+                       │
+       ┌───────────────┼────────────────┐
+       │               │                │
+    Workspace        Editor          Inspector
+       │               │                │
+       ├── World       ├── Scene        ├── Context
+       ├── Story       ├── Chapter      ├── Proposal
+       ├── Graph       └── Selection     ├── Validation
+       └── Timeline                      └── History
+```
+
+### 我认为其中最值得现在就加入设计的，是这 6 个：
+
+**① Command**
+
+**② Event / Event Log**
+
+**③ Version / Diff**
+
+**④ Context Pin / Exclude**
+
+**⑤ Document / Scene Model**
+
+**⑥ Generation Inspector**
+
+这六个东西不会明显增加第一版 UI 的复杂度，但会给以后留下非常大的扩展空间。
+
+尤其是 **Command → Validation → Event → Version** 这一条，我会建议你现在就把接口层次设计好，即使 V1 暂时不把完整 Event Sourcing 做出来。
+
+否则等 Novel Engine 已经有几万条世界数据、AI 自动修改大量内容以后，再补这些东西，会非常痛苦。
+
