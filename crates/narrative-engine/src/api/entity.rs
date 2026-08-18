@@ -11,6 +11,7 @@ use super::error::AppError;
 pub struct EntityTypeFilter { pub r#type: Option<String> }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct CreateEntityInput {
     pub name: String, pub summary: Option<String>, pub description: Option<String>,
     pub attributes: Option<serde_json::Value>,

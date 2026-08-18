@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use sqlx::PgPool;
-use tracing::{info, error};
+use tracing::info;
 
 #[derive(Debug)]
 pub enum WriteCommand {

@@ -35,11 +35,11 @@ pub async fn reject_proposal(State(state): State<AppState>, Path(id): Path<Strin
     Ok(Json(serde_json::json!({"id": id, "status": "Rejected"})))
 }
 
-pub async fn accept_change(State(state): State<AppState>, Path((proposal_id, change_id)): Path<(String, String)>) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn accept_change(State(_state): State<AppState>, Path((proposal_id, change_id)): Path<(String, String)>) -> Result<Json<serde_json::Value>, AppError> {
     // Change-level accept - for now just return success
     Ok(Json(serde_json::json!({"proposal_id": proposal_id, "change_id": change_id, "accepted": true})))
 }
 
-pub async fn reject_change(State(state): State<AppState>, Path((proposal_id, change_id)): Path<(String, String)>) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn reject_change(State(_state): State<AppState>, Path((proposal_id, change_id)): Path<(String, String)>) -> Result<Json<serde_json::Value>, AppError> {
     Ok(Json(serde_json::json!({"proposal_id": proposal_id, "change_id": change_id, "rejected": true})))
 }

@@ -24,7 +24,7 @@ impl UnitOfWork {
         Ok(())
     }
 
-    pub async fn rollback(mut self) -> Result<()> {
+    pub async fn rollback(self) -> Result<()> {
         if !self.committed {
             self.tx.rollback().await.context("Failed to rollback")?;
             debug!("Transaction rolled back");

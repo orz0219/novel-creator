@@ -111,6 +111,7 @@ impl ApprovalRepo {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)]
 struct ApprovalRow {
     id: Uuid,
     project_id: Uuid,

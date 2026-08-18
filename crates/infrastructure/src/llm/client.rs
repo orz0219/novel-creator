@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{info, error};
+use tracing::info;
 
 use super::provider::LlmProvider;
 use super::types::{LlmRequest, LlmResponse};

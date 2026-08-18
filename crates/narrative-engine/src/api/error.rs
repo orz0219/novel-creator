@@ -20,7 +20,3 @@ impl IntoResponse for AppError {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": message }))).into_response()
     }
 }
-
-pub fn not_found(message: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": message })))
-}

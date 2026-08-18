@@ -6,7 +6,6 @@ use domain::{Entity, EntityType, Fact, Relation};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::ser;
 
 // ============= EntityTypeRepo =============
 

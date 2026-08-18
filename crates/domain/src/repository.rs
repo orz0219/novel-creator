@@ -3,10 +3,10 @@
 use anyhow::Result;
 use uuid::Uuid;
 
-use crate::entity::{Entity, EntityType};
+use crate::entity::Entity;
 use crate::project::Project;
 use crate::world::World;
-use crate::narrative::{NarrativeNode, NarrativeNodeType};
+use crate::narrative::NarrativeNode;
 use crate::knowledge::KnowledgeState;
 use crate::ledger::KnowledgeChange;
 use crate::validation::{ProposedChange, ValidationRun, ValidationIssue};

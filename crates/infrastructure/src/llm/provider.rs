@@ -9,7 +9,7 @@ use super::types::{LlmRequest, LlmResponse};
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Generate a response from the LLM
-    async fn generate(&self, request: LlmRequest) -> Result<LlmResponse>;
+    async fn generate(&self, _request: LlmRequest) -> Result<LlmResponse>;
 
     /// Get provider name
     fn name(&self) -> &str;
@@ -19,6 +19,7 @@ pub trait LlmProvider: Send + Sync {
 }
 
 /// OpenAI provider
+#[allow(dead_code)]
 pub struct OpenAiProvider {
     api_key: String,
     model: String,
@@ -37,7 +38,7 @@ impl OpenAiProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn generate(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn generate(&self, _request: LlmRequest) -> Result<LlmResponse> {
         // TODO: Implement actual OpenAI API call
         Ok(LlmResponse {
             content: "Mock response".to_string(),
@@ -60,6 +61,7 @@ impl LlmProvider for OpenAiProvider {
 }
 
 /// DeepSeek provider
+#[allow(dead_code)]
 pub struct DeepSeekProvider {
     api_key: String,
     model: String,
@@ -73,7 +75,7 @@ impl DeepSeekProvider {
 
 #[async_trait]
 impl LlmProvider for DeepSeekProvider {
-    async fn generate(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn generate(&self, _request: LlmRequest) -> Result<LlmResponse> {
         // TODO: Implement actual DeepSeek API call
         Ok(LlmResponse {
             content: "Mock response".to_string(),
@@ -96,6 +98,7 @@ impl LlmProvider for DeepSeekProvider {
 }
 
 /// Local model provider (for testing)
+#[allow(dead_code)]
 pub struct LocalProvider {
     model_path: String,
 }
@@ -108,7 +111,7 @@ impl LocalProvider {
 
 #[async_trait]
 impl LlmProvider for LocalProvider {
-    async fn generate(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn generate(&self, _request: LlmRequest) -> Result<LlmResponse> {
         // TODO: Implement actual local model inference
         Ok(LlmResponse {
             content: "Local mock response".to_string(),

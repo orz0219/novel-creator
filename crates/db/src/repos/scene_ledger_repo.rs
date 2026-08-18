@@ -93,7 +93,7 @@ struct SceneLedgerRow {
 
 impl From<SceneLedgerRow> for SceneLedger {
     fn from(r: SceneLedgerRow) -> Self {
-        let parse_vec = |v: Option<serde_json::Value>| -> Vec<serde_json::Value> {
+        let _parse_vec = |v: Option<serde_json::Value>| -> Vec<serde_json::Value> {
             v.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
         };
         SceneLedger {

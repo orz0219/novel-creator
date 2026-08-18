@@ -4,7 +4,7 @@
 //! 按 L0~L6 分层组织，根据 Token Budget 动态选择，
 //! 生成最小充分上下文给 Skill。
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use db::repos::{entity_repo, knowledge_repo, narrative_repo, state_repo};
 use domain::*;

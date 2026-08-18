@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use db::repos::{generation_repo, narrative_repo};
+use db::repos::generation_repo;
 use domain::*;
 use sqlx::PgPool;
 use uuid::Uuid;

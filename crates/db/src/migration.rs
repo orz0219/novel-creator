@@ -3,7 +3,7 @@
 //! 按顺序执行 SQL migration 文件，确保幂等性。
 
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 /// 运行所有 migration
 pub async fn run_migrations(pool: &PgPool, migrations_dir: &str) -> Result<Vec<String>> {

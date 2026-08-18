@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use sqlx::postgres::{PgPool, PgPoolOptions};
-use sqlx::{Executor, Row};
+use sqlx::Executor;
 use std::time::Duration;
 
 /// 数据库连接管理器

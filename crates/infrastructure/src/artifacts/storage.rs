@@ -5,7 +5,6 @@ use chrono::Utc;
 use sha2::{Sha256, Digest};
 use std::fs;
 use std::path::PathBuf;
-use tracing::info;
 
 use super::types::{Artifact, ArtifactType};
 

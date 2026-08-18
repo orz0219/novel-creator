@@ -18,6 +18,7 @@ pub struct ContractValidationResult {
     pub issues: Vec<String>,
 }
 
+#[allow(dead_code)]
 pub struct ContractValidator<'a> {
     db: &'a Database,
 }

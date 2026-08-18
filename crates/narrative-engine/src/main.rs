@@ -3,7 +3,6 @@
 //! Starts the Axum HTTP server that bridges frontend API calls to backend services.
 
 use anyhow::Result;
-use axum::Router;
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
 

@@ -2,13 +2,14 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::state::AppState;
-use super::error::{AppError, not_found};
+use super::error::AppError;
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct CreateProjectInput {
     pub name: String,
     pub description: Option<String>,
