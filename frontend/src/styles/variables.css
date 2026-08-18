@@ -1,0 +1,112 @@
+/* ============================================
+   Novel Engine Design System - CSS Variables
+   视觉方向: 克制、安静、编辑器、出版物、东方感
+   ============================================ */
+
+:root {
+  /* ---- Background ---- */
+  --bg-base: #090C11;
+  --bg-panel: #0D1118;
+  --bg-panel-secondary: #11151C;
+  --bg-panel-tertiary: #151A24;
+  --bg-hover: rgba(255, 255, 255, 0.04);
+  --bg-active: rgba(255, 255, 255, 0.06);
+  --bg-selected: rgba(255, 255, 255, 0.08);
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+
+  /* ---- Text ---- */
+  --text-primary: #E6EDF3;
+  --text-secondary: #8B949E;
+  --text-tertiary: #6E7681;
+  --text-disabled: #484F58;
+  --text-inverse: #090C11;
+
+  /* ---- Primary (暗红/朱砂) ---- */
+  --color-primary: #C84B31;
+  --color-primary-hover: #D4603F;
+  --color-primary-active: #B34028;
+  --color-primary-subtle: rgba(200, 75, 49, 0.15);
+  --color-primary-text: #E8A594;
+
+  /* ---- Accent ---- */
+  --color-accent: #58A6FF;
+  --color-accent-hover: #79B8FF;
+  --color-accent-subtle: rgba(88, 166, 255, 0.12);
+
+  /* ---- Semantic Colors ---- */
+  --color-success: #3FB950;
+  --color-success-subtle: rgba(63, 185, 80, 0.12);
+  --color-warning: #D29922;
+  --color-warning-subtle: rgba(210, 153, 34, 0.12);
+  --color-error: #F85149;
+  --color-error-subtle: rgba(248, 81, 73, 0.12);
+  --color-info: #58A6FF;
+  --color-info-subtle: rgba(88, 166, 255, 0.12);
+
+  /* ---- Border ---- */
+  --border-default: rgba(255, 255, 255, 0.08);
+  --border-muted: rgba(255, 255, 255, 0.04);
+  --border-emphasis: rgba(255, 255, 255, 0.15);
+  --border-primary: var(--color-primary);
+
+  /* ---- Spacing ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ---- Typography ---- */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+  --font-serif: 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+
+  --leading-tight: 1.3;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.7;
+
+  /* ---- Radius ---- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  /* ---- Shadow ---- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.6);
+
+  /* ---- Z-Index ---- */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+
+  /* ---- Transition ---- */
+  --transition-fast: 120ms ease;
+  --transition-normal: 200ms ease;
+  --transition-slow: 300ms ease;
+
+  /* ---- Layout ---- */
+  --sidebar-width: 240px;
+  --sidebar-collapsed-width: 48px;
+  --header-height: 48px;
+  --panel-min-width: 280px;
+}
