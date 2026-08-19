@@ -176,6 +176,10 @@ mod tests {
         let result = state_committer.commit(project_id, &[change.id]).await;
         assert!(result.is_ok(), "Approved change should commit successfully");
 
+        let response = result.unwrap();
+        assert_eq!(response.results.len(), 1, "Should have 1 commit result");
+        assert_eq!(response.events.len(), 1, "Should have 1 event");
+
         // Verify state was updated
         let state = state_repo.get_current_state(project_id, entity_id, "location").await?;
         assert!(state.is_some());

@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::StateChangeRecord;
+
 /// 拟议变更 - AI 提出的世界状态变更建议
 ///
 /// 这是系统安全性的核心：AI 不能直接修改世界，
@@ -267,6 +269,49 @@ pub struct ValidationIssue {
     pub message: String,
     pub suggestion: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// Commit Result - 事务化提交的结果
+///
+/// P2-9: 支持多种变更类型的提交结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CommitResult {
+    /// 状态变更已提交
+    StateChange {
+        record: StateChangeRecord,
+        new_version: i32,
+    },
+    /// 实体已创建
+    EntityCreated {
+        entity_id: Uuid,
+        entity_name: String,
+    },
+    /// 实体已更新
+    EntityUpdated {
+        entity_id: Uuid,
+        changes: Vec<String>,
+    },
+    /// 关系已创建
+    RelationCreated {
+        relation_id: Uuid,
+        source_entity_id: Uuid,
+        target_entity_id: Uuid,
+        relation_type: String,
+    },
+    /// 知识已更新
+    KnowledgeUpdated {
+        fact_id: Uuid,
+        fact_content: String,
+    },
+}
+
+/// 事务化提交的完整结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitResponse {
+    pub project_id: Uuid,
+    pub results: Vec<CommitResult>,
+    pub events: Vec<Uuid>,
+    pub committed_at: DateTime<Utc>,
 }
 
 /// 验证问题类型

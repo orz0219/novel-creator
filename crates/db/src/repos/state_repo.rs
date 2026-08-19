@@ -246,6 +246,63 @@ impl StateRepo {
     }
 
     // ============================================================
+    // P1-4: Atomic state mutation - commit_state_change_tx
+    // ============================================================
+
+    /// 原子化状态变更 - 在单一事务中完成 read + record + write
+    ///
+    /// P1-4: 将 read + record + write 封装成单一方法，确保：
+    /// 1. 读取当前状态
+    /// 2. 记录变更历史
+    /// 3. 更新当前状态
+    /// 所有操作在同一事务中完成，避免逻辑耦合风险。
+    ///
+    /// 返回 (StateChangeRecord, new_version)
+    pub async fn commit_state_change_tx(
+        conn: &mut PgConnection,
+        project_id: Uuid,
+        event_id: Option<Uuid>,
+        change_type: &str,
+        target_entity_id: Uuid,
+        state_key: &str,
+        new_value: serde_json::Value,
+        committed_by: Option<&str>,
+    ) -> Result<(StateChangeRecord, i32)> {
+        // Step 1: 读取当前状态
+        let old_state = Self::get_current_state_tx(
+            conn, project_id, target_entity_id, state_key,
+        ).await?;
+        let old_value = old_state.as_ref().map(|s| s.state_value.clone());
+        let expected_version = old_state.as_ref().map(|s| s.version);
+
+        // Step 2: 记录变更历史
+        let record = Self::record_change_tx(
+            conn,
+            project_id,
+            event_id,
+            change_type,
+            target_entity_id,
+            state_key,
+            old_value,
+            new_value.clone(),
+            committed_by,
+        ).await?;
+
+        // Step 3: 更新当前状态 (CAS)
+        Self::upsert_state_tx(
+            conn,
+            project_id,
+            target_entity_id,
+            state_key,
+            new_value,
+            expected_version,
+        ).await?;
+
+        let new_version = expected_version.map(|v| v + 1).unwrap_or(1);
+        Ok((record, new_version))
+    }
+
+    // ============================================================
     // State change recording
     // ============================================================
 
