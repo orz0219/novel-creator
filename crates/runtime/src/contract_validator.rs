@@ -41,29 +41,39 @@ impl<'a> ContractValidator<'a> {
             }
         }
 
-        // 检查必需事件（按词匹配，容忍助词/量词插入）
+        // 检查必需事件（ALL required events must appear）
         let required_events_met = contract.required_events.is_empty() ||
-            contract.required_events.iter().any(|e| phrase_matches(draft_content, e));
+            contract.required_events.iter().all(|e| phrase_matches(draft_content, e));
 
-        // 检查必需角色（简化：检查名称）
-        let required_characters_met = true; // 需要角色名称才能检查
+        // 检查必需角色
+        // NOTE: required_characters contains entity UUIDs, not names.
+        // Character name resolution requires DB access which is not available here.
+        // TODO: Pass a character name lookup function or resolve names before calling validate.
+        let required_characters_met = true; // Placeholder until name resolution is implemented
 
         // 检查必需事实
         let required_facts_met = contract.required_facts.is_empty() ||
-            contract.required_facts.iter().any(|f| phrase_matches(draft_content, f));
+            contract.required_facts.iter().all(|f| phrase_matches(draft_content, f));
 
         // 检查读者学习
         let reader_learns_met = contract.reader_learns.is_empty() ||
-            contract.reader_learns.iter().any(|r| phrase_matches(draft_content, r));
+            contract.reader_learns.iter().all(|r| phrase_matches(draft_content, r));
 
         // 检查主角学习
         let protagonist_learns_met = contract.protagonist_learns.is_empty() ||
-            contract.protagonist_learns.iter().any(|p| phrase_matches(draft_content, p));
+            contract.protagonist_learns.iter().all(|p| phrase_matches(draft_content, p));
 
         // 检查世界变化
-        let world_changes_met = contract.world_changes.is_empty();
+        let world_changes_met = contract.world_changes.is_empty() ||
+            contract.world_changes.iter().all(|w| phrase_matches(draft_content, w));
 
-        let passed = required_events_met && forbidden_violated.is_empty() && required_characters_met && required_facts_met;
+        let passed = required_events_met
+            && forbidden_violated.is_empty()
+            && required_characters_met
+            && required_facts_met
+            && reader_learns_met
+            && protagonist_learns_met
+            && world_changes_met;
 
         Ok(ContractValidationResult {
             passed,

@@ -24,6 +24,10 @@ use uuid::Uuid;
 ///
 /// 所有 change 在单个 BEGIN/COMMIT 事务中提交。
 /// 任何一步失败自动 ROLLBACK，保证原子性。
+///
+/// INVARIANT: self.pool is ONLY used for begin().
+/// All repo operations MUST use _tx methods with &mut *tx.
+/// FORBIDDEN: self.pool.clone() inside commit() for creating repos.
 pub struct DbStateCommitter {
     pool: PgPool,
 }
@@ -87,10 +91,10 @@ impl DbStateCommitter {
             }
 
             // ============================================================
-            // P2-5: 验证 target_entity_id 存在
+            // P2-5: 验证 target_entity_id 存在 (within transaction)
             // ============================================================
-            let entity = entity_repo::EntityRepo::get_by_id_with_project(
-                &entity_repo::EntityRepo::new(self.pool.clone()),
+            let entity = entity_repo::EntityRepo::get_by_id_with_project_tx(
+                &mut *tx,
                 project_id,
                 change.target_entity_id,
             ).await?;
@@ -176,9 +180,12 @@ impl DbStateCommitter {
                     });
                 }
                 ChangePayload::EntityCreate { entity_type, name, attributes } => {
-                    // P2-9: 支持实体创建
-                    let entity_type_repo = entity_repo::EntityTypeRepo::new(self.pool.clone());
-                    let entity_type_obj = entity_type_repo.ensure(&entity_type, None).await?;
+                    // P2-9: 支持实体创建 (within transaction)
+                    let entity_type_obj = entity_repo::EntityTypeRepo::ensure_tx(
+                        &mut *tx,
+                        &entity_type,
+                        None,
+                    ).await?;
 
                     let world_id = sqlx::query_scalar::<_, Uuid>(
                         "SELECT id FROM world WHERE project_id = $1 AND is_main = TRUE LIMIT 1"
@@ -188,8 +195,8 @@ impl DbStateCommitter {
                     .await
                     .context("No main world found for project")?;
 
-                    let entity = entity_repo::EntityRepo::create(
-                        &entity_repo::EntityRepo::new(self.pool.clone()),
+                    let entity = entity_repo::EntityRepo::create_tx(
+                        &mut *tx,
                         project_id,
                         world_id,
                         entity_type_obj.id,
@@ -213,9 +220,9 @@ impl DbStateCommitter {
                     });
                 }
                 ChangePayload::RelationCreate { target_entity_id, relation_type, attributes } => {
-                    // P2-9: 支持关系创建
-                    let relation_repo = entity_repo::RelationRepo::new(self.pool.clone());
-                    let relation = relation_repo.create(
+                    // P2-9: 支持关系创建 (within transaction)
+                    let relation = entity_repo::RelationRepo::create_tx(
+                        &mut *tx,
                         project_id,
                         change.target_entity_id,
                         target_entity_id,

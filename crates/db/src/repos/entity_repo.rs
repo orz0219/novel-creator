@@ -73,6 +73,28 @@ impl EntityTypeRepo {
         }
         self.create(name, description).await
     }
+
+    /// Transactional ensure: atomically insert-or-return using ON CONFLICT.
+    /// Safe for concurrent callers -- no check-then-insert race.
+    pub async fn ensure_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<EntityType> {
+        let row = sqlx::query_as::<_, EntityTypeRow>(
+            "INSERT INTO entity_type (id, name, description, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, NOW(), NOW())
+             ON CONFLICT (name) DO UPDATE SET updated_at = NOW()
+             RETURNING id, name, description, schema_json, created_at, updated_at",
+        )
+        .bind(name)
+        .bind(description.unwrap_or(""))
+        .fetch_one(executor)
+        .await
+        .context("Failed to ensure entity type")?;
+
+        Ok(row.into())
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -249,27 +271,157 @@ impl EntityRepo {
     }
 
     pub async fn update(&self, entity: &Entity) -> Result<()> {
-        sqlx::query(
-            "UPDATE entity SET name = $1, summary = $2, attributes = $3, updated_at = $4 WHERE id = $5",
+        let result = sqlx::query(
+            "UPDATE entity SET name = $1, summary = $2, attributes = $3, \
+             version = version + 1, updated_at = NOW() \
+             WHERE id = $4 AND project_id = $5 AND version = $6",
         )
         .bind(&entity.name)
         .bind(&entity.summary)
         .bind(&entity.attributes)
-        .bind(Utc::now())
         .bind(entity.id)
+        .bind(entity.project_id)
+        .bind(entity.version)
         .execute(&self.pool)
         .await
         .context("Failed to update entity")?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!(
+                "Concurrent modification detected for entity {} (expected version {})",
+                entity.id, entity.version
+            ));
+        }
         Ok(())
     }
 
-    pub async fn delete(&self, id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM entity WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .context("Failed to delete entity")?;
-        Ok(())
+    pub async fn delete(&self, project_id: Uuid, id: Uuid) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE entity SET status = 'Deleted', updated_at = NOW() \
+             WHERE id = $1 AND project_id = $2 AND status != 'Deleted'",
+        )
+        .bind(id)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to soft-delete entity")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ============================================================
+    // Transactional methods (accept any Executor -- pool or &mut Tx)
+    // ============================================================
+
+    /// Transactional create entity.
+    pub async fn create_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        world_id: Uuid,
+        entity_type_id: Uuid,
+        name: &str,
+        summary: Option<&str>,
+        description: Option<&str>,
+        attributes: serde_json::Value,
+    ) -> Result<Entity> {
+        let id = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO entity (id, project_id, world_id, entity_type_id, name, summary, description, attributes, version, created_by, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 'system', NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(world_id)
+        .bind(entity_type_id)
+        .bind(name)
+        .bind(summary.unwrap_or(""))
+        .bind(description.unwrap_or(""))
+        .bind(&attributes)
+        .execute(executor)
+        .await
+        .context("Failed to create entity")?;
+
+        Ok(Entity {
+            id,
+            project_id,
+            world_id,
+            entity_type_id,
+            name: name.to_string(),
+            summary: summary.map(|s| s.to_string()),
+            description: description.map(|s| s.to_string()),
+            attributes,
+            version: 1,
+            created_by: "system".to_string(),
+            updated_by: None,
+            source_generation_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Transactional project-scoped get.
+    pub async fn get_by_id_with_project_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        id: Uuid,
+    ) -> Result<Option<Entity>> {
+        let row = sqlx::query_as::<_, EntityRow>(
+            "SELECT id, project_id, world_id, entity_type_id, name, summary, description, \
+             attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at \
+             FROM entity WHERE id = $1 AND project_id = $2",
+        )
+        .bind(id)
+        .bind(project_id)
+        .fetch_optional(executor)
+        .await
+        .context("Failed to query entity")?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
+    /// Transactional update with version CAS.
+    ///
+    /// Returns the number of rows affected. If 0, a ConcurrentModification occurred.
+    pub async fn update_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        entity: &Entity,
+    ) -> Result<usize> {
+        let result = sqlx::query(
+            "UPDATE entity SET name = $1, summary = $2, attributes = $3, \
+             version = version + 1, updated_at = NOW() \
+             WHERE id = $4 AND project_id = $5 AND version = $6",
+        )
+        .bind(&entity.name)
+        .bind(&entity.summary)
+        .bind(&entity.attributes)
+        .bind(entity.id)
+        .bind(entity.project_id)
+        .bind(entity.version)
+        .execute(executor)
+        .await
+        .context("Failed to update entity")?;
+
+        Ok(result.rows_affected() as usize)
+    }
+
+    /// Transactional soft delete with project isolation.
+    pub async fn delete_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        id: Uuid,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE entity SET status = 'Deleted', updated_at = NOW() \
+             WHERE id = $1 AND project_id = $2 AND status != 'Deleted'",
+        )
+        .bind(id)
+        .bind(project_id)
+        .execute(executor)
+        .await
+        .context("Failed to soft-delete entity")?;
+
+        Ok(result.rows_affected() > 0)
     }
 }
 
@@ -367,12 +519,13 @@ impl RelationRepo {
         })
     }
 
-    pub async fn list_by_entity(&self, entity_id: Uuid) -> Result<Vec<Relation>> {
+    pub async fn list_by_entity(&self, project_id: Uuid, entity_id: Uuid) -> Result<Vec<Relation>> {
         let rows = sqlx::query_as::<_, RelationRow>(
             "SELECT id, project_id, source_entity_id, target_entity_id, relation_type, description, \
              attributes, valid_from, valid_until, created_at, updated_at \
-             FROM relation WHERE source_entity_id = $1 OR target_entity_id = $1 ORDER BY created_at",
+             FROM relation WHERE project_id = $1 AND (source_entity_id = $2 OR target_entity_id = $2) ORDER BY created_at",
         )
+        .bind(project_id)
         .bind(entity_id)
         .fetch_all(&self.pool)
         .await
@@ -388,6 +541,72 @@ impl RelationRepo {
             .await
             .context("Failed to delete relation")?;
         Ok(())
+    }
+
+    // ============================================================
+    // Transactional methods
+    // ============================================================
+
+    /// Transactional create relation.
+    pub async fn create_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        source_entity_id: Uuid,
+        target_entity_id: Uuid,
+        relation_type: &str,
+        description: Option<&str>,
+        attributes: serde_json::Value,
+    ) -> Result<Relation> {
+        let id = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO relation (id, project_id, source_entity_id, target_entity_id, relation_type, description, attributes, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(source_entity_id)
+        .bind(target_entity_id)
+        .bind(relation_type)
+        .bind(description.unwrap_or(""))
+        .bind(&attributes)
+        .execute(executor)
+        .await
+        .context("Failed to create relation")?;
+
+        Ok(Relation {
+            id,
+            project_id,
+            source_entity_id,
+            target_entity_id,
+            relation_type: relation_type.to_string(),
+            description: description.map(|s| s.to_string()),
+            attributes,
+            valid_from: None,
+            valid_until: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Transactional project-scoped list by entity.
+    pub async fn list_by_entity_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        entity_id: Uuid,
+    ) -> Result<Vec<Relation>> {
+        let rows = sqlx::query_as::<_, RelationRow>(
+            "SELECT id, project_id, source_entity_id, target_entity_id, relation_type, description, \
+             attributes, valid_from, valid_until, created_at, updated_at \
+             FROM relation WHERE project_id = $1 AND (source_entity_id = $2 OR target_entity_id = $2) ORDER BY created_at",
+        )
+        .bind(project_id)
+        .bind(entity_id)
+        .fetch_all(executor)
+        .await
+        .context("Failed to query relations")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 }
 

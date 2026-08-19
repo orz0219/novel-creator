@@ -69,7 +69,7 @@ pub struct ContextScore {
 
 impl ContextScore {
     pub fn total_score(&self) -> f64 {
-        self.relevance * self.importance * self.visibility * self.recency
+        self.relevance * self.importance * self.visibility * self.recency * self.explicitness
     }
 
     pub fn default_score() -> Self {

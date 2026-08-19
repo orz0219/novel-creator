@@ -93,11 +93,3 @@ pub trait StateRepository: Send + Sync {
     async fn get_state_history(&self, project_id: Uuid, entity_id: Uuid) -> Result<Vec<StateChangeRecord>>;
     async fn apply_state_change(&self, project_id: Uuid, entity_id: Uuid, state_key: &str, new_value: serde_json::Value, expected_version: i32) -> Result<CurrentState>;
 }
-
-/// Unit of Work trait
-#[async_trait::async_trait]
-pub trait UnitOfWorkTrait: Send + Sync {
-    async fn begin(&self) -> Result<Box<dyn UnitOfWorkTrait>>;
-    async fn commit(self: Box<Self>) -> Result<()>;
-    async fn rollback(self: Box<Self>) -> Result<()>;
-}

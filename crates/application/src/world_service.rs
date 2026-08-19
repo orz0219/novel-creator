@@ -86,10 +86,10 @@ impl WorldService {
         Ok(entity)
     }
 
-    /// 获取实体
-    pub async fn get_entity(&self, entity_id: Uuid) -> Result<Option<Entity>> {
+    /// 获取实体 (project-scoped)
+    pub async fn get_entity(&self, project_id: Uuid, entity_id: Uuid) -> Result<Option<Entity>> {
         let repo = entity_repo::EntityRepo::new(self.pool.clone());
-        repo.get_by_id(entity_id).await
+        repo.get_by_id_with_project(project_id, entity_id).await
     }
 
     /// 列出项目中的所有实体
@@ -146,9 +146,9 @@ impl WorldService {
     }
 
     /// 列出实体的所有关系
-    pub async fn list_relations(&self, entity_id: Uuid) -> Result<Vec<Relation>> {
+    pub async fn list_relations(&self, project_id: Uuid, entity_id: Uuid) -> Result<Vec<Relation>> {
         let repo = entity_repo::RelationRepo::new(self.pool.clone());
-        repo.list_by_entity(entity_id).await
+        repo.list_by_entity(project_id, entity_id).await
     }
 
     // ============================================================

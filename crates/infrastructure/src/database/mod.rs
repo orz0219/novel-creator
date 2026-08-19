@@ -1,10 +1,7 @@
-//! Database layer - PostgreSQL implementations with connection pooling
+//! Database layer - infrastructure-specific database utilities
+//!
+//! Core database repositories live in crates/db/src/repos/.
+//! This module is reserved for infrastructure-specific wrappers.
 
-pub mod connection;
-pub mod unit_of_work;
-pub mod write_queue;
-pub mod repositories;
-
-pub use connection::DatabasePool;
-pub use unit_of_work::UnitOfWork;
-pub use write_queue::{WriteQueue, WriteCommand};
+// No modules currently - write_queue, unit_of_work, connection, and repositories
+// have been removed as dead code. Core DB functionality is in crates/db.
