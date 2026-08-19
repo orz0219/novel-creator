@@ -182,6 +182,9 @@ impl WorldService {
     // ============================================================
 
     /// 设置实体的当前状态
+    ///
+    /// P0-2: 使用事务保证 state mutation 和 change record 的原子性。
+    /// 所有 Canonical State 写入必须经过事务化路径。
     pub async fn set_entity_state(
         &self,
         project_id: Uuid,
@@ -189,24 +192,35 @@ impl WorldService {
         state_key: &str,
         state_value: serde_json::Value,
     ) -> Result<CurrentState> {
-        let repo = state_repo::StateRepo::new(self.pool.clone());
-        // 先获取当前版本号用于 CAS
-        let current = repo.get_current_state(project_id, entity_id, state_key).await?;
-        let expected_version = current.map(|s| s.version);
-        let state = repo.upsert_state(project_id, entity_id, state_key, state_value.clone(), expected_version).await?;
+        let mut tx = self.pool.begin().await.context("Failed to begin transaction")?;
 
-        // 同时记录状态变更历史
-        repo.record_change(
+        // 先获取当前版本号用于 CAS
+        let current = state_repo::StateRepo::get_current_state_tx(
+            &mut *tx, project_id, entity_id, state_key
+        ).await?;
+        let expected_version = current.as_ref().map(|s| s.version);
+        let old_value = current.map(|s| s.state_value);
+
+        // 记录状态变更历史（在同一事务中）
+        state_repo::StateRepo::record_change_tx(
+            &mut *tx,
             project_id,
             None,
             "SET",
             entity_id,
             state_key,
-            None,
-            state_value,
+            old_value,
+            state_value.clone(),
             Some("system"),
-        )
-        .await?;
+        ).await?;
+
+        // 更新 current_state（在同一事务中）
+        let state = state_repo::StateRepo::upsert_state_tx(
+            &mut *tx,
+            project_id, entity_id, state_key, state_value, expected_version,
+        ).await?;
+
+        tx.commit().await.context("Failed to commit transaction")?;
 
         tracing::info!(
             "Set state: entity={}, key={}, value={}",
@@ -279,6 +293,8 @@ impl WorldService {
     // ============================================================
 
     /// 记录事件并应用状态变更
+    ///
+    /// P0-2: 使用事务保证 event + entity relation + state change 的原子性。
     pub async fn record_event(
         &self,
         project_id: Uuid,
@@ -288,12 +304,24 @@ impl WorldService {
         involved_entity_ids: &[Uuid],
         state_changes: Vec<StateChange>,
     ) -> Result<Event> {
+        let mut tx = self.pool.begin().await.context("Failed to begin transaction")?;
         let id = Uuid::new_v4();
         let now = Utc::now();
 
         // 插入事件
-        let event_repo = db::repos::event_repo::EventRepo::new(self.pool.clone());
-        event_repo.create(project_id, name, description, event_type, None).await?;
+        sqlx::query(
+            "INSERT INTO event (id, project_id, name, description, event_type, created_at, updated_at)              VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(name)
+        .bind(description)
+        .bind(event_type)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to insert event")?;
 
         // 关联实体
         for entity_id in involved_entity_ids {
@@ -301,40 +329,45 @@ impl WorldService {
                 .bind(Uuid::new_v4())
                 .bind(id)
                 .bind(entity_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .context("Failed to insert event_entity")?;
         }
 
-        // 应用状态变更
-        let state_repo = state_repo::StateRepo::new(self.pool.clone());
+        // 应用状态变更（在同一事务中）
         for change in &state_changes {
-            state_repo
-                .record_change(
-                    project_id,
-                    Some(id),
-                    &serde_json::to_string(&change.change_type).unwrap_or_default(),
-                    change.target_entity_id,
-                    &change.state_key,
-                    change.old_value.clone(),
-                    change.new_value.clone(),
-                    Some("event"),
-                )
-                .await?;
+            // 获取当前状态
+            let current = state_repo::StateRepo::get_current_state_tx(
+                &mut *tx, project_id, change.target_entity_id, &change.state_key
+            ).await?;
+            let expected_version = current.as_ref().map(|s| s.version);
+            let old_value = current.map(|s| s.state_value);
+
+            // 记录变更历史
+            state_repo::StateRepo::record_change_tx(
+                &mut *tx,
+                project_id,
+                Some(id),
+                "EVENT",
+                change.target_entity_id,
+                &change.state_key,
+                old_value,
+                change.new_value.clone(),
+                Some("event"),
+            ).await?;
 
             // 更新 current_state (with CAS)
-            let current = state_repo.get_current_state(project_id, change.target_entity_id, &change.state_key).await?;
-            let expected_version = current.map(|s| s.version);
-            state_repo
-                .upsert_state(
-                    project_id,
-                    change.target_entity_id,
-                    &change.state_key,
-                    change.new_value.clone(),
-                    expected_version,
-                )
-                .await?;
+            state_repo::StateRepo::upsert_state_tx(
+                &mut *tx,
+                project_id,
+                change.target_entity_id,
+                &change.state_key,
+                change.new_value.clone(),
+                expected_version,
+            ).await?;
         }
+
+        tx.commit().await.context("Failed to commit transaction")?;
 
         tracing::info!("Recorded event: {} (changes: {})", name, state_changes.len());
         Ok(Event {

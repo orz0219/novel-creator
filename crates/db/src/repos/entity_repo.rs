@@ -158,13 +158,41 @@ impl EntityRepo {
         })
     }
 
+    /// Get entity by ID without project scope.
+    ///
+    /// **WARNING**: This method does NOT enforce project isolation.
+    /// For production code, use get_by_id_with_project instead.
+    /// This method should only be used for:
+    /// - Global entity lookups (e.g., entity types)
+    /// - Testing
+    /// - Admin operations
     pub async fn get_by_id(&self, id: Uuid) -> Result<Option<Entity>> {
+        tracing::warn!(
+            "EntityRepo::get_by_id called without project scope.              Consider using get_by_id_with_project for project isolation.",
+        );
         let row = sqlx::query_as::<_, EntityRow>(
             "SELECT id, project_id, world_id, entity_type_id, name, summary, description, \
              attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at \
              FROM entity WHERE id = $1",
         )
         .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query entity")?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
+    /// Project-scoped entity query. Ensures entity belongs to the specified project.
+    ///
+    /// Use this method instead of get_by_id when you need project isolation.
+    /// Returns None if entity doesn't exist OR doesn't belong to the project.
+    pub async fn get_by_id_with_project(&self, project_id: Uuid, id: Uuid) -> Result<Option<Entity>> {
+        let row = sqlx::query_as::<_, EntityRow>(
+            "SELECT id, project_id, world_id, entity_type_id, name, summary, description,              attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at              FROM entity WHERE id = $1 AND project_id = $2",
+        )
+        .bind(id)
+        .bind(project_id)
         .fetch_optional(&self.pool)
         .await
         .context("Failed to query entity")?;

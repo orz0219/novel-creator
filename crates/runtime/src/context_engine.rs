@@ -4,7 +4,7 @@
 //! 按 L0~L6 分层组织，根据 Token Budget 动态选择，
 //! 生成最小充分上下文给 Skill。
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use db::repos::{entity_repo, knowledge_repo, narrative_repo, state_repo};
 use domain::*;
@@ -145,8 +145,9 @@ impl ContextEngine {
     ) -> Result<ContextPackage> {
         // 获取 World ID
         let narrative_repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
+        // P2-2: 使用 project-scoped 查询确保 scene 属于当前 project
         let scene_node = narrative_repo
-            .get_node_by_id(scene_node_id)
+            .get_node_by_id_with_project(project_id, scene_node_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Scene node not found: {}", scene_node_id))?;
         let world_id = scene_node.world_id;
@@ -183,8 +184,9 @@ impl ContextEngine {
         let knowledge_repo = knowledge_repo::KnowledgeRepo::new(self.pool.clone());
 
         // 第1步: Scene Explicit Entities
+        // P2-2: 使用 project-scoped 查询确保 scene 属于当前 project
         let scene_node = narrative_repo
-            .get_node_by_id(scene_node_id)
+            .get_node_by_id_with_project(project_id, scene_node_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Scene node not found"))?;
         let scene_attrs: SceneAttributes = serde_json::from_value(scene_node.attributes.clone()).unwrap_or_default();
@@ -207,9 +209,10 @@ impl ContextEngine {
         };
 
         // 第6步: Narrative Context
-        let chapter_summary = self.get_chapter_summary(&scene_node, &narrative_repo).await?;
+        // P2-2: 所有 narrative 查询都使用 project-scoped 方法
+        let chapter_summary = self.get_chapter_summary(project_id, &scene_node, &narrative_repo).await?;
         let volume_summary = self.get_volume_summary(project_id, &scene_node, &narrative_repo).await?;
-        let arc_summary = self.get_arc_summary(&scene_node, &narrative_repo).await?;
+        let arc_summary = self.get_arc_summary(project_id, &scene_node, &narrative_repo).await?;
         let prev_scene_summary = self.get_previous_scene_summary(project_id, &scene_node, &narrative_repo).await?;
 
         // 第7步: World Rules
@@ -452,9 +455,10 @@ impl ContextEngine {
     // 辅助方法
     // ============================================================
 
-    async fn get_chapter_summary(&self, scene_node: &NarrativeNode, narrative_repo: &narrative_repo::NarrativeRepo) -> Result<Option<String>> {
+    async fn get_chapter_summary(&self, project_id: Uuid, scene_node: &NarrativeNode, narrative_repo: &narrative_repo::NarrativeRepo) -> Result<Option<String>> {
         if let Some(parent_id) = scene_node.parent_id {
-            if let Some(chapter) = narrative_repo.get_node_by_id(parent_id).await? {
+            // P2-2: 使用 project-scoped 查询确保 chapter 属于当前 project
+            if let Some(chapter) = narrative_repo.get_node_by_id_with_project(project_id, parent_id).await? {
                 return Ok(Some(format!("Chapter: {} - {}", chapter.title, chapter.description.unwrap_or_default())));
             }
         }
@@ -463,10 +467,11 @@ impl ContextEngine {
 
     async fn get_volume_summary(&self, project_id: Uuid, scene_node: &NarrativeNode, narrative_repo: &narrative_repo::NarrativeRepo) -> Result<Option<String>> {
         // Walk up: Scene → Chapter → Arc → Volume
+        // P2-2: 使用 project-scoped 查询确保所有节点属于当前 project
         let volume = if let Some(chapter_id) = scene_node.parent_id {
-            if let Some(chapter) = narrative_repo.get_node_by_id(chapter_id).await? {
+            if let Some(chapter) = narrative_repo.get_node_by_id_with_project(project_id, chapter_id).await? {
                 if let Some(arc_id) = chapter.parent_id {
-                    if let Some(arc) = narrative_repo.get_node_by_id(arc_id).await? {
+                    if let Some(arc) = narrative_repo.get_node_by_id_with_project(project_id, arc_id).await? {
                         arc.parent_id
                     } else { None }
                 } else { None }
@@ -474,7 +479,7 @@ impl ContextEngine {
         } else { None };
 
         if let Some(vol_id) = volume {
-            if let Some(vol) = narrative_repo.get_node_by_id(vol_id).await? {
+            if let Some(vol) = narrative_repo.get_node_by_id_with_project(project_id, vol_id).await? {
                 let attrs: VolumeAttributes = serde_json::from_value(vol.attributes.clone()).unwrap_or_default();
                 let mut summary = format!("Current Volume: {}", vol.title);
                 if let Some(mission) = &attrs.mission {
@@ -484,26 +489,19 @@ impl ContextEngine {
             }
         }
 
-        // Fallback: if scene has no parent chain, try first volume
-        let all = narrative_repo.list_nodes_by_project(project_id).await?;
-        let volumes: Vec<&NarrativeNode> = all.iter().filter(|n| n.node_type == NarrativeNodeType::Volume).collect();
-        if let Some(vol) = volumes.first() {
-            let attrs: VolumeAttributes = serde_json::from_value(vol.attributes.clone()).unwrap_or_default();
-            let mut summary = format!("Current Volume: {}", vol.title);
-            if let Some(mission) = &attrs.mission {
-                summary.push_str(&format!("\nMission: {}", mission));
-            }
-            Ok(Some(summary))
-        } else {
-            Ok(None)
-        }
+        // P2-1: 删除 first-volume fallback
+        // 如果 parent chain 断裂，不应该猜测一个 volume
+        // 这会导致错误的上下文，影响 LLM 生成质量
+        // 正确做法是返回 None，让调用者处理缺失的 volume 信息
+        Ok(None)
     }
 
-    async fn get_arc_summary(&self, scene_node: &NarrativeNode, narrative_repo: &narrative_repo::NarrativeRepo) -> Result<Option<String>> {
+    async fn get_arc_summary(&self, project_id: Uuid, scene_node: &NarrativeNode, narrative_repo: &narrative_repo::NarrativeRepo) -> Result<Option<String>> {
         if let Some(chapter_id) = scene_node.parent_id {
-            if let Some(chapter) = narrative_repo.get_node_by_id(chapter_id).await? {
+            // P2-2: 使用 project-scoped 查询确保所有节点属于当前 project
+            if let Some(chapter) = narrative_repo.get_node_by_id_with_project(project_id, chapter_id).await? {
                 if let Some(arc_id) = chapter.parent_id {
-                    if let Some(arc) = narrative_repo.get_node_by_id(arc_id).await? {
+                    if let Some(arc) = narrative_repo.get_node_by_id_with_project(project_id, arc_id).await? {
                         return Ok(Some(format!("Current Arc: {} - {}", arc.title, arc.description.unwrap_or_default())));
                     }
                 }
@@ -555,7 +553,8 @@ impl ContextEngine {
         state_repo: &state_repo::StateRepo,
     ) -> Result<Option<(Entity, Vec<CurrentState>)>> {
         if let Some(loc_id) = scene_attrs.location_id {
-            if let Some(entity) = entity_repo.get_by_id(loc_id).await? {
+            // P1-6: 使用 project-scoped 查询确保 location 属于当前 project
+            if let Some(entity) = entity_repo.get_by_id_with_project(project_id, loc_id).await? {
                 let states = state_repo.list_current_states(project_id, loc_id).await?;
                 return Ok(Some((entity, states)));
             }
@@ -581,7 +580,7 @@ impl ContextEngine {
         }
 
         // Single batch query instead of N+1
-        let rows = match sqlx::query_as::<_, RelationRow>(
+        let rows = sqlx::query_as::<_, RelationRow>(
             "SELECT id, project_id, source_entity_id, target_entity_id, relation_type, description, attributes, valid_from, valid_until, created_at, updated_at \
              FROM relation WHERE project_id = $1 AND (source_entity_id = ANY($2) OR target_entity_id = ANY($2)) ORDER BY created_at DESC"
         )
@@ -589,13 +588,9 @@ impl ContextEngine {
         .bind(&entity_ids)
         .fetch_all(&self.pool)
         .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!("Failed to query relations for project {}: {}. Treating as empty.", project_id, e);
-                return Ok(Vec::new());
-            }
-        };
+        // P1-7: Database errors must be propagated, not silently converted to empty data
+        // Silent degradation can cause LLM to generate incorrect plot due to missing relations
+        .context("Failed to query relations - this is a critical database error that must not be silently ignored")?;
 
         let relations: Vec<Relation> = rows.into_iter().map(|r| r.into()).collect();
         Ok(relations)
@@ -636,19 +631,14 @@ impl ContextEngine {
         let mut content = String::new();
 
         // Get world rules from canon_rule table
-        let rows = match sqlx::query_as::<_, (String, String, String)>(
+        let rows = sqlx::query_as::<_, (String, String, String)>(
             "SELECT rule_level, rule_content, affected_scope FROM canon_rule WHERE project_id = $1 ORDER BY rule_level"
         )
         .bind(project_id)
         .fetch_all(&self.pool)
         .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!("Failed to query canon rules for project {}: {}. World rules will be incomplete.", project_id, e);
-                Vec::new()
-            }
-        };
+        // P1-7: Canon rules are critical for validation - errors must be propagated
+        .context("Failed to query canon rules - this is a critical database error")?;
 
         if !rows.is_empty() {
             content.push_str("## World Rules (Canon Constitution)\n");
@@ -658,19 +648,14 @@ impl ContextEngine {
         }
 
         // Also get world description/rules from world table
-        let world_rules: Option<String> = match sqlx::query_scalar(
+        // P1-7: Database errors must be propagated for critical context data
+        let world_rules: Option<String> = sqlx::query_scalar(
             "SELECT world_rules FROM world WHERE project_id = $1 AND is_main = TRUE"
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
         .await
-        {
-            Ok(opt) => opt,
-            Err(e) => {
-                tracing::warn!("Failed to query world rules for project {}: {}. World rules will be incomplete.", project_id, e);
-                None
-            }
-        };
+        .context("Failed to query world rules - this is a critical database error")?;
 
         if let Some(rules) = world_rules {
             if !rules.is_empty() {
@@ -722,7 +707,7 @@ impl ContextEngine {
         }
 
         // Single batch query instead of N+1
-        let rows = match sqlx::query_as::<_, EventRow>(
+        let rows = sqlx::query_as::<_, EventRow>(
             "SELECT DISTINCT e.id, e.project_id, e.name, e.description, e.event_type, e.event_time, e.duration, e.created_at, e.updated_at \
              FROM event e INNER JOIN event_entity ee ON e.id = ee.event_id \
              WHERE e.project_id = $1 AND ee.entity_id = ANY($2) ORDER BY e.created_at DESC LIMIT 20"
@@ -731,13 +716,8 @@ impl ContextEngine {
         .bind(&entity_ids)
         .fetch_all(&self.pool)
         .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!("Failed to query events for project {}: {}. Treating as empty.", project_id, e);
-                return Ok(Vec::new());
-            }
-        };
+        // P1-7: Database errors must be propagated for critical context data
+        .context("Failed to query events - this is a critical database error")?;
 
         let events: Vec<Event> = rows.into_iter().map(|r| r.into()).collect();
         Ok(events)

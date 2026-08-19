@@ -177,7 +177,8 @@ impl Validator {
         .bind(project_id)
         .fetch_all(&self.pool)
         .await
-        .unwrap_or_default();
+        // P2-3: Database errors must be propagated, not silently converted to empty data
+        .context("Failed to load canon rules - this is a critical database error")?;
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }

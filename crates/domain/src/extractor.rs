@@ -83,11 +83,14 @@ impl KnowledgeExtractor for MockKnowledgeExtractor {
 /// StateCommitter - 事务化提交状态变更
 ///
 /// 将 ProposedChange 列表事务化提交到世界状态。
+/// P1-2: commit 接受 change_ids 而非 ProposedChange 快照，
+/// 内部会从 DB 重新加载权威版本，防止并发修改导致的数据不一致。
 pub trait StateCommitter {
-    /// 提交一批已验证的变更
+    /// 提交一批已验证的变更（通过 ID）
+    /// 内部会从 DB 重新加载 proposal，不依赖外部传入的快照。
     fn commit(
         &self,
         project_id: Uuid,
-        changes: &[ProposedChange],
+        change_ids: &[Uuid],
     ) -> Result<Vec<StateChangeRecord>>;
 }

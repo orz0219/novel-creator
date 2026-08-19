@@ -84,6 +84,23 @@ impl NarrativeRepo {
         Ok(row.map(|r| r.into()))
     }
 
+    /// Project-scoped narrative node query. Ensures node belongs to the specified project.
+    ///
+    /// Use this method instead of get_node_by_id when you need project isolation.
+    /// Returns None if node doesn't exist OR doesn't belong to the project.
+    pub async fn get_node_by_id_with_project(&self, project_id: Uuid, id: Uuid) -> Result<Option<NarrativeNode>> {
+        let row = sqlx::query_as::<_, NarrativeNodeRow>(
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at              FROM narrative_node WHERE id = $1 AND project_id = $2",
+        )
+        .bind(id)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query narrative node")?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
     pub async fn list_nodes_by_project(&self, project_id: Uuid) -> Result<Vec<NarrativeNode>> {
         let rows = sqlx::query_as::<_, NarrativeNodeRow>(
             "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \

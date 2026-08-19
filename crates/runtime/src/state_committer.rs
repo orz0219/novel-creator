@@ -9,7 +9,7 @@
 //! - 使用 version CAS 防止并发覆盖
 
 use anyhow::{Context, Result};
-use db::repos::{state_repo, validation_repo};
+use db::repos::{entity_repo, state_repo, validation_repo};
 use domain::*;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -33,17 +33,29 @@ impl DbStateCommitter {
     ///   - 只接受 status == Approved 的 change
     ///   - 使用 project_id + entity_id + state_key 做 project isolation
     ///   - 使用 version CAS 防止并发覆盖
+    ///   - P1-2: commit 前重新从 DB 加载 proposal，不依赖传入的快照
     ///
     /// 任何一步失败 → ROLLBACK。
     pub async fn commit(
         &self,
         project_id: Uuid,
-        changes: &[ProposedChange],
+        change_ids: &[Uuid],
     ) -> Result<Vec<StateChangeRecord>> {
         let mut tx = self.pool.begin().await.context("Failed to begin transaction")?;
         let mut records = Vec::new();
 
-        for change in changes {
+        for change_id in change_ids {
+            // ============================================================
+            // P1-2: 从数据库重新加载 proposal 的权威版本
+            // 不依赖调用者传入的快照，防止并发修改导致的数据不一致
+            // ============================================================
+            let change = validation_repo::ValidationRepo::get_proposed_change_by_id_tx(
+                &mut *tx, *change_id
+            ).await?
+            .ok_or_else(|| anyhow::anyhow!(
+                "ProposedChange {} not found in database", change_id
+            ))?;
+
             // ============================================================
             // 不变量 1: 只有 Approved 的 ProposedChange 才能进入
             // ============================================================
@@ -61,6 +73,23 @@ impl DbStateCommitter {
                 return Err(anyhow::anyhow!(
                     "Cannot commit ProposedChange {}: project_id {} does not match expected {}",
                     change.id, change.project_id, project_id
+                ));
+            }
+
+            // ============================================================
+            // P2-5: 验证 target_entity_id 存在且属于当前 project
+            // 不只依赖 Validator 的检查，commit 本身也要验证
+            // ============================================================
+            let entity = entity_repo::EntityRepo::get_by_id_with_project(
+                &entity_repo::EntityRepo::new(self.pool.clone()),
+                project_id,
+                change.target_entity_id,
+            ).await?;
+
+            if entity.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Cannot commit ProposedChange {}: target entity {} not found in project {}",
+                    change.id, change.target_entity_id, project_id
                 ));
             }
 
@@ -120,7 +149,12 @@ impl DbStateCommitter {
                     records.push(record);
                 }
                 _ => {
-                    tracing::warn!("Unsupported change type: {:?}", change.change_type);
+                    // P1-1: Unsupported change type 必须失败并 rollback
+                    // 不能静默跳过，否则会造成"部分提交"的错误语义
+                    return Err(anyhow::anyhow!(
+                        "Unsupported change type: {:?}.                          StateCommitter only supports StateChange type.                          All changes in a batch must be supported, otherwise the entire transaction rolls back.",
+                        change.change_type
+                    ));
                 }
             }
         }

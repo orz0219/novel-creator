@@ -86,23 +86,26 @@ mod tests {
         let project_id = create_test_project(&pool).await?;
         let entity_id = create_test_entity(&pool, project_id).await?;
 
-        let committer = db::repos::state_repo::StateRepo::new(pool.clone());
         let state_committer = runtime::state_committer::DbStateCommitter::new(pool.clone());
+        let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
-        let rejected_change = ProposedChange {
-            id: Uuid::new_v4(),
+        // P1-2: 先在 DB 中创建 ProposedChange，然后直接更新状态为 Rejected
+        let change = val_repo.create_proposed_change(
             project_id,
-            task_id: Uuid::new_v4(),
-            change_type: ProposedChangeType::StateChange,
-            target_entity_id: entity_id,
-            description: "Test change".to_string(),
-            payload: serde_json::json!({"state_key": "test_key", "new_value": "test_value"}),
-            status: ProposedChangeStatus::Rejected,
-            created_at: Utc::now(),
-            resolved_at: None,
-        };
+            Uuid::new_v4(),
+            ProposedChangeType::StateChange,
+            entity_id,
+            "Test change",
+            serde_json::json!({"state_key": "test_key", "new_value": "test_value"}),
+        ).await?;
 
-        let result = state_committer.commit(project_id, &[rejected_change]).await;
+        // 直接更新为 Rejected 状态（跳过状态机验证，因为是测试）
+        sqlx::query("UPDATE proposed_change SET status = 'Rejected' WHERE id = $1")
+            .bind(change.id)
+            .execute(&pool)
+            .await?;
+
+        let result = state_committer.commit(project_id, &[change.id]).await;
         assert!(result.is_err(), "Rejected change should fail to commit");
         assert!(result.unwrap_err().to_string().contains("status is Rejected"));
 
@@ -119,23 +122,21 @@ mod tests {
         let entity_id = create_test_entity(&pool, project_id).await?;
 
         let state_committer = runtime::state_committer::DbStateCommitter::new(pool.clone());
+        let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
-        let pending_change = ProposedChange {
-            id: Uuid::new_v4(),
+        // P1-2: 先在 DB 中创建 ProposedChange（状态为 Pending）
+        let change = val_repo.create_proposed_change(
             project_id,
-            task_id: Uuid::new_v4(),
-            change_type: ProposedChangeType::StateChange,
-            target_entity_id: entity_id,
-            description: "Test change".to_string(),
-            payload: serde_json::json!({"state_key": "test_key", "new_value": "test_value"}),
-            status: ProposedChangeStatus::PendingApproval,
-            created_at: Utc::now(),
-            resolved_at: None,
-        };
+            Uuid::new_v4(),
+            ProposedChangeType::StateChange,
+            entity_id,
+            "Test change",
+            serde_json::json!({"state_key": "test_key", "new_value": "test_value"}),
+        ).await?;
 
-        let result = state_committer.commit(project_id, &[pending_change]).await;
+        let result = state_committer.commit(project_id, &[change.id]).await;
         assert!(result.is_err(), "Pending change should fail to commit");
-        assert!(result.unwrap_err().to_string().contains("status is PendingApproval"));
+        assert!(result.unwrap_err().to_string().contains("status is Draft"));
 
         Ok(())
     }
@@ -154,21 +155,25 @@ mod tests {
         state_repo.upsert_state(project_id, entity_id, "location", serde_json::json!("city"), None).await?;
 
         let state_committer = runtime::state_committer::DbStateCommitter::new(pool.clone());
+        let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
-        let approved_change = ProposedChange {
-            id: Uuid::new_v4(),
+        // P1-2: 先在 DB 中创建 ProposedChange，然后更新状态为 Approved
+        let change = val_repo.create_proposed_change(
             project_id,
-            task_id: Uuid::new_v4(),
-            change_type: ProposedChangeType::StateChange,
-            target_entity_id: entity_id,
-            description: "Move to forest".to_string(),
-            payload: serde_json::json!({"state_key": "location", "new_value": "forest"}),
-            status: ProposedChangeStatus::Approved,
-            created_at: Utc::now(),
-            resolved_at: None,
-        };
+            Uuid::new_v4(),
+            ProposedChangeType::StateChange,
+            entity_id,
+            "Move to forest",
+            serde_json::json!({"state_key": "location", "new_value": "forest"}),
+        ).await?;
 
-        let result = state_committer.commit(project_id, &[approved_change]).await;
+        // 更新状态为 Approved（跳过状态机验证，因为是测试）
+        sqlx::query("UPDATE proposed_change SET status = 'Approved' WHERE id = $1")
+            .bind(change.id)
+            .execute(&pool)
+            .await?;
+
+        let result = state_committer.commit(project_id, &[change.id]).await;
         assert!(result.is_ok(), "Approved change should commit successfully");
 
         // Verify state was updated

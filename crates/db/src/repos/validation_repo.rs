@@ -67,23 +67,61 @@ impl ValidationRepo {
         })
     }
 
+    /// Update status with state machine validation.
+    ///
+    /// P2-7: Enforces valid state transitions:
+    /// - Draft -> PendingApproval, Approved, Rejected
+    /// - PendingApproval -> Approved, Rejected
+    /// - Approved -> Applied, Rejected
+    /// - Applied, Rejected, Invalid, Expired -> no transitions (terminal states)
+    ///
+    /// For production use, prefer update_status_with_guard_tx which also does CAS.
     pub async fn update_status(&self, change_id: Uuid, status: ProposedChangeStatus) -> Result<()> {
         Self::update_status_tx(&mut *self.pool.acquire().await.context("Failed to acquire connection")?, change_id, status).await
     }
 
-    /// Transaction-aware update_status. Use inside a transaction block.
+    /// Transaction-aware update_status with state machine validation.
+    ///
+    /// P2-7: Validates that the transition is allowed before updating.
     pub async fn update_status_tx(
         conn: &mut PgConnection,
         change_id: Uuid,
         status: ProposedChangeStatus,
     ) -> Result<()> {
+        // P2-7: 验证状态转换是否合法
+        // 先获取当前状态
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM proposed_change WHERE id = $1"
+        )
+        .bind(change_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to query current status")?;
+
+        if let Some(current_str) = current {
+            let current_status = ser::parse_proposed_change_status(&current_str);
+            if !Self::is_valid_transition(&current_status, &status) {
+                return Err(anyhow::anyhow!(
+                    "Invalid status transition: {:?} -> {:?}. This transition is not allowed by the state machine.",
+                    current_status, status
+                ));
+            }
+        }
+
         let status_str = ser::proposed_change_status_str(&status);
+
+        // P2-8: 只有终态才设置 resolved_at
+        let resolved_at = if Self::is_terminal_status(&status) {
+            Some(Utc::now())
+        } else {
+            None
+        };
 
         sqlx::query(
             "UPDATE proposed_change SET status = $1, resolved_at = $2 WHERE id = $3",
         )
         .bind(&status_str)
-        .bind(Utc::now())
+        .bind(resolved_at)
         .bind(change_id)
         .execute(&mut *conn)
         .await
@@ -91,7 +129,44 @@ impl ValidationRepo {
         Ok(())
     }
 
+    /// Check if a status transition is valid
+    fn is_valid_transition(from: &ProposedChangeStatus, to: &ProposedChangeStatus) -> bool {
+        match (from, to) {
+            // Draft 可以转到 PendingApproval, Approved, Rejected
+            (ProposedChangeStatus::Draft, ProposedChangeStatus::PendingApproval) => true,
+            (ProposedChangeStatus::Draft, ProposedChangeStatus::Approved) => true,
+            (ProposedChangeStatus::Draft, ProposedChangeStatus::Rejected) => true,
+            // PendingApproval 可以转到 Approved, Rejected
+            (ProposedChangeStatus::PendingApproval, ProposedChangeStatus::Approved) => true,
+            (ProposedChangeStatus::PendingApproval, ProposedChangeStatus::Rejected) => true,
+            // Approved 可以转到 Applied, Rejected
+            (ProposedChangeStatus::Approved, ProposedChangeStatus::Applied) => true,
+            (ProposedChangeStatus::Approved, ProposedChangeStatus::Rejected) => true,
+            // 终态不能转换
+            (ProposedChangeStatus::Applied, _) => false,
+            (ProposedChangeStatus::Rejected, _) => false,
+            (ProposedChangeStatus::Invalid, _) => false,
+            (ProposedChangeStatus::Expired, _) => false,
+            // 其他情况不允许
+            _ => false,
+        }
+    }
+
+    /// Check if a status is terminal (no further transitions allowed)
+    fn is_terminal_status(status: &ProposedChangeStatus) -> bool {
+        matches!(
+            status,
+            ProposedChangeStatus::Applied
+                | ProposedChangeStatus::Rejected
+                | ProposedChangeStatus::Invalid
+                | ProposedChangeStatus::Expired
+        )
+    }
+
     /// CAS-guarded status transition. Only updates if current status == from_status.
+    ///
+    /// P2-8: 只有终态 (Applied, Rejected, Invalid, Expired) 才设置 resolved_at。
+    /// 非终态转换时 resolved_at 保持 NULL。
     ///
     /// Returns rows_affected: 1 if transition succeeded, 0 if status mismatch.
     pub async fn update_status_with_guard_tx(
@@ -103,17 +178,54 @@ impl ValidationRepo {
         let to_str = ser::proposed_change_status_str(&to_status);
         let from_str = ser::proposed_change_status_str(&from_status);
 
+        // P2-8: 只有终态才设置 resolved_at
+        let resolved_at = if Self::is_terminal_status(&to_status) {
+            Some(Utc::now())
+        } else {
+            None
+        };
+
         let result = sqlx::query(
             "UPDATE proposed_change SET status = $1, resolved_at = $2 WHERE id = $3 AND status = $4",
         )
         .bind(&to_str)
-        .bind(Utc::now())
+        .bind(resolved_at)
         .bind(change_id)
         .bind(&from_str)
         .execute(&mut *conn)
         .await
         .context("Failed to update proposed change with guard")?;
         Ok(result.rows_affected())
+    }
+
+    /// P1-2: 获取 ProposedChange 的权威版本（从数据库读取）
+    /// StateCommitter 应该使用此方法重新加载 proposal，而不是依赖传入的快照。
+    pub async fn get_proposed_change_by_id(&self, change_id: Uuid) -> Result<Option<ProposedChange>> {
+        let row = sqlx::query_as::<_, ProposedChangeRow>(
+            "SELECT id, project_id, task_id, change_type, target_entity_id, description, payload, status, created_at, resolved_at              FROM proposed_change WHERE id = $1",
+        )
+        .bind(change_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query proposed change")?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
+    /// Transaction-aware version of get_proposed_change_by_id
+    pub async fn get_proposed_change_by_id_tx(
+        conn: &mut PgConnection,
+        change_id: Uuid,
+    ) -> Result<Option<ProposedChange>> {
+        let row = sqlx::query_as::<_, ProposedChangeRow>(
+            "SELECT id, project_id, task_id, change_type, target_entity_id, description, payload, status, created_at, resolved_at              FROM proposed_change WHERE id = $1",
+        )
+        .bind(change_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to query proposed change")?;
+
+        Ok(row.map(|r| r.into()))
     }
 
     pub async fn list_pending(&self, project_id: Uuid) -> Result<Vec<ProposedChange>> {

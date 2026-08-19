@@ -112,6 +112,20 @@ impl StateRepo {
     // Upsert with Optimistic Concurrency Control (CAS)
     // ============================================================
 
+    /// Upsert current state with version CAS.
+    ///
+    /// **WARNING**: This method should only be used for:
+    /// - Testing
+    /// - Initial state setup
+    /// - Migration scripts
+    ///
+    /// For production state mutations, use StateCommitter which ensures:
+    /// - StateChangeRecord is created (audit trail)
+    /// - All operations are atomic (single transaction)
+    /// - Project isolation is enforced
+    /// - No canonical state mutation can occur without a StateChangeRecord
+    ///
+    /// Violation of this invariant will be caught in code review.
     pub async fn upsert_state(
         &self,
         project_id: Uuid,
@@ -120,6 +134,9 @@ impl StateRepo {
         state_value: serde_json::Value,
         expected_version: Option<i32>,
     ) -> Result<CurrentState> {
+        tracing::warn!(
+            "Direct upsert_state called outside StateCommitter.              This should only be used for testing/initial setup.              For production, use StateCommitter to ensure audit trail.",
+        );
         Self::upsert_state_tx(
             &mut *self.pool.acquire().await.context("Failed to acquire connection")?,
             project_id, entity_id, state_key, state_value, expected_version,
@@ -133,6 +150,16 @@ impl StateRepo {
     /// Returns ConcurrentModificationError if rows_affected == 0.
     ///
     /// If expected_version is None, skips CAS check (for initial state setup).
+    ///
+    /// **WARNING**: This method should ONLY be called from StateCommitter.
+    /// For production state mutations, use StateCommitter which ensures:
+    /// - StateChangeRecord is created (audit trail)
+    /// - All operations are atomic (single transaction)
+    /// - Project isolation is enforced
+    /// - No canonical state mutation can occur without a StateChangeRecord
+    ///
+    /// Direct calls to this method from business logic are FORBIDDEN.
+    /// This invariant will be enforced in code review.
     pub async fn upsert_state_tx(
         conn: &mut PgConnection,
         project_id: Uuid,

@@ -130,7 +130,7 @@ mod tests {
             .collect();
 
         files.sort();
-        assert_eq!(files.len(), 7, "Expected 7 migration files");
+        assert_eq!(files.len(), 12, "Expected 12 migration files");
         assert_eq!(files[0], "001_initial_schema.sql");
     }
 }
