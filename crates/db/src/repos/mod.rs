@@ -31,3 +31,4 @@ pub mod identity_repo;
 pub mod character_repo;
 pub mod faction_repo;
 pub mod narrative_budget_repo;
+pub mod outbox_repo;

@@ -1,4 +1,7 @@
 //! Narrative API handlers
+//!
+//! 所有 mutation 通过 application service (NarrativeService)。
+//! 删除使用软删除（status=Deleted）。
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -6,6 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 use crate::state::AppState;
 use super::error::AppError;
+use application::narrative_service::NarrativeService;
 
 #[derive(Deserialize)]
 pub struct CreateNodeInput { pub node_type: String, pub parent_id: Option<String>, pub title: String, pub description: Option<String>, pub attributes: Option<serde_json::Value> }
@@ -16,70 +20,56 @@ pub struct CreateStorylineInput { pub name: String, pub description: Option<Stri
 #[derive(Deserialize)]
 pub struct CreateForeshadowInput { pub name: String, pub description: Option<String>, pub importance: Option<String>, pub hint_level: Option<String> }
 
-fn pj(s: &str) -> serde_json::Value { serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({})) }
-
 pub async fn list_nodes(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    let rows: Vec<(String, String, String, String, Option<String>, String, Option<String>, String, i32, String, String, String)> = sqlx::query_as(
-        "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text FROM narrative_node WHERE project_id = $1 AND status != 'Deleted' ORDER BY sort_order"
-    ).bind(&project_id).fetch_all(&state.pool).await?;
-    Ok(Json(serde_json::json!(rows.into_iter().map(|(id, pid, wid, nt, par, title, desc, attrs, ord, st, cr, up)| {
-        serde_json::json!({"id": id, "project_id": pid, "world_id": wid, "node_type": nt, "parent_id": par, "title": title, "description": desc, "attributes": pj(&attrs), "sort_order": ord, "status": st, "created_at": cr, "updated_at": up})
-    }).collect::<Vec<_>>())))
+    let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
+    let service = NarrativeService::new(state.pool.clone());
+    let nodes = service.list_nodes(project_id).await?;
+    Ok(Json(serde_json::json!(nodes)))
 }
 
 pub async fn get_node(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    let row: Option<(String, String, String, String, Option<String>, String, Option<String>, String, i32, String, String, String)> = sqlx::query_as(
-        "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text FROM narrative_node WHERE id = $1"
-    ).bind(&id).fetch_optional(&state.pool).await?;
-    match row {
-        Some((id, pid, wid, nt, par, title, desc, attrs, ord, st, cr, up)) =>
-            Ok(Json(serde_json::json!({"id": id, "project_id": pid, "world_id": wid, "node_type": nt, "parent_id": par, "title": title, "description": desc, "attributes": pj(&attrs), "sort_order": ord, "status": st, "created_at": cr, "updated_at": up}))),
-        None => Err(AppError(anyhow::anyhow!("Narrative node not found")))
-    }
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid node ID")))?;
+    let service = NarrativeService::new(state.pool.clone());
+    let node = service.get_node(id).await?
+        .ok_or_else(|| AppError(anyhow::anyhow!("Narrative node not found")))?;
+    Ok(Json(node))
 }
 
 pub async fn create_node(State(state): State<AppState>, Path(project_id): Path<String>, Json(input): Json<CreateNodeInput>) -> Result<Json<serde_json::Value>, AppError> {
-    let id = Uuid::new_v4().to_string();
-    let world_id: (String,) = sqlx::query_as("SELECT id FROM world WHERE project_id = $1 LIMIT 1").bind(&project_id).fetch_one(&state.pool).await?;
-    let sort_order: (i32,) = sqlx::query_as("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM narrative_node WHERE project_id = $1 AND parent_id IS NOT DISTINCT FROM $2").bind(&project_id).bind(&input.parent_id).fetch_one(&state.pool).await?;
-    sqlx::query("INSERT INTO narrative_node (id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Draft')")
-        .bind(&id).bind(&project_id).bind(&world_id.0).bind(&input.node_type).bind(&input.parent_id).bind(&input.title).bind(&input.description).bind(input.attributes.unwrap_or(serde_json::json!({}))).bind(sort_order.0)
-        .execute(&state.pool).await?;
-    get_node(State(state), Path(id)).await
+    let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
+    let parent_id = input.parent_id.map(|p| Uuid::parse_str(&p)).transpose()
+        .map_err(|_| AppError(anyhow::anyhow!("Invalid parent ID")))?;
+
+    let service = NarrativeService::new(state.pool.clone());
+    let node = service.create_node(
+        project_id,
+        &input.node_type,
+        parent_id,
+        &input.title,
+        input.description.as_deref(),
+        input.attributes.unwrap_or(serde_json::json!({})),
+    ).await?;
+
+    Ok(Json(node))
 }
 
 pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<UpdateNodeInput>) -> Result<Json<serde_json::Value>, AppError> {
-    // Cannot update deleted nodes
-    let exists: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM narrative_node WHERE id = $1"
-    ).bind(&id).fetch_optional(&state.pool).await?;
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid node ID")))?;
+    let service = NarrativeService::new(state.pool.clone());
+    let node = service.update_node(
+        id,
+        input.title.as_deref(),
+        input.description.as_deref(),
+        input.status.as_deref(),
+    ).await?;
 
-    match exists {
-        Some((status,)) if status == "Deleted" => {
-            return Err(AppError(anyhow::anyhow!("Cannot update deleted narrative node")));
-        }
-        None => {
-            return Err(AppError(anyhow::anyhow!("Narrative node not found")));
-        }
-        _ => {}
-    }
-
-    if let Some(t) = &input.title { sqlx::query("UPDATE narrative_node SET title=$1, updated_at=NOW() WHERE id=$2").bind(t).bind(&id).execute(&state.pool).await?; }
-    if let Some(d) = &input.description { sqlx::query("UPDATE narrative_node SET description=$1, updated_at=NOW() WHERE id=$2").bind(d).bind(&id).execute(&state.pool).await?; }
-    if let Some(s) = &input.status { sqlx::query("UPDATE narrative_node SET status=$1, updated_at=NOW() WHERE id=$2").bind(s).bind(&id).execute(&state.pool).await?; }
-    get_node(State(state), Path(id)).await
+    Ok(Json(node))
 }
 
 pub async fn delete_node(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    // Soft delete - set status to Deleted instead of removing
-    let result = sqlx::query(
-        "UPDATE narrative_node SET status = 'Deleted', updated_at = NOW() WHERE id = $1 AND status != 'Deleted'"
-    ).bind(&id).execute(&state.pool).await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError(anyhow::anyhow!("Narrative node not found or already deleted")));
-    }
-
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid node ID")))?;
+    let service = NarrativeService::new(state.pool.clone());
+    service.delete_node(id).await?;
     Ok(Json(serde_json::json!({"deleted": true, "id": id})))
 }
 
@@ -91,7 +81,7 @@ pub async fn list_storylines(State(state): State<AppState>, Path(project_id): Pa
 }
 
 pub async fn create_storyline(State(state): State<AppState>, Path(project_id): Path<String>, Json(input): Json<CreateStorylineInput>) -> Result<Json<serde_json::Value>, AppError> {
-    let id = Uuid::new_v4().to_string();
+    let id = uuid::Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO storyline (id, project_id, name, description, status, importance) VALUES ($1,$2,$3,$4,'Planned',$5)")
         .bind(&id).bind(&project_id).bind(&input.name).bind(&input.description).bind(input.importance.as_deref().unwrap_or("Normal"))
         .execute(&state.pool).await?;
@@ -111,7 +101,7 @@ pub async fn list_foreshadows(State(state): State<AppState>, Path(project_id): P
 }
 
 pub async fn create_foreshadow(State(state): State<AppState>, Path(project_id): Path<String>, Json(input): Json<CreateForeshadowInput>) -> Result<Json<serde_json::Value>, AppError> {
-    let id = Uuid::new_v4().to_string();
+    let id = uuid::Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO foreshadowing (id, project_id, name, description, status, importance, hint_level) VALUES ($1,$2,$3,$4,'Planned',$5,$6)")
         .bind(&id).bind(&project_id).bind(&input.name).bind(&input.description).bind(input.importance.as_deref().unwrap_or("Normal")).bind(input.hint_level.as_deref().unwrap_or("Direct"))
         .execute(&state.pool).await?;

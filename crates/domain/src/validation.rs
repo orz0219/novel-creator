@@ -51,6 +51,103 @@ pub enum ProposedChangeType {
     Custom(String),
 }
 
+/// 类型化的变更 Payload
+///
+/// 替代 serde_json::Value，提供类型安全的变更内容。
+/// 每种变更类型有对应的 payload 结构。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ChangePayload {
+    /// 状态变更 payload
+    StateChange {
+        state_key: String,
+        new_value: serde_json::Value,
+    },
+    /// 实体创建 payload
+    EntityCreate {
+        entity_type: String,
+        name: String,
+        attributes: serde_json::Value,
+    },
+    /// 实体更新 payload
+    EntityUpdate {
+        name: Option<String>,
+        attributes: Option<serde_json::Value>,
+    },
+    /// 关系创建 payload
+    RelationCreate {
+        target_entity_id: Uuid,
+        relation_type: String,
+        attributes: serde_json::Value,
+    },
+    /// 知识更新 payload
+    KnowledgeUpdate {
+        fact_content: String,
+        certainty: String,
+    },
+    /// 自定义 payload
+    Custom(serde_json::Value),
+}
+
+impl ChangePayload {
+    /// 从 ProposedChangeType 推断默认 payload
+    pub fn from_change_type(change_type: &ProposedChangeType) -> Self {
+        match change_type {
+            ProposedChangeType::StateChange => ChangePayload::StateChange {
+                state_key: String::new(),
+                new_value: serde_json::Value::Null,
+            },
+            ProposedChangeType::EntityCreate => ChangePayload::EntityCreate {
+                entity_type: String::new(),
+                name: String::new(),
+                attributes: serde_json::json!({}),
+            },
+            ProposedChangeType::EntityUpdate => ChangePayload::EntityUpdate {
+                name: None,
+                attributes: None,
+            },
+            ProposedChangeType::RelationCreate => ChangePayload::RelationCreate {
+                target_entity_id: Uuid::nil(),
+                relation_type: String::new(),
+                attributes: serde_json::json!({}),
+            },
+            ProposedChangeType::KnowledgeUpdate => ChangePayload::KnowledgeUpdate {
+                fact_content: String::new(),
+                certainty: "CANON".to_string(),
+            },
+            _ => ChangePayload::Custom(serde_json::json!({})),
+        }
+    }
+
+    /// 验证 payload 是否完整
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            ChangePayload::StateChange { state_key, .. } => {
+                if state_key.is_empty() {
+                    return Err("state_key cannot be empty".to_string());
+                }
+                Ok(())
+            }
+            ChangePayload::EntityCreate { entity_type, name, .. } => {
+                if entity_type.is_empty() {
+                    return Err("entity_type cannot be empty".to_string());
+                }
+                if name.is_empty() {
+                    return Err("name cannot be empty".to_string());
+                }
+                Ok(())
+            }
+            ChangePayload::RelationCreate { relation_type, .. } => {
+                if relation_type.is_empty() {
+                    return Err("relation_type cannot be empty".to_string());
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// 拟议变更状态 - 完整状态机
 ///
 /// 状态转换:

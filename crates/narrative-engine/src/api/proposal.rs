@@ -1,109 +1,50 @@
 //! Proposal API handlers
 //!
-//! 所有 mutation 通过 application service，不直接操作数据库。
+//! 所有 mutation 通过 application service (ProposalService)。
 //! 状态转换必须通过 ProposedChangeStatus.can_transition_to() 验证。
 
 use axum::extract::{Path, State};
 use axum::Json;
 use crate::state::AppState;
 use super::error::AppError;
-use domain::ProposedChangeStatus;
+use application::proposal_service::ProposalService;
+use uuid::Uuid;
 
 pub async fn list_proposals(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String)>(
-        "SELECT id, status, COALESCE(generation_task_id, ''), description, created_at::text FROM proposed_change WHERE project_id = $1 ORDER BY created_at DESC"
-    ).bind(&project_id).fetch_all(&state.pool).await?;
+    let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
+    let service = ProposalService::new(state.pool.clone());
+    let proposals = service.list_proposals(project_id).await?;
 
-    Ok(Json(serde_json::json!(rows.into_iter().map(|(id, status, task_id, desc, created)| {
-        serde_json::json!({"id": id, "generation_task_id": task_id, "status": status, "changes": [], "validation_results": [], "reason": desc, "created_at": created})
+    Ok(Json(serde_json::json!(proposals.into_iter().map(|p| {
+        serde_json::json!({"id": p.id, "generation_task_id": p.task_id, "status": p.status.description(), "changes": [], "validation_results": [], "reason": p.description, "created_at": p.created_at})
     }).collect::<Vec<_>>())))
 }
 
 pub async fn get_proposal(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    let row = sqlx::query_as::<_, (String, String, String, Option<String>, String)>(
-        "SELECT id, status, COALESCE(generation_task_id, ''), description, created_at::text FROM proposed_change WHERE id = $1"
-    ).bind(&id).fetch_optional(&state.pool).await?;
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid proposal ID")))?;
+    let service = ProposalService::new(state.pool.clone());
+    let proposal = service.get_proposal(id).await?
+        .ok_or_else(|| AppError(anyhow::anyhow!("Proposal not found")))?;
 
-    match row {
-        Some(r) => Ok(Json(serde_json::json!({"id": r.0, "generation_task_id": r.2, "status": r.1, "changes": [], "validation_results": [], "reason": r.3, "created_at": r.4}))),
-        None => Err(AppError(anyhow::anyhow!("Proposal not found")))
-    }
+    Ok(Json(serde_json::json!({"id": proposal.id, "generation_task_id": proposal.task_id, "status": proposal.status.description(), "changes": [], "validation_results": [], "reason": proposal.description, "created_at": proposal.created_at})))
 }
 
-/// Accept a proposal - validates state transition before updating
+/// 批准提案 - 通过 ProposalService，验证状态转换
 pub async fn accept_proposal(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    // Get current status
-    let current_status: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM proposed_change WHERE id = $1"
-    ).bind(&id).fetch_optional(&state.pool).await?;
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid proposal ID")))?;
+    let service = ProposalService::new(state.pool.clone());
+    let proposal = service.approve_proposal(id).await?;
 
-    let current_status = match current_status {
-        Some((s,)) => s,
-        None => return Err(AppError(anyhow::anyhow!("Proposal not found"))),
-    };
-
-    // Parse current status and validate transition
-    let from = db::ser::parse_proposed_change_status(&current_status);
-    let to = ProposedChangeStatus::Approved;
-
-    if !from.can_transition_to(&to) {
-        return Err(AppError(anyhow::anyhow!(
-            "Invalid state transition: {} -> {}", current_status, to.description()
-        )));
-    }
-
-    // Use CAS: only update if status matches
-    let result = sqlx::query(
-        "UPDATE proposed_change SET status = 'Approved', resolved_at = NOW() WHERE id = $1 AND status = $2"
-    )
-    .bind(&id)
-    .bind(&current_status)
-    .execute(&state.pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError(anyhow::anyhow!("Concurrent modification: proposal status changed during update")));
-    }
-
-    Ok(Json(serde_json::json!({"id": id, "status": "Approved"})))
+    Ok(Json(serde_json::json!({"id": proposal.id, "status": proposal.status.description()})))
 }
 
-/// Reject a proposal - validates state transition before updating
+/// 拒绝提案 - 通过 ProposalService，验证状态转换
 pub async fn reject_proposal(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    // Get current status
-    let current_status: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM proposed_change WHERE id = $1"
-    ).bind(&id).fetch_optional(&state.pool).await?;
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid proposal ID")))?;
+    let service = ProposalService::new(state.pool.clone());
+    let proposal = service.reject_proposal(id).await?;
 
-    let current_status = match current_status {
-        Some((s,)) => s,
-        None => return Err(AppError(anyhow::anyhow!("Proposal not found"))),
-    };
-
-    // Parse current status and validate transition
-    let from = db::ser::parse_proposed_change_status(&current_status);
-    let to = ProposedChangeStatus::Rejected;
-
-    if !from.can_transition_to(&to) {
-        return Err(AppError(anyhow::anyhow!(
-            "Invalid state transition: {} -> {}", current_status, to.description()
-        )));
-    }
-
-    // Use CAS: only update if status matches
-    let result = sqlx::query(
-        "UPDATE proposed_change SET status = 'Rejected', resolved_at = NOW() WHERE id = $1 AND status = $2"
-    )
-    .bind(&id)
-    .bind(&current_status)
-    .execute(&state.pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError(anyhow::anyhow!("Concurrent modification: proposal status changed during update")));
-    }
-
-    Ok(Json(serde_json::json!({"id": id, "status": "Rejected"})))
+    Ok(Json(serde_json::json!({"id": proposal.id, "status": proposal.status.description()})))
 }
 
 pub async fn accept_change(State(_state): State<AppState>, Path((proposal_id, change_id)): Path<(String, String)>) -> Result<Json<serde_json::Value>, AppError> {

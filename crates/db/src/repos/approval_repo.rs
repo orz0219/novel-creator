@@ -1,10 +1,22 @@
 //! Approval Repository - CRUD operations for ApprovalRecord
+//!
+//! Approval 必须绑定到确切的 proposal 版本。
+//! content_hash 用于验证 proposal 内容是否在 approval 后被修改。
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use domain::{ApprovalRecord, ApprovalStatus, ApprovalTargetType};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// 计算内容哈希（SHA-256 的 hex 编码，取前 16 位）
+fn compute_content_hash(content: &serde_json::Value) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    content.to_string().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
 
 pub struct ApprovalRepo {
     pool: PgPool,
@@ -15,7 +27,7 @@ impl ApprovalRepo {
         Self { pool }
     }
 
-    /// 创建审批记录
+    /// 创建审批记录（自动计算 content_hash）
     pub async fn create(
         &self,
         project_id: Uuid,
@@ -26,6 +38,7 @@ impl ApprovalRepo {
     ) -> Result<ApprovalRecord> {
         let id = Uuid::new_v4();
         let now = Utc::now();
+        let content_hash = compute_content_hash(&proposal_content);
         let tt_str = match &target_type {
             ApprovalTargetType::World => "World",
             ApprovalTargetType::Entity => "Entity",
@@ -38,8 +51,8 @@ impl ApprovalRepo {
         };
 
         sqlx::query(
-            "INSERT INTO approval_record (id, project_id, target_type, target_id, proposed_by, proposal_content, status, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, 'Pending', $7)",
+            "INSERT INTO approval_record (id, project_id, target_type, target_id, proposed_by, proposal_content, content_hash, status, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'Pending', $8)",
         )
         .bind(id)
         .bind(project_id)
@@ -47,6 +60,7 @@ impl ApprovalRepo {
         .bind(target_id)
         .bind(proposed_by)
         .bind(&proposal_content)
+        .bind(&content_hash)
         .bind(now)
         .execute(&self.pool)
         .await
@@ -65,6 +79,25 @@ impl ApprovalRepo {
             created_at: now,
             reviewed_at: None,
         })
+    }
+
+    /// 验证 proposal 内容是否与 approval 时一致
+    pub async fn verify_content_hash(&self, id: Uuid, current_content: &serde_json::Value) -> Result<bool> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT content_hash FROM approval_record WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query approval content hash")?;
+
+        match row {
+            Some((stored_hash,)) => {
+                let current_hash = compute_content_hash(current_content);
+                Ok(stored_hash == current_hash)
+            }
+            None => Ok(false),
+        }
     }
 
     /// 审批记录

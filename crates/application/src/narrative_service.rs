@@ -1,11 +1,9 @@
-//! Narrative Service - 叙事结构管理的业务逻辑层
+//! Narrative Service - 叙事管理的业务逻辑层
 //!
-//! 负责 Volume/Arc/Sequence/Chapter/Scene/Beat 的创建、查询、遍历。
+//! 负责叙事节点的创建、更新、删除（软删除）。
+//! 所有操作通过 application service，不直接操作数据库。
 
 use anyhow::{Context, Result};
-use chrono::Utc;
-use db::repos::narrative_repo;
-use domain::*;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -19,274 +17,143 @@ impl NarrativeService {
         Self { pool }
     }
 
-    // ============================================================
-    // Volume 相关
-    // ============================================================
+    /// 列出项目的叙事节点（排除已删除的）
+    pub async fn list_nodes(&self, project_id: Uuid) -> Result<Vec<serde_json::Value>> {
+        let rows: Vec<(String, String, String, String, Option<String>, String, Option<String>, String, i32, String, String, String)> = sqlx::query_as(
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text \
+             FROM narrative_node WHERE project_id = $1 AND status != 'Deleted' ORDER BY sort_order"
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list narrative nodes")?;
 
-    /// 创建卷
-    pub async fn create_volume(
-        &self,
-        project_id: Uuid,
-        world_id: Uuid,
-        title: &str,
-        description: Option<&str>,
-        attributes: VolumeAttributes,
-        sort_order: i32,
-    ) -> Result<NarrativeNode> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let attrs = serde_json::to_value(&attributes).unwrap_or_default();
-        let node = repo
-            .create_node(project_id, world_id, NarrativeNodeType::Volume, None, title, description, attrs, sort_order)
-            .await?;
-        tracing::info!("Created volume: {}", title);
-        Ok(node)
+        Ok(rows.into_iter().map(|(id, pid, wid, nt, par, title, desc, attrs, ord, st, cr, up)| {
+            serde_json::json!({"id": id, "project_id": pid, "world_id": wid, "node_type": nt, "parent_id": par, "title": title, "description": desc, "attributes": serde_json::from_str::<serde_json::Value>(&attrs).unwrap_or(serde_json::json!({})), "sort_order": ord, "status": st, "created_at": cr, "updated_at": up})
+        }).collect())
     }
 
-    /// 列出项目中的所有卷
-    pub async fn list_volumes(&self, project_id: Uuid) -> Result<Vec<NarrativeNode>> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let all = repo.list_nodes_by_project(project_id).await?;
-        Ok(all.into_iter().filter(|n| n.node_type == NarrativeNodeType::Volume).collect())
-    }
-
-    // ============================================================
-    // Arc 相关
-    // ============================================================
-
-    /// 创建故事弧线
-    pub async fn create_arc(
-        &self,
-        project_id: Uuid,
-        world_id: Uuid,
-        volume_id: Uuid,
-        title: &str,
-        description: Option<&str>,
-        sort_order: i32,
-    ) -> Result<NarrativeNode> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let node = repo
-            .create_node(project_id, world_id, NarrativeNodeType::Arc, Some(volume_id), title, description, serde_json::json!({}), sort_order)
-            .await?;
-        tracing::info!("Created arc: {} under volume {}", title, volume_id);
-        Ok(node)
-    }
-
-    /// 列出卷下的所有弧线
-    pub async fn list_arcs(&self, volume_id: Uuid) -> Result<Vec<NarrativeNode>> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        repo.list_children(volume_id).await
-    }
-
-    // ============================================================
-    // Sequence 相关
-    // ============================================================
-
-    /// 创建序列
-    pub async fn create_sequence(
-        &self,
-        project_id: Uuid,
-        world_id: Uuid,
-        arc_id: Uuid,
-        title: &str,
-        description: Option<&str>,
-        sort_order: i32,
-    ) -> Result<NarrativeNode> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let node = repo
-            .create_node(project_id, world_id, NarrativeNodeType::Sequence, Some(arc_id), title, description, serde_json::json!({}), sort_order)
-            .await?;
-        Ok(node)
-    }
-
-    // ============================================================
-    // Chapter 相关
-    // ============================================================
-
-    /// 创建章节
-    pub async fn create_chapter(
-        &self,
-        project_id: Uuid,
-        world_id: Uuid,
-        parent_id: Uuid,
-        title: &str,
-        description: Option<&str>,
-        sort_order: i32,
-    ) -> Result<NarrativeNode> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let node = repo
-            .create_node(project_id, world_id, NarrativeNodeType::Chapter, Some(parent_id), title, description, serde_json::json!({}), sort_order)
-            .await?;
-        Ok(node)
-    }
-
-    // ============================================================
-    // Scene 相关
-    // ============================================================
-
-    /// 创建场景
-    pub async fn create_scene(
-        &self,
-        project_id: Uuid,
-        world_id: Uuid,
-        chapter_id: Uuid,
-        title: &str,
-        description: Option<&str>,
-        scene_attributes: SceneAttributes,
-        sort_order: i32,
-    ) -> Result<(NarrativeNode, Scene)> {
-        let narrative_repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let attrs = serde_json::to_value(&scene_attributes).unwrap_or_default();
-        let node = narrative_repo
-            .create_node(project_id, world_id, NarrativeNodeType::Scene, Some(chapter_id), title, description, attrs, sort_order)
-            .await?;
-
-        let scene_repo = narrative_repo::SceneRepo::new(self.pool.clone());
-        let scene = scene_repo
-            .create(
-                node.id,
-                scene_attributes.objective.as_deref(),
-                scene_attributes.conflict.as_deref(),
-                scene_attributes.pov_character_id,
-                scene_attributes.location_id,
-                None,
-            )
-            .await?;
-
-        tracing::info!("Created scene: {} in chapter {}", title, chapter_id);
-        Ok((node, scene))
-    }
-
-    /// 获取场景详情
-    pub async fn get_scene(&self, scene_node_id: Uuid) -> Result<Option<(NarrativeNode, Option<Scene>)>> {
-        let narrative_repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let node = narrative_repo.get_node_by_id(scene_node_id).await?;
-
-        if let Some(node) = node {
-            let scene_repo = narrative_repo::SceneRepo::new(self.pool.clone());
-            let scene = scene_repo.get_by_narrative_node(scene_node_id).await?;
-            Ok(Some((node, scene)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    // ============================================================
-    // Beat 相关
-    // ============================================================
-
-    /// 创建节拍
-    pub async fn create_beat(
-        &self,
-        project_id: Uuid,
-        world_id: Uuid,
-        scene_id: Uuid,
-        title: &str,
-        beat_attributes: BeatAttributes,
-        sort_order: i32,
-    ) -> Result<NarrativeNode> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let attrs = serde_json::to_value(&beat_attributes).unwrap_or_default();
-        let node = repo
-            .create_node(project_id, world_id, NarrativeNodeType::Beat, Some(scene_id), title, None, attrs, sort_order)
-            .await?;
-        Ok(node)
-    }
-
-    // ============================================================
-    // 通用操作
-    // ============================================================
-
-    /// 获取节点及其完整子树
-    pub async fn get_tree(&self, node_id: Uuid) -> Result<Option<NarrativeNodeTree>> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let node = repo.get_node_by_id(node_id).await?;
-
-        if let Some(node) = node {
-            let children = repo.list_children(node_id).await?;
-            let mut child_trees = Vec::new();
-            for child in children {
-                if let Some(tree) = Box::pin(self.get_tree(child.id)).await? {
-                    child_trees.push(tree);
-                }
-            }
-            Ok(Some(NarrativeNodeTree {
-                node,
-                children: child_trees,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// 获取当前项目中所有叙事节点
-    pub async fn list_all_nodes(&self, project_id: Uuid) -> Result<Vec<NarrativeNode>> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        repo.list_nodes_by_project(project_id).await
-    }
-
-    /// 更新节点状态
-    pub async fn update_status(&self, node_id: Uuid, status: NarrativeNodeStatus) -> Result<()> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        if let Some(mut node) = repo.get_node_by_id(node_id).await? {
-            node.status = status;
-            repo.update_node(&node).await?;
-        }
-        Ok(())
-    }
-
-    /// 创建角色弧线
-    pub async fn create_character_arc(
-        &self,
-        project_id: Uuid,
-        character_id: Uuid,
-        volume_id: Option<Uuid>,
-        arc_type: &str,
-        start_state: Option<&str>,
-        mid_state: Option<&str>,
-        end_state: Option<&str>,
-        key_moments: Vec<String>,
-    ) -> Result<CharacterArc> {
-        let id = Uuid::new_v4();
-        let now = Utc::now();
-
-        sqlx::query(
-            "INSERT INTO character_arc (id, project_id, character_id, volume_id, arc_type, start_state, mid_state, end_state, key_moments, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    /// 获取单个叙事节点
+    pub async fn get_node(&self, id: Uuid) -> Result<Option<serde_json::Value>> {
+        let row: Option<(String, String, String, String, Option<String>, String, Option<String>, String, i32, String, String, String)> = sqlx::query_as(
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text \
+             FROM narrative_node WHERE id = $1"
         )
         .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get narrative node")?;
+
+        Ok(row.map(|(id, pid, wid, nt, par, title, desc, attrs, ord, st, cr, up)| {
+            serde_json::json!({"id": id, "project_id": pid, "world_id": wid, "node_type": nt, "parent_id": par, "title": title, "description": desc, "attributes": serde_json::from_str::<serde_json::Value>(&attrs).unwrap_or(serde_json::json!({})), "sort_order": ord, "status": st, "created_at": cr, "updated_at": up})
+        }))
+    }
+
+    /// 创建叙事节点
+    pub async fn create_node(
+        &self,
+        project_id: Uuid,
+        node_type: &str,
+        parent_id: Option<Uuid>,
+        title: &str,
+        description: Option<&str>,
+        attributes: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let id = Uuid::new_v4();
+        let world_id: (String,) = sqlx::query_as("SELECT id FROM world WHERE project_id = $1 LIMIT 1")
+            .bind(project_id)
+            .fetch_one(&self.pool)
+            .await
+            .context("Failed to get world for project")?;
+
+        let sort_order: (i32,) = sqlx::query_as(
+            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM narrative_node WHERE project_id = $1 AND parent_id IS NOT DISTINCT FROM $2"
+        )
         .bind(project_id)
-        .bind(character_id)
-        .bind(volume_id)
-        .bind(arc_type)
-        .bind(start_state.unwrap_or(""))
-        .bind(mid_state.unwrap_or(""))
-        .bind(end_state.unwrap_or(""))
-        .bind(serde_json::to_value(&key_moments).unwrap_or_default())
-        .bind(now)
-        .bind(now)
+        .bind(parent_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to get sort order")?;
+
+        sqlx::query(
+            "INSERT INTO narrative_node (id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Draft')"
+        )
+        .bind(&id)
+        .bind(project_id)
+        .bind(&world_id.0)
+        .bind(node_type)
+        .bind(parent_id)
+        .bind(title)
+        .bind(description)
+        .bind(attributes)
+        .bind(sort_order.0)
         .execute(&self.pool)
         .await
-        .context("Failed to create character arc")?;
+        .context("Failed to create narrative node")?;
 
-        Ok(CharacterArc {
-            id,
-            project_id,
-            character_id,
-            volume_id,
-            arc_type: arc_type.to_string(),
-            start_state: start_state.map(|s| s.to_string()),
-            mid_state: mid_state.map(|s| s.to_string()),
-            end_state: end_state.map(|s| s.to_string()),
-            key_moments,
-            created_at: now,
-            updated_at: now,
-        })
+        self.get_node(id).await?
+            .ok_or_else(|| anyhow::anyhow!("Node disappeared after creation"))
     }
-}
 
-/// 叙事节点树
-#[derive(Debug, Clone)]
-pub struct NarrativeNodeTree {
-    pub node: NarrativeNode,
-    pub children: Vec<NarrativeNodeTree>,
+    /// 更新叙事节点（不能更新已删除的节点）
+    pub async fn update_node(
+        &self,
+        id: Uuid,
+        title: Option<&str>,
+        description: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        // 检查节点是否存在且未删除
+        let exists: Option<(String,)> = sqlx::query_as(
+            "SELECT status FROM narrative_node WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to check node status")?;
+
+        match exists {
+            Some((s,)) if s == "Deleted" => {
+                return Err(anyhow::anyhow!("Cannot update deleted narrative node"));
+            }
+            None => {
+                return Err(anyhow::anyhow!("Narrative node not found"));
+            }
+            _ => {}
+        }
+
+        if let Some(t) = title {
+            sqlx::query("UPDATE narrative_node SET title=$1, updated_at=NOW() WHERE id=$2")
+                .bind(t).bind(id).execute(&self.pool).await?;
+        }
+        if let Some(d) = description {
+            sqlx::query("UPDATE narrative_node SET description=$1, updated_at=NOW() WHERE id=$2")
+                .bind(d).bind(id).execute(&self.pool).await?;
+        }
+        if let Some(s) = status {
+            sqlx::query("UPDATE narrative_node SET status=$1, updated_at=NOW() WHERE id=$2")
+                .bind(s).bind(id).execute(&self.pool).await?;
+        }
+
+        self.get_node(id).await?
+            .ok_or_else(|| anyhow::anyhow!("Node disappeared after update"))
+    }
+
+    /// 软删除叙事节点
+    pub async fn delete_node(&self, id: Uuid) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE narrative_node SET status = 'Deleted', updated_at = NOW() WHERE id = $1 AND status != 'Deleted'"
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to delete narrative node")?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!("Narrative node not found or already deleted"));
+        }
+
+        Ok(())
+    }
 }

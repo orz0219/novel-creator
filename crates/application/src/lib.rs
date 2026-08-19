@@ -9,3 +9,4 @@ pub mod generation_service;
 pub mod timeline_service;
 pub mod storyline_service;
 pub mod approval_service;
+pub mod proposal_service;
