@@ -1,4 +1,8 @@
 //! Validation Repository
+//!
+//! Provides both pool-based and transaction-aware methods.
+//! Transaction-aware methods (suffixed _tx) accept a &mut PgConnection
+//! and should be used when multiple operations must be atomic.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -6,7 +10,7 @@ use domain::{
     IssueSeverity, ProposedChange, ProposedChangeStatus, ProposedChangeType, ValidationIssue,
     ValidationIssueType, ValidationRun, ValidationStatus,
 };
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::ser;
@@ -64,6 +68,15 @@ impl ValidationRepo {
     }
 
     pub async fn update_status(&self, change_id: Uuid, status: ProposedChangeStatus) -> Result<()> {
+        Self::update_status_tx(&mut *self.pool.acquire().await.context("Failed to acquire connection")?, change_id, status).await
+    }
+
+    /// Transaction-aware update_status. Use inside a transaction block.
+    pub async fn update_status_tx(
+        conn: &mut PgConnection,
+        change_id: Uuid,
+        status: ProposedChangeStatus,
+    ) -> Result<()> {
         let status_str = ser::proposed_change_status_str(&status);
 
         sqlx::query(
@@ -72,7 +85,7 @@ impl ValidationRepo {
         .bind(&status_str)
         .bind(Utc::now())
         .bind(change_id)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .context("Failed to update proposed change")?;
         Ok(())

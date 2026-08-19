@@ -1,9 +1,13 @@
 //! State Repository
+//!
+//! Provides both pool-based and transaction-based methods.
+//! Transaction-aware methods (suffixed _tx) accept a &mut PgConnection
+//! and should be used when multiple operations must be atomic.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use domain::{CurrentState, ResourceState, StateChangeRecord};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 pub struct StateRepo {
@@ -22,6 +26,17 @@ impl StateRepo {
         state_key: &str,
         state_value: serde_json::Value,
     ) -> Result<CurrentState> {
+        Self::upsert_state_tx(&mut *self.pool.acquire().await.context("Failed to acquire connection")?, project_id, entity_id, state_key, state_value).await
+    }
+
+    /// Transaction-aware upsert_state. Use inside a transaction block.
+    pub async fn upsert_state_tx(
+        conn: &mut PgConnection,
+        project_id: Uuid,
+        entity_id: Uuid,
+        state_key: &str,
+        state_value: serde_json::Value,
+    ) -> Result<CurrentState> {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
@@ -32,7 +47,7 @@ impl StateRepo {
         .bind(now)
         .bind(entity_id)
         .bind(state_key)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .context("Failed to invalidate")?;
 
@@ -49,7 +64,7 @@ impl StateRepo {
         .bind(now)
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .context("Failed to insert")?;
 
@@ -71,13 +86,22 @@ impl StateRepo {
         entity_id: Uuid,
         state_key: &str,
     ) -> Result<Option<CurrentState>> {
+        Self::get_current_state_tx(&mut *self.pool.acquire().await.context("Failed to acquire connection")?, entity_id, state_key).await
+    }
+
+    /// Transaction-aware get_current_state.
+    pub async fn get_current_state_tx(
+        conn: &mut PgConnection,
+        entity_id: Uuid,
+        state_key: &str,
+    ) -> Result<Option<CurrentState>> {
         let row = sqlx::query_as::<_, CurrentStateRow>(
             "SELECT id, project_id, entity_id, state_key, state_value, effective_from, effective_to, created_at, updated_at \
              FROM current_state WHERE entity_id = $1 AND state_key = $2 AND effective_to IS NULL",
         )
         .bind(entity_id)
         .bind(state_key)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .context("Failed to query current state")?;
 
@@ -97,8 +121,43 @@ impl StateRepo {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
+    /// 批量获取多个 entity 的当前状态，避免 N+1 query。
+    pub async fn list_current_states_batch(&self, entity_ids: &[Uuid]) -> Result<Vec<CurrentState>> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, CurrentStateRow>(
+            "SELECT id, project_id, entity_id, state_key, state_value, effective_from, effective_to, created_at, updated_at \
+             FROM current_state WHERE entity_id = ANY($1) AND effective_to IS NULL ORDER BY entity_id, state_key",
+        )
+        .bind(entity_ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to batch query current states")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
     pub async fn record_change(
         &self,
+        project_id: Uuid,
+        event_id: Option<Uuid>,
+        change_type: &str,
+        target_entity_id: Uuid,
+        state_key: &str,
+        old_value: Option<serde_json::Value>,
+        new_value: serde_json::Value,
+        committed_by: Option<&str>,
+    ) -> Result<StateChangeRecord> {
+        Self::record_change_tx(
+            &mut *self.pool.acquire().await.context("Failed to acquire connection")?,
+            project_id, event_id, change_type, target_entity_id, state_key, old_value, new_value, committed_by,
+        ).await
+    }
+
+    /// Transaction-aware record_change. Use inside a transaction block.
+    pub async fn record_change_tx(
+        conn: &mut PgConnection,
         project_id: Uuid,
         event_id: Option<Uuid>,
         change_type: &str,
@@ -125,7 +184,7 @@ impl StateRepo {
         .bind(&new_value)
         .bind(now)
         .bind(committed_by.unwrap_or(""))
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .context("Failed to record change")?;
 

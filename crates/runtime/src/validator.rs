@@ -1,15 +1,20 @@
 //! Validator - 变更验证
 //!
-//! 核心原则：AI 只能提出 ProposedChange，所有变更必须经过验证并事务化提交。
+//! 核心原则：AI 只能提出 ProposedChange，所有变更必须经过验证。
+//! Validator 只负责验证，不负责提交。
+//! 提交由 StateCommitter 在独立事务中完成。
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use db::repos::{approval_repo, entity_repo, state_repo, validation_repo};
+use db::repos::{approval_repo, entity_repo, validation_repo};
 use domain::*;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Validator - 变更验证器
+///
+/// 只负责验证 ProposedChange 的合规性。
+/// 不负责 state commit - 那是 StateCommitter 的职责。
 pub struct Validator {
     pool: PgPool,
 }
@@ -28,14 +33,13 @@ impl Validator {
     ) -> Result<ValidationRun> {
         let val_repo = validation_repo::ValidationRepo::new(self.pool.clone());
         let entity_repo = entity_repo::EntityRepo::new(self.pool.clone());
-        let state_repo = state_repo::StateRepo::new(self.pool.clone());
 
         let mut run = val_repo.create_validation_run(project_id, task_id).await?;
         let mut approved = 0;
         let mut rejected = 0;
 
         for change in changes {
-            let issues = self.validate_single_change(change, &entity_repo, &state_repo).await?;
+            let issues = self.validate_single_change(change, &entity_repo).await?;
 
             let has_critical = issues.iter().any(|i| i.severity == IssueSeverity::Critical);
             let has_warning = issues.iter().any(|i| i.severity == IssueSeverity::Warning);
@@ -87,19 +91,33 @@ impl Validator {
         &self,
         change: &ProposedChange,
         entity_repo: &entity_repo::EntityRepo,
-        _state_repo: &state_repo::StateRepo,
     ) -> Result<Vec<ValidationIssue>> {
         let mut issues = Vec::new();
 
-        if entity_repo.get_by_id(change.target_entity_id).await?.is_none() {
-            issues.push(ValidationIssue {
-                id: Uuid::new_v4(), validation_run_id: Uuid::nil(), proposed_change_id: change.id,
-                issue_type: ValidationIssueType::EntityNotFound, severity: IssueSeverity::Critical,
-                message: format!("Target entity {} not found", change.target_entity_id),
-                suggestion: Some("Ensure the entity exists before proposing changes".to_string()),
-                created_at: Utc::now(),
-            });
-            return Ok(issues);
+        // P0-3: 验证 target entity 属于当前 project
+        match entity_repo.get_by_id(change.target_entity_id).await? {
+            None => {
+                issues.push(ValidationIssue {
+                    id: Uuid::new_v4(), validation_run_id: Uuid::nil(), proposed_change_id: change.id,
+                    issue_type: ValidationIssueType::EntityNotFound, severity: IssueSeverity::Critical,
+                    message: format!("Target entity {} not found", change.target_entity_id),
+                    suggestion: Some("Ensure the entity exists before proposing changes".to_string()),
+                    created_at: Utc::now(),
+                });
+                return Ok(issues);
+            }
+            Some(entity) => {
+                if entity.project_id != change.project_id {
+                    issues.push(ValidationIssue {
+                        id: Uuid::new_v4(), validation_run_id: Uuid::nil(), proposed_change_id: change.id,
+                        issue_type: ValidationIssueType::RuleViolation, severity: IssueSeverity::Critical,
+                        message: format!("Cross-project pollution: entity {} belongs to project {}, but change targets project {}", change.target_entity_id, entity.project_id, change.project_id),
+                        suggestion: Some("Ensure the target entity belongs to the same project".to_string()),
+                        created_at: Utc::now(),
+                    });
+                    return Ok(issues);
+                }
+            }
         }
 
         match &change.change_type {
@@ -219,37 +237,6 @@ impl Validator {
         .context("Failed to query approved changes")?;
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
-    }
-
-    /// 批准并提交变更
-    pub async fn apply_approved_changes(&self, project_id: Uuid, task_id: Uuid) -> Result<Vec<StateChangeRecord>> {
-        let val_repo = validation_repo::ValidationRepo::new(self.pool.clone());
-        let state_repo = state_repo::StateRepo::new(self.pool.clone());
-        let mut records = Vec::new();
-
-        let approved_changes = self.list_approved_changes(project_id, task_id).await?;
-
-        for change in &approved_changes {
-            match &change.change_type {
-                ProposedChangeType::StateChange => {
-                    let state_key = change.payload.get("state_key").and_then(|v| v.as_str()).unwrap_or("");
-                    let new_value = change.payload.get("new_value").cloned().unwrap_or(serde_json::Value::Null);
-
-                    let old_state = state_repo.get_current_state(change.target_entity_id, state_key).await?;
-                    let old_value = old_state.map(|s| s.state_value);
-
-                    let record = state_repo.record_change(project_id, None, "STATE_CHANGE", change.target_entity_id, state_key, old_value, new_value.clone(), Some("validator")).await?;
-                    state_repo.upsert_state(project_id, change.target_entity_id, state_key, new_value).await?;
-                    records.push(record);
-
-                    val_repo.update_status(change.id, ProposedChangeStatus::Applied).await?;
-                }
-                _ => { tracing::warn!("Unsupported change type: {:?}", change.change_type); }
-            }
-        }
-
-        tracing::info!("Applied {} changes", records.len());
-        Ok(records)
     }
 }
 

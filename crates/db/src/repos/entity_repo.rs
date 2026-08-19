@@ -201,6 +201,25 @@ impl EntityRepo {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
+    /// 批量获取 entities，避免 N+1 query。
+    pub async fn list_by_ids(&self, project_id: Uuid, ids: &[Uuid]) -> Result<Vec<Entity>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, EntityRow>(
+            "SELECT id, project_id, world_id, entity_type_id, name, summary, description, \
+             attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at \
+             FROM entity WHERE project_id = $1 AND id = ANY($2) ORDER BY name",
+        )
+        .bind(project_id)
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to batch query entities")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
     pub async fn update(&self, entity: &Entity) -> Result<()> {
         sqlx::query(
             "UPDATE entity SET name = $1, summary = $2, attributes = $3, updated_at = $4 WHERE id = $5",

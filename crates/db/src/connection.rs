@@ -33,7 +33,7 @@ impl Database {
             .max_lifetime(Duration::from_secs(1800))
             .connect(database_url)
             .await
-            .context(format!("Failed to connect to PostgreSQL: {}", database_url))?;
+            .context("Failed to connect to PostgreSQL")?;
 
         tracing::info!("PostgreSQL connection pool created");
 
@@ -54,7 +54,7 @@ impl Database {
             .max_lifetime(Duration::from_secs(1800))
             .connect(database_url)
             .await
-            .context(format!("Failed to connect to PostgreSQL: {}", database_url))?;
+            .context("Failed to connect to PostgreSQL")?;
 
         tracing::info!(
             "PostgreSQL connection pool created (max={}, min={})",
@@ -90,10 +90,10 @@ impl Database {
 
     /// 检查数据库连接是否健康
     pub async fn health_check(&self) -> Result<()> {
-        self.pool
-            .acquire()
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
             .await
-            .context("Failed to acquire connection for health check")?;
+            .context("Health check failed: SELECT 1 returned error")?;
         Ok(())
     }
 

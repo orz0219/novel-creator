@@ -171,7 +171,7 @@ impl ContextEngine {
 
         // 第6步: Narrative Context
         let chapter_summary = self.get_chapter_summary(&scene_node, &narrative_repo).await?;
-        let volume_summary = self.get_volume_summary(project_id).await?;
+        let volume_summary = self.get_volume_summary(project_id, &scene_node, &narrative_repo).await?;
         let arc_summary = self.get_arc_summary(&scene_node, &narrative_repo).await?;
         let prev_scene_summary = self.get_previous_scene_summary(project_id, &scene_node, &narrative_repo).await?;
 
@@ -321,6 +321,9 @@ impl ContextEngine {
     }
 
     /// Token Budget 分配
+    ///
+    /// Required layers are ALWAYS included regardless of budget.
+    /// Optional layers fill remaining budget, sorted by score/token_cost.
     fn allocate_budget(
         &self,
         project_id: Uuid,
@@ -333,13 +336,39 @@ impl ContextEngine {
         let mut used_tokens = 0;
         let mut included_layers = Vec::new();
 
+        // Step 1: Separate required and optional layers
+        let mut required: Vec<(ContextLayerType, ContextLayer, ContextScore)> = Vec::new();
+        let mut optional: Vec<(ContextLayerType, ContextLayer, ContextScore)> = Vec::new();
+
         for (layer_type, mut layer, score) in filtered.layers {
             let estimated_tokens = self.estimate_tokens(&layer.content);
             layer.token_estimate = estimated_tokens;
 
-            if used_tokens + estimated_tokens <= max_tokens {
+            if policy.required_layers.contains(&layer_type) {
+                required.push((layer_type, layer, score));
+            } else {
+                optional.push((layer_type, layer, score));
+            }
+        }
+
+        // Step 2: Required layers are ALWAYS included (forced, no budget check)
+        for (layer_type, mut layer, score) in required {
+            layer.included = true;
+            used_tokens += layer.token_estimate;
+            included_layers.push((layer_type, layer, score));
+        }
+
+        // Step 3: Optional layers fill remaining budget, sorted by score/token_cost
+        optional.sort_by(|a, b| {
+            let score_a = if a.1.token_estimate > 0 { a.2.total_score() / a.1.token_estimate as f64 } else { f64::MAX };
+            let score_b = if b.1.token_estimate > 0 { b.2.total_score() / b.1.token_estimate as f64 } else { f64::MAX };
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for (layer_type, mut layer, score) in optional {
+            if used_tokens + layer.token_estimate <= max_tokens {
                 layer.included = true;
-                used_tokens += estimated_tokens;
+                used_tokens += layer.token_estimate;
                 included_layers.push((layer_type, layer, score));
             } else {
                 layer.included = false;
@@ -395,11 +424,32 @@ impl ContextEngine {
         Ok(None)
     }
 
-    async fn get_volume_summary(&self, project_id: Uuid) -> Result<Option<String>> {
-        let repo = narrative_repo::NarrativeRepo::new(self.pool.clone());
-        let all = repo.list_nodes_by_project(project_id).await?;
-        let volumes: Vec<&NarrativeNode> = all.iter().filter(|n| n.node_type == NarrativeNodeType::Volume).collect();
+    async fn get_volume_summary(&self, project_id: Uuid, scene_node: &NarrativeNode, narrative_repo: &narrative_repo::NarrativeRepo) -> Result<Option<String>> {
+        // Walk up: Scene → Chapter → Arc → Volume
+        let volume = if let Some(chapter_id) = scene_node.parent_id {
+            if let Some(chapter) = narrative_repo.get_node_by_id(chapter_id).await? {
+                if let Some(arc_id) = chapter.parent_id {
+                    if let Some(arc) = narrative_repo.get_node_by_id(arc_id).await? {
+                        arc.parent_id
+                    } else { None }
+                } else { None }
+            } else { None }
+        } else { None };
 
+        if let Some(vol_id) = volume {
+            if let Some(vol) = narrative_repo.get_node_by_id(vol_id).await? {
+                let attrs: VolumeAttributes = serde_json::from_value(vol.attributes.clone()).unwrap_or_default();
+                let mut summary = format!("Current Volume: {}", vol.title);
+                if let Some(mission) = &attrs.mission {
+                    summary.push_str(&format!("\nMission: {}", mission));
+                }
+                return Ok(Some(summary));
+            }
+        }
+
+        // Fallback: if scene has no parent chain, try first volume
+        let all = narrative_repo.list_nodes_by_project(project_id).await?;
+        let volumes: Vec<&NarrativeNode> = all.iter().filter(|n| n.node_type == NarrativeNodeType::Volume).collect();
         if let Some(vol) = volumes.first() {
             let attrs: VolumeAttributes = serde_json::from_value(vol.attributes.clone()).unwrap_or_default();
             let mut summary = format!("Current Volume: {}", vol.title);
@@ -478,7 +528,7 @@ impl ContextEngine {
 
         let mut all_relations = Vec::new();
         for entity_id in &entity_ids {
-            let rows = sqlx::query_as::<_, RelationRow>(
+            let rows = match sqlx::query_as::<_, RelationRow>(
                 "SELECT id, project_id, source_entity_id, target_entity_id, relation_type, description, attributes, valid_from, valid_until, created_at, updated_at \
                  FROM relation WHERE project_id = $1 AND (source_entity_id = $2 OR target_entity_id = $2) ORDER BY created_at DESC LIMIT 20"
             )
@@ -486,7 +536,13 @@ impl ContextEngine {
             .bind(entity_id)
             .fetch_all(&self.pool)
             .await
-            .unwrap_or_default();
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("Failed to query relations for entity {}: {}. Treating as empty.", entity_id, e);
+                    continue;
+                }
+            };
 
             for row in rows {
                 let rel: Relation = row.into();
@@ -534,13 +590,19 @@ impl ContextEngine {
         let mut content = String::new();
 
         // Get world rules from canon_rule table
-        let rows = sqlx::query_as::<_, (String, String, String)>(
+        let rows = match sqlx::query_as::<_, (String, String, String)>(
             "SELECT rule_level, rule_content, affected_scope FROM canon_rule WHERE project_id = $1 ORDER BY rule_level"
         )
         .bind(project_id)
         .fetch_all(&self.pool)
         .await
-        .unwrap_or_default();
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("Failed to query canon rules for project {}: {}. World rules will be incomplete.", project_id, e);
+                Vec::new()
+            }
+        };
 
         if !rows.is_empty() {
             content.push_str("## World Rules (Canon Constitution)\n");
@@ -550,13 +612,19 @@ impl ContextEngine {
         }
 
         // Also get world description/rules from world table
-        let world_rules: Option<String> = sqlx::query_scalar(
+        let world_rules: Option<String> = match sqlx::query_scalar(
             "SELECT world_rules FROM world WHERE project_id = $1 AND is_main = TRUE"
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
         .await
-        .unwrap_or(None);
+        {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::warn!("Failed to query world rules for project {}: {}. World rules will be incomplete.", project_id, e);
+                None
+            }
+        };
 
         if let Some(rules) = world_rules {
             if !rules.is_empty() {
@@ -605,7 +673,7 @@ impl ContextEngine {
 
         let mut all_events = Vec::new();
         for entity_id in &entity_ids {
-            let rows = sqlx::query_as::<_, EventRow>(
+            let rows = match sqlx::query_as::<_, EventRow>(
                 "SELECT e.id, e.project_id, e.name, e.description, e.event_type, e.event_time, e.duration, e.created_at, e.updated_at \
                  FROM event e INNER JOIN event_entity ee ON e.id = ee.event_id \
                  WHERE e.project_id = $1 AND ee.entity_id = $2 ORDER BY e.created_at DESC LIMIT 5"
@@ -614,7 +682,13 @@ impl ContextEngine {
             .bind(entity_id)
             .fetch_all(&self.pool)
             .await
-            .unwrap_or_default();
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("Failed to query events for entity {}: {}. Treating as empty.", entity_id, e);
+                    continue;
+                }
+            };
 
             for row in rows {
                 let event: Event = row.into();
@@ -742,8 +816,12 @@ impl ContextEngine {
     }
 
     fn estimate_tokens(&self, content: &str) -> i32 {
-        // Rough estimate: 1 token per 4 characters for Chinese text
-        (content.len() as i32) / 4
+        // Use char count instead of byte length for accurate Chinese token estimation.
+        // String::len() returns UTF-8 bytes: Chinese chars are 3 bytes each, causing underestimation.
+        // Rough estimate: ~1.5 chars per token for mixed Chinese/English text.
+        let char_count = content.chars().count() as i32;
+        // Conservative: 1 token per 1.5 characters (Chinese-heavy text gets ~2 chars/token)
+        (char_count * 2) / 3
     }
 }
 
