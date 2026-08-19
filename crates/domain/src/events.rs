@@ -146,29 +146,45 @@ impl EventDispatcher {
     }
 
     /// Dispatch an event to all matching subscribers
+    ///
+    /// 不会因为单个 subscriber 失败而停止整个分发。
+    /// 所有错误会被收集并返回。
     pub fn dispatch(&self, event: &DomainEvent) -> Result<()> {
+        let mut errors = Vec::new();
+
         for subscriber in &self.subscribers {
             if subscriber.event_types().is_empty() || subscriber.event_types().contains(&event.event_type) {
-                subscriber.handle_event(event)?;
+                if let Err(e) = subscriber.handle_event(event) {
+                    tracing::warn!("Event subscriber failed for event {:?}: {}", event.event_type, e);
+                    errors.push(e);
+                }
             }
         }
-        Ok(())
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("{} event subscribers failed", errors.len()))
+        }
     }
 }
 
-/// Audit Log - persistent event storage
-pub struct AuditLog {
+/// Audit Log - in-memory event storage (NOT persistent)
+///
+/// 注意：这是进程内的内存存储，不是持久化审计日志。
+/// 对于持久化事件，请使用 system_events 表。
+pub struct InMemoryAuditLog {
     events: Vec<DomainEvent>,
 }
 
-impl AuditLog {
+impl InMemoryAuditLog {
     pub fn new() -> Self {
         Self {
             events: Vec::new(),
         }
     }
 
-    /// Record an event
+    /// Record an event (in-memory only)
     pub fn record(&mut self, event: DomainEvent) {
         self.events.push(event);
     }
@@ -235,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_audit_log() {
-        let mut log = AuditLog::new();
+        let mut log = InMemoryAuditLog::new();
         let project_id = Uuid::new_v4();
 
         log.record(DomainEvent::new(

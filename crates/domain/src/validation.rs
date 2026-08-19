@@ -81,15 +81,22 @@ pub enum ProposedChangeStatus {
     Conflicted,
     /// 已过期
     Expired,
+    /// 提交失败
+    Failed,
 }
 
 impl ProposedChangeStatus {
     /// 检查状态转换是否合法
+    ///
+    /// 完整状态机:
+    /// Draft -> Validating -> Valid -> Approved -> Committed -> Applied
+    /// Draft -> Validating -> Valid -> PendingApproval -> Approved -> Committed -> Applied
+    /// 异常: Invalid, Rejected, Conflicted, Expired, Failed
     pub fn can_transition_to(&self, new_status: &ProposedChangeStatus) -> bool {
         matches!(
             (self, new_status),
+            // 正常流程
             (ProposedChangeStatus::Draft, ProposedChangeStatus::Validating)
-                | (ProposedChangeStatus::Draft, ProposedChangeStatus::Invalid)
                 | (ProposedChangeStatus::Validating, ProposedChangeStatus::Valid)
                 | (ProposedChangeStatus::Validating, ProposedChangeStatus::Invalid)
                 | (ProposedChangeStatus::Valid, ProposedChangeStatus::Approved)
@@ -98,8 +105,16 @@ impl ProposedChangeStatus {
                 | (ProposedChangeStatus::PendingApproval, ProposedChangeStatus::Approved)
                 | (ProposedChangeStatus::PendingApproval, ProposedChangeStatus::Rejected)
                 | (ProposedChangeStatus::Approved, ProposedChangeStatus::Committed)
-                | (ProposedChangeStatus::Approved, ProposedChangeStatus::Applied)
                 | (ProposedChangeStatus::Approved, ProposedChangeStatus::Rejected)
+                | (ProposedChangeStatus::Committed, ProposedChangeStatus::Applied)
+                | (ProposedChangeStatus::Committed, ProposedChangeStatus::Failed)
+                // Conflicted 可从多个状态进入
+                | (ProposedChangeStatus::Validating, ProposedChangeStatus::Conflicted)
+                | (ProposedChangeStatus::Valid, ProposedChangeStatus::Conflicted)
+                | (ProposedChangeStatus::Approved, ProposedChangeStatus::Conflicted)
+                | (ProposedChangeStatus::PendingApproval, ProposedChangeStatus::Conflicted)
+                // Expired 可从 PendingApproval 进入
+                | (ProposedChangeStatus::PendingApproval, ProposedChangeStatus::Expired)
         )
     }
 
@@ -117,6 +132,7 @@ impl ProposedChangeStatus {
             ProposedChangeStatus::Rejected => "Rejected",
             ProposedChangeStatus::Conflicted => "Conflicted",
             ProposedChangeStatus::Expired => "Expired",
+            ProposedChangeStatus::Failed => "Failed",
         }
     }
 }

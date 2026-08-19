@@ -20,7 +20,7 @@ fn pj(s: &str) -> serde_json::Value { serde_json::from_str(s).unwrap_or_else(|_|
 
 pub async fn list_nodes(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let rows: Vec<(String, String, String, String, Option<String>, String, Option<String>, String, i32, String, String, String)> = sqlx::query_as(
-        "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text FROM narrative_node WHERE project_id = $1 ORDER BY sort_order"
+        "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text FROM narrative_node WHERE project_id = $1 AND status != 'Deleted' ORDER BY sort_order"
     ).bind(&project_id).fetch_all(&state.pool).await?;
     Ok(Json(serde_json::json!(rows.into_iter().map(|(id, pid, wid, nt, par, title, desc, attrs, ord, st, cr, up)| {
         serde_json::json!({"id": id, "project_id": pid, "world_id": wid, "node_type": nt, "parent_id": par, "title": title, "description": desc, "attributes": pj(&attrs), "sort_order": ord, "status": st, "created_at": cr, "updated_at": up})
@@ -49,6 +49,21 @@ pub async fn create_node(State(state): State<AppState>, Path(project_id): Path<S
 }
 
 pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<UpdateNodeInput>) -> Result<Json<serde_json::Value>, AppError> {
+    // Cannot update deleted nodes
+    let exists: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM narrative_node WHERE id = $1"
+    ).bind(&id).fetch_optional(&state.pool).await?;
+
+    match exists {
+        Some((status,)) if status == "Deleted" => {
+            return Err(AppError(anyhow::anyhow!("Cannot update deleted narrative node")));
+        }
+        None => {
+            return Err(AppError(anyhow::anyhow!("Narrative node not found")));
+        }
+        _ => {}
+    }
+
     if let Some(t) = &input.title { sqlx::query("UPDATE narrative_node SET title=$1, updated_at=NOW() WHERE id=$2").bind(t).bind(&id).execute(&state.pool).await?; }
     if let Some(d) = &input.description { sqlx::query("UPDATE narrative_node SET description=$1, updated_at=NOW() WHERE id=$2").bind(d).bind(&id).execute(&state.pool).await?; }
     if let Some(s) = &input.status { sqlx::query("UPDATE narrative_node SET status=$1, updated_at=NOW() WHERE id=$2").bind(s).bind(&id).execute(&state.pool).await?; }
@@ -56,8 +71,16 @@ pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, 
 }
 
 pub async fn delete_node(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    sqlx::query("DELETE FROM narrative_node WHERE id=$1").bind(&id).execute(&state.pool).await?;
-    Ok(Json(serde_json::json!({"deleted": true})))
+    // Soft delete - set status to Deleted instead of removing
+    let result = sqlx::query(
+        "UPDATE narrative_node SET status = 'Deleted', updated_at = NOW() WHERE id = $1 AND status != 'Deleted'"
+    ).bind(&id).execute(&state.pool).await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError(anyhow::anyhow!("Narrative node not found or already deleted")));
+    }
+
+    Ok(Json(serde_json::json!({"deleted": true, "id": id})))
 }
 
 pub async fn list_storylines(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {

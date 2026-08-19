@@ -1,8 +1,13 @@
 //! Proposal API handlers
+//!
+//! 所有 mutation 通过 application service，不直接操作数据库。
+//! 状态转换必须通过 ProposedChangeStatus.can_transition_to() 验证。
+
 use axum::extract::{Path, State};
 use axum::Json;
 use crate::state::AppState;
 use super::error::AppError;
+use domain::ProposedChangeStatus;
 
 pub async fn list_proposals(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String)>(
@@ -25,13 +30,79 @@ pub async fn get_proposal(State(state): State<AppState>, Path(id): Path<String>)
     }
 }
 
+/// Accept a proposal - validates state transition before updating
 pub async fn accept_proposal(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    sqlx::query("UPDATE proposed_change SET status = 'Accepted' WHERE id = $1").bind(&id).execute(&state.pool).await?;
-    Ok(Json(serde_json::json!({"id": id, "status": "Accepted"})))
+    // Get current status
+    let current_status: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM proposed_change WHERE id = $1"
+    ).bind(&id).fetch_optional(&state.pool).await?;
+
+    let current_status = match current_status {
+        Some((s,)) => s,
+        None => return Err(AppError(anyhow::anyhow!("Proposal not found"))),
+    };
+
+    // Parse current status and validate transition
+    let from = db::ser::parse_proposed_change_status(&current_status);
+    let to = ProposedChangeStatus::Approved;
+
+    if !from.can_transition_to(&to) {
+        return Err(AppError(anyhow::anyhow!(
+            "Invalid state transition: {} -> {}", current_status, to.description()
+        )));
+    }
+
+    // Use CAS: only update if status matches
+    let result = sqlx::query(
+        "UPDATE proposed_change SET status = 'Approved', resolved_at = NOW() WHERE id = $1 AND status = $2"
+    )
+    .bind(&id)
+    .bind(&current_status)
+    .execute(&state.pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError(anyhow::anyhow!("Concurrent modification: proposal status changed during update")));
+    }
+
+    Ok(Json(serde_json::json!({"id": id, "status": "Approved"})))
 }
 
+/// Reject a proposal - validates state transition before updating
 pub async fn reject_proposal(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    sqlx::query("UPDATE proposed_change SET status = 'Rejected' WHERE id = $1").bind(&id).execute(&state.pool).await?;
+    // Get current status
+    let current_status: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM proposed_change WHERE id = $1"
+    ).bind(&id).fetch_optional(&state.pool).await?;
+
+    let current_status = match current_status {
+        Some((s,)) => s,
+        None => return Err(AppError(anyhow::anyhow!("Proposal not found"))),
+    };
+
+    // Parse current status and validate transition
+    let from = db::ser::parse_proposed_change_status(&current_status);
+    let to = ProposedChangeStatus::Rejected;
+
+    if !from.can_transition_to(&to) {
+        return Err(AppError(anyhow::anyhow!(
+            "Invalid state transition: {} -> {}", current_status, to.description()
+        )));
+    }
+
+    // Use CAS: only update if status matches
+    let result = sqlx::query(
+        "UPDATE proposed_change SET status = 'Rejected', resolved_at = NOW() WHERE id = $1 AND status = $2"
+    )
+    .bind(&id)
+    .bind(&current_status)
+    .execute(&state.pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError(anyhow::anyhow!("Concurrent modification: proposal status changed during update")));
+    }
+
     Ok(Json(serde_json::json!({"id": id, "status": "Rejected"})))
 }
 

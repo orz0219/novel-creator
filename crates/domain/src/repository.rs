@@ -72,11 +72,16 @@ pub trait ValidationRepository: Send + Sync {
 }
 
 /// State Repository trait
+///
+/// StateChangeRecord 是 source of truth (append-only)。
+/// CurrentState 是只读 projection，不能直接写入。
+/// 只能通过 append_state_change + apply_state_change 更新。
 pub trait StateRepository: Send + Sync {
-    fn get_current_state(&self, entity_id: Uuid, state_key: &str) -> Result<Option<CurrentState>>;
-    fn set_state(&self, state: &CurrentState) -> Result<CurrentState>;
-    fn get_state_history(&self, entity_id: Uuid) -> Result<Vec<StateChangeRecord>>;
-    fn record_state_change(&self, change: &StateChangeRecord) -> Result<()>;
+    fn get_current_state(&self, project_id: Uuid, entity_id: Uuid, state_key: &str) -> Result<Option<CurrentState>>;
+    fn list_current_states(&self, project_id: Uuid, entity_id: Uuid) -> Result<Vec<CurrentState>>;
+    fn append_state_change(&self, change: &StateChangeRecord) -> Result<()>;
+    fn get_state_history(&self, project_id: Uuid, entity_id: Uuid) -> Result<Vec<StateChangeRecord>>;
+    fn apply_state_change(&self, project_id: Uuid, entity_id: Uuid, state_key: &str, new_value: serde_json::Value, expected_version: i32) -> Result<CurrentState>;
 }
 
 /// Unit of Work trait

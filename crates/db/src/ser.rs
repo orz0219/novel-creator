@@ -287,6 +287,7 @@ pub fn proposed_change_status_str(ps: &ProposedChangeStatus) -> String {
         ProposedChangeStatus::Rejected => "Rejected".into(),
         ProposedChangeStatus::Conflicted => "Conflicted".into(),
         ProposedChangeStatus::Expired => "Expired".into(),
+        ProposedChangeStatus::Failed => "Failed".into(),
     }
 }
 
@@ -304,6 +305,7 @@ pub fn parse_proposed_change_status(s: &str) -> ProposedChangeStatus {
         "Rejected" => ProposedChangeStatus::Rejected,
         "Conflicted" => ProposedChangeStatus::Conflicted,
         "Expired" => ProposedChangeStatus::Expired,
+        "Failed" => ProposedChangeStatus::Failed,
         _ => ProposedChangeStatus::Draft,
     }
 }

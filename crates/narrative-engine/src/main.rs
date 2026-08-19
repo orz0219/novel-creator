@@ -23,9 +23,9 @@ async fn main() -> Result<()> {
 
     tracing::info!("Novel Engine starting...");
 
-    // Connect to PostgreSQL
+    // Connect to PostgreSQL - DATABASE_URL is required
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://novel:novel_pass@localhost:5432/novel_engine".to_string());
+        .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?;
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
         .acquire_timeout(Duration::from_secs(30))
         .connect(&database_url)
         .await
-        .expect("Failed to connect to PostgreSQL");
+        .map_err(|e| anyhow::anyhow!("Failed to connect to PostgreSQL: {}", e))?;
 
     tracing::info!("PostgreSQL connected");
 
@@ -52,22 +52,33 @@ async fn main() -> Result<()> {
                 }
             }
             Err(e) => {
-                tracing::warn!("Migration check: {}", e);
+                tracing::error!("Migration failed: {}. Server cannot start with inconsistent schema.", e);
+                return Err(e);
             }
         }
     }
 
-    // Seed entity types (idempotent)
+    // Seed entity types (idempotent using ON CONFLICT)
     let entity_types = ["Character", "Location", "Faction", "Item", "Creature", "Organization"];
     for et in &entity_types {
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM entity_type WHERE name = $1")
-            .bind(et).fetch_one(&pool).await.unwrap_or((0,));
-        if count.0 == 0 {
-            let id = uuid::Uuid::new_v4().to_string();
-            sqlx::query("INSERT INTO entity_type (id, name, description) VALUES ($1, $2, $3)")
-                .bind(&id).bind(et).bind(format!("{} entity type", et))
-                .execute(&pool).await.ok();
-            tracing::info!("Seeded entity type: {}", et);
+        let id = uuid::Uuid::new_v4().to_string();
+        let result = sqlx::query(
+            "INSERT INTO entity_type (id, name, description) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING"
+        )
+        .bind(&id)
+        .bind(et)
+        .bind(format!("{} entity type", et))
+        .execute(&pool)
+        .await;
+
+        match result {
+            Ok(_) => {
+                tracing::debug!("Ensured entity type exists: {}", et);
+            }
+            Err(e) => {
+                tracing::error!("Failed to seed entity type '{}': {}. Server cannot start without required seed data.", et, e);
+                return Err(anyhow::anyhow!("Seed failed for entity type '{}': {}", et, e));
+            }
         }
     }
 

@@ -415,4 +415,153 @@ mod tests {
 
         Ok(())
     }
+
+    // ============================================================
+    // Test 10: State Machine - Valid Transitions
+    // ============================================================
+    #[test]
+    fn test_state_machine_valid_transitions() {
+        use ProposedChangeStatus::*;
+
+        // Normal flow
+        assert!(Draft.can_transition_to(&Validating));
+        assert!(Validating.can_transition_to(&Valid));
+        assert!(Valid.can_transition_to(&Approved));
+        assert!(Approved.can_transition_to(&Committed));
+        assert!(Committed.can_transition_to(&Applied));
+
+        // Pending approval flow
+        assert!(Valid.can_transition_to(&PendingApproval));
+        assert!(PendingApproval.can_transition_to(&Approved));
+        assert!(PendingApproval.can_transition_to(&Rejected));
+
+        // Conflicted transitions
+        assert!(Validating.can_transition_to(&Conflicted));
+        assert!(Valid.can_transition_to(&Conflicted));
+        assert!(Approved.can_transition_to(&Conflicted));
+        assert!(PendingApproval.can_transition_to(&Conflicted));
+
+        // Failed transition
+        assert!(Committed.can_transition_to(&Failed));
+
+        // Expired transition
+        assert!(PendingApproval.can_transition_to(&Expired));
+    }
+
+    // ============================================================
+    // Test 11: State Machine - Invalid Transitions
+    // ============================================================
+    #[test]
+    fn test_state_machine_invalid_transitions() {
+        use ProposedChangeStatus::*;
+
+        // Cannot go backwards
+        assert!(!Valid.can_transition_to(&Draft));
+        assert!(!Approved.can_transition_to(&Validating));
+        assert!(!Committed.can_transition_to(&Valid));
+        assert!(!Applied.can_transition_to(&Committed));
+
+        // Cannot skip steps
+        assert!(!Draft.can_transition_to(&Approved));
+        assert!(!Draft.can_transition_to(&Committed));
+        assert!(!Draft.can_transition_to(&Applied));
+        assert!(!Validating.can_transition_to(&Committed));
+        assert!(!Validating.can_transition_to(&Applied));
+        assert!(!Valid.can_transition_to(&Applied));
+
+        // Terminal states cannot transition
+        assert!(!Applied.can_transition_to(&Draft));
+        assert!(!Applied.can_transition_to(&Validating));
+        assert!(!Applied.can_transition_to(&Valid));
+        assert!(!Applied.can_transition_to(&Approved));
+        assert!(!Applied.can_transition_to(&Committed));
+        assert!(!Rejected.can_transition_to(&Draft));
+        assert!(!Rejected.can_transition_to(&Approved));
+        assert!(!Invalid.can_transition_to(&Draft));
+        assert!(!Invalid.can_transition_to(&Valid));
+        assert!(!Failed.can_transition_to(&Draft));
+        assert!(!Failed.can_transition_to(&Committed));
+        assert!(!Expired.can_transition_to(&Draft));
+        assert!(!Expired.can_transition_to(&Approved));
+        assert!(!Conflicted.can_transition_to(&Draft));
+        assert!(!Conflicted.can_transition_to(&Approved));
+
+        // Cannot commit from wrong states
+        assert!(!Draft.can_transition_to(&Committed));
+        assert!(!Validating.can_transition_to(&Committed));
+        assert!(!PendingApproval.can_transition_to(&Committed));
+        assert!(!Rejected.can_transition_to(&Committed));
+        assert!(!Invalid.can_transition_to(&Committed));
+    }
+
+    // ============================================================
+    // Test 12: Event Dispatcher Error Handling
+    // ============================================================
+    #[test]
+    fn test_event_dispatcher_error_handling() {
+        use domain::events::*;
+
+        struct FailingSubscriber;
+        impl EventSubscriber for FailingSubscriber {
+            fn handle_event(&self, _event: &DomainEvent) -> anyhow::Result<()> {
+                Err(anyhow::anyhow!("subscriber failed"))
+            }
+            fn event_types(&self) -> Vec<DomainEventType> {
+                vec![DomainEventType::EntityCreated]
+            }
+        }
+
+        struct SuccessSubscriber;
+        impl EventSubscriber for SuccessSubscriber {
+            fn handle_event(&self, _event: &DomainEvent) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn event_types(&self) -> Vec<DomainEventType> {
+                vec![DomainEventType::EntityCreated]
+            }
+        }
+
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.add_subscriber(Box::new(FailingSubscriber));
+        dispatcher.add_subscriber(Box::new(SuccessSubscriber));
+
+        let event = DomainEvent::new(
+            DomainEventType::EntityCreated,
+            Uuid::new_v4(),
+            None,
+            serde_json::json!({}),
+        );
+
+        // Should fail because one subscriber failed, but both should be called
+        let result = dispatcher.dispatch(&event);
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Test 13: InMemoryAuditLog
+    // ============================================================
+    #[test]
+    fn test_in_memory_audit_log() {
+        use domain::events::*;
+
+        let mut log = InMemoryAuditLog::new();
+        let project_id = Uuid::new_v4();
+
+        log.record(DomainEvent::new(
+            DomainEventType::EntityCreated,
+            project_id,
+            None,
+            serde_json::json!({}),
+        ));
+
+        log.record(DomainEvent::new(
+            DomainEventType::EntityUpdated,
+            project_id,
+            None,
+            serde_json::json!({}),
+        ));
+
+        let events = log.get_by_project(project_id);
+        assert_eq!(events.len(), 2);
+    }
 }

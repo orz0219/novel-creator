@@ -39,6 +39,14 @@ pub async fn create_task(State(state): State<AppState>, Path(project_id): Path<S
 }
 
 pub async fn cancel_task(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    sqlx::query("UPDATE generation_task SET status = 'Cancelled' WHERE id = $1").bind(&id).execute(&state.pool).await?;
+    // Only allow cancelling Pending or Running tasks
+    let result = sqlx::query(
+        "UPDATE generation_task SET status = 'Cancelled' WHERE id = $1 AND status IN ('Pending', 'Running')"
+    ).bind(&id).execute(&state.pool).await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError(anyhow::anyhow!("Cannot cancel task: task not found or not in cancellable state")));
+    }
+
     Ok(Json(serde_json::json!({"id": id, "status": "Cancelled"})))
 }
