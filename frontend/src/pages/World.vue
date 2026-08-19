@@ -5,22 +5,22 @@
     </div>
 
     <div class="world-stats">
-      <div class="stat-card" @click="$router.push('/project/p1/world/characters')">
+      <div class="stat-card" @click="$router.push('/project/' + route.params.id + '/world/characters')">
         <span class="stat-icon">👤</span>
         <span class="stat-value">{{ worldStore.characters.length }}</span>
         <span class="stat-label">人物</span>
       </div>
-      <div class="stat-card" @click="$router.push('/project/p1/world/locations')">
+      <div class="stat-card" @click="$router.push('/project/' + route.params.id + '/world/locations')">
         <span class="stat-icon">📍</span>
         <span class="stat-value">{{ worldStore.locations.length }}</span>
         <span class="stat-label">地点</span>
       </div>
-      <div class="stat-card" @click="$router.push('/project/p1/world/factions')">
+      <div class="stat-card" @click="$router.push('/project/' + route.params.id + '/world/factions')">
         <span class="stat-icon">⚔️</span>
         <span class="stat-value">{{ worldStore.factions.length }}</span>
         <span class="stat-label">势力</span>
       </div>
-      <div class="stat-card" @click="$router.push('/project/p1/world/timeline')">
+      <div class="stat-card" @click="$router.push('/project/' + route.params.id + '/world/timeline')">
         <span class="stat-icon">📅</span>
         <span class="stat-value">{{ worldStore.events.length }}</span>
         <span class="stat-label">事件</span>
@@ -32,7 +32,7 @@
       <div class="panel">
         <div class="panel-header">
           <h3 class="panel-title">人物</h3>
-          <router-link to="/project/p1/world/characters" class="panel-link">查看全部 →</router-link>
+          <router-link :to="`/project/${route.params.id}/world/characters`" class="panel-link">查看全部 →</router-link>
         </div>
         <div class="entity-list">
           <div v-for="char in worldStore.characters" :key="char.id" class="entity-row">
@@ -47,7 +47,7 @@
       <div class="panel">
         <div class="panel-header">
           <h3 class="panel-title">地点</h3>
-          <router-link to="/project/p1/world/locations" class="panel-link">查看全部 →</router-link>
+          <router-link :to="`/project/${route.params.id}/world/locations`" class="panel-link">查看全部 →</router-link>
         </div>
         <div class="entity-list">
           <div v-for="loc in worldStore.locations" :key="loc.id" class="entity-row">
@@ -62,7 +62,7 @@
       <div class="panel">
         <div class="panel-header">
           <h3 class="panel-title">势力</h3>
-          <router-link to="/project/p1/world/factions" class="panel-link">查看全部 →</router-link>
+          <router-link :to="`/project/${route.params.id}/world/factions`" class="panel-link">查看全部 →</router-link>
         </div>
         <div class="entity-list">
           <div v-for="fac in worldStore.factions" :key="fac.id" class="entity-row">
@@ -90,9 +90,10 @@
 </template>
 
 <script setup lang="ts">
+import { useRoute } from "vue-router"
+const route = useRoute()
 import { useWorldStore } from '@/stores/world'
 const worldStore = useWorldStore()
-worldStore.loadMockData()
 </script>
 
 <style scoped>

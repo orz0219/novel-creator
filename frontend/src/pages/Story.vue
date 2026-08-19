@@ -2,7 +2,7 @@
   <div class="story-page">
     <div class="page-header">
       <h1 class="page-title">故事结构</h1>
-      <button class="btn-primary">+ 新建卷/章节</button>
+      <button class="btn-primary" @click="showCreateDialog = true">+ 新建卷/章节</button>
     </div>
 
     <div class="story-tree">
@@ -11,7 +11,7 @@
           <div class="volume-header" @click="toggleExpand(vol.id)">
             <span class="expand-icon">{{ expanded[vol.id] ? '▼' : '▶' }}</span>
             <span class="volume-title">{{ vol.title }}</span>
-            <StatusBadge :status="vol.status.toLowerCase()" :label="vol.status" />
+            <StatusBadge :status="(vol.status || '').toLowerCase()" :label="vol.status" />
             <span class="volume-meta">{{ vol.description }}</span>
           </div>
           <div class="volume-body" v-if="expanded[vol.id]">
@@ -20,7 +20,7 @@
                 <div class="arc-header" @click="toggleExpand(arc.id)">
                   <span class="expand-icon">{{ expanded[arc.id] ? '▼' : '▶' }}</span>
                   <span class="arc-title">{{ arc.title }}</span>
-                  <StatusBadge :status="arc.status.toLowerCase()" :label="arc.status" />
+                  <StatusBadge :status="(arc.status || '').toLowerCase()" :label="arc.status" />
                   <span class="arc-meta">{{ arc.description }}</span>
                 </div>
                 <div class="arc-body" v-if="expanded[arc.id]">
@@ -30,13 +30,13 @@
                         <span class="expand-icon" v-if="ch.children?.length">{{ expanded[ch.id] ? '▼' : '▶' }}</span>
                         <span class="expand-icon" v-else>　</span>
                         <span class="chapter-title">{{ ch.title }}</span>
-                        <StatusBadge :status="ch.status.toLowerCase()" :label="ch.status" />
+                        <StatusBadge :status="(ch.status || '').toLowerCase()" :label="ch.status" />
                         <span class="chapter-meta">{{ ch.description }}</span>
                         <button class="write-btn" @click.stop="goToWrite(ch)">写作</button>
                       </div>
                       <div class="chapter-body" v-if="expanded[ch.id] && ch.children?.length">
                         <div v-for="scene in ch.children" :key="scene.id" class="tree-scene" @click="goToWrite(scene)">
-                          <span class="scene-dot" :class="scene.status.toLowerCase()"></span>
+                          <span class="scene-dot" :class="(scene.status || '').toLowerCase()"></span>
                           <span class="scene-title">{{ scene.title }}</span>
                           <span class="scene-time">{{ scene.attributes?.time || '' }}</span>
                         </div>
@@ -50,20 +50,67 @@
         </div>
       </template>
     </div>
+
+    <!-- Create Dialog -->
+    <NeDialog v-model="showCreateDialog" title="新建卷/章节" size="md">
+      <form @submit.prevent="handleCreate" class="entity-form">
+        <div class="form-group">
+          <label class="form-label">类型 *</label>
+          <select v-model="form.node_type" class="form-select">
+            <option value="Volume">卷 (Volume)</option>
+            <option value="Arc">弧线 (Arc)</option>
+            <option value="Chapter">章节 (Chapter)</option>
+            <option value="Scene">场景 (Scene)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">标题 *</label>
+          <input v-model="form.title" class="form-input" placeholder="请输入标题" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label">描述</label>
+          <textarea v-model="form.description" class="form-textarea" placeholder="请输入描述" rows="3"></textarea>
+        </div>
+        <div class="form-group" v-if="form.parent_id !== null">
+          <label class="form-label">父节点 ID (可选)</label>
+          <input v-model="form.parent_id" class="form-input" placeholder="留空则为顶级节点" />
+        </div>
+      </form>
+      <template #footer>
+        <button class="btn-secondary" @click="showCreateDialog = false">取消</button>
+        <button class="btn-primary" @click="handleCreate">创建</button>
+      </template>
+    </NeDialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useStoryStore } from '@/stores/story'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
+import NeDialog from '@/components/ui/NeDialog.vue'
 
+const route = useRoute()
 const router = useRouter()
 const storyStore = useStoryStore()
-storyStore.loadMockData()
 
 const expanded = ref<Record<string, boolean>>({ 'vol-1': true, 'arc-2': true, 'ch-4': true })
+const showCreateDialog = ref(false)
+const form = ref({ node_type: 'Volume', title: '', description: '', parent_id: null as string | null })
+
+async function handleCreate() {
+  if (!form.value.title.trim()) return
+  const projectId = route.params.id as string
+  await storyStore.createNode(projectId, {
+    node_type: form.value.node_type as any,
+    title: form.value.title.trim(),
+    description: form.value.description.trim() || undefined,
+    parent_id: form.value.parent_id || undefined,
+  } as any)
+  showCreateDialog.value = false
+  form.value = { node_type: 'Volume', title: '', description: '', parent_id: null }
+}
 
 function toggleExpand(id: string) {
   expanded.value[id] = !expanded.value[id]
@@ -71,10 +118,10 @@ function toggleExpand(id: string) {
 
 function goToWrite(node: any) {
   if (node.node_type === 'Scene') {
-    router.push('/project/p1/write/' + node.id)
+    router.push('/project/' + route.params.id + '/write/' + node.id)
   } else if (node.children?.length) {
     const firstScene = findFirstScene(node)
-    if (firstScene) router.push('/project/p1/write/' + firstScene.id)
+    if (firstScene) router.push('/project/' + route.params.id + '/write/' + firstScene.id)
   }
 }
 
@@ -154,4 +201,13 @@ function findFirstScene(node: any): any {
 .scene-dot.draft { background: var(--color-warning); }
 .scene-title { color: var(--text-secondary); }
 .scene-time { margin-left: auto; font-size: var(--text-xs); color: var(--text-tertiary); }
+
+.entity-form { display: flex; flex-direction: column; gap: var(--space-4); }
+.form-group { display: flex; flex-direction: column; gap: var(--space-1); }
+.form-label { font-size: var(--text-sm); font-weight: 500; color: var(--text-secondary); }
+.form-input, .form-select, .form-textarea { padding: var(--space-2) var(--space-3); background: var(--bg-base); border: 1px solid var(--border-default); border-radius: var(--radius-sm); color: var(--text-primary); font-size: var(--text-sm); outline: none; }
+.form-input:focus, .form-select:focus, .form-textarea:focus { border-color: var(--color-primary); }
+.form-textarea { resize: vertical; font-family: inherit; }
+.btn-secondary { padding: var(--space-2) var(--space-4); background: transparent; border: 1px solid var(--border-default); color: var(--text-secondary); border-radius: var(--radius-sm); font-size: var(--text-sm); cursor: pointer; }
+.btn-secondary:hover { border-color: var(--border-emphasis); color: var(--text-primary); }
 </style>

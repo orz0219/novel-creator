@@ -11,6 +11,8 @@ pub mod generation;
 pub mod proposal;
 pub mod validation;
 pub mod history;
+pub mod rules;
+pub mod snapshots;
 pub mod error;
 
 use axum::{Router, routing::{get, post, put, delete}};
@@ -87,6 +89,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/entities/{id}/versions", get(history::list_versions))
         .route("/api/v1/entities/{id}/versions/{version}", get(history::get_version))
         .route("/api/v1/entities/{id}/versions/compare", get(history::compare_versions))
+        // Rules (canon_rule)
+        .route("/api/v1/worlds/{id}/rules", get(rules::list_rules).post(rules::create_rule))
+        .route("/api/v1/rules/{id}", get(rules::get_rule).put(rules::update_rule).delete(rules::delete_rule))
+        // Snapshots
+        .route("/api/v1/projects/{id}/snapshots", get(snapshots::list_snapshots).post(snapshots::create_snapshot))
+        .route("/api/v1/snapshots/{id}", delete(snapshots::delete_snapshot))
         // Health
         .route("/api/v1/health", get(health_check))
         .with_state(state)

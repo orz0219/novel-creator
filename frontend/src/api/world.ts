@@ -5,12 +5,16 @@ import type { World, Entity, Relation, Event, Fact } from '@/types'
 export const worldApi = {
   get: (projectId: string) => api.get<World>(`/projects/${projectId}/world`),
   update: (projectId: string, data: Partial<World>) => api.put<World>(`/projects/${projectId}/world`, data),
+  listEntities: (worldId: string, type?: string) => api.get<Entity[]>(`/worlds/${worldId}/entities${type ? '?type=' + type : ''}`),
 }
 
 export const entityApi = {
   list: (worldId: string, type?: string) => api.get<Entity[]>(`/worlds/${worldId}/entities${type ? '?type=' + type : ''}`),
   get: (id: string) => api.get<Entity>(`/entities/${id}`),
   create: (worldId: string, data: Partial<Entity>) => api.post<Entity>(`/worlds/${worldId}/entities`, data),
+  createCharacter: (worldId: string, data: Partial<Entity>) => api.post<Entity>(`/worlds/${worldId}/characters`, data),
+  createLocation: (worldId: string, data: Partial<Entity>) => api.post<Entity>(`/worlds/${worldId}/locations`, data),
+  createFaction: (worldId: string, data: Partial<Entity>) => api.post<Entity>(`/worlds/${worldId}/factions`, data),
   update: (id: string, data: Partial<Entity>) => api.put<Entity>(`/entities/${id}`, data),
   delete: (id: string) => api.delete<void>(`/entities/${id}`),
 }

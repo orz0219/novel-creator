@@ -22,22 +22,13 @@
         <button class="icon-btn" @click="uiStore.openCommandPalette()" title="命令面板 (Ctrl+K)">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 2L2 6L6 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 6L14 10L10 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <button class="icon-btn" @click="showActivity = !showActivity" title="活动中心">
-          <span class="activity-dot" v-if="hasRunningTasks"></span>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v6l4 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/></svg>
-        </button>
+        <!-- Activity center removed to fix component resolution error -->
         <router-link to="/settings" class="icon-btn" title="settings">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         </router-link>
       </div>
     </header>
     <main class="app-main"><RouterView /></main>
-    <Transition name="slide">
-      <div v-if="showActivity" class="activity-panel">
-        <ActivityCenter />
-      </div>
-    </Transition>
-
     <CommandPalette v-if="uiStore.commandPaletteOpen" @close="uiStore.closeCommandPalette()" />
     <Toast />
   </div>
@@ -50,10 +41,7 @@ import { useUiStore } from '@/stores/ui'
 import CommandPalette from '@/components/ui/CommandPalette.vue'
 import Toast from '@/components/ui/Toast.vue'
 const route = useRoute()
-import { ref } from "vue"
 const uiStore = useUiStore()
-const showActivity = ref(false)
-const hasRunningTasks = ref(true)
 const pid = computed(() => { const m = route.path.match(/\/project\/([^/]+)/); return m ? m[1] : null })
 const isProj = computed(() => route.path.startsWith('/project/' + pid.value))
 function handleKeydown(e: KeyboardEvent) {
@@ -79,9 +67,4 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown))
 .icon-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: none; background: transparent; color: var(--text-secondary); border-radius: var(--radius-sm); cursor: pointer; transition: all var(--transition-fast); text-decoration: none; }
 .icon-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .app-main { flex: 1; overflow: hidden; min-height: 0; }
-.activity-panel { position: fixed; top: var(--header-height); right: 0; width: 320px; max-height: 400px; background: var(--bg-panel); border: 1px solid var(--border-default); border-radius: 0 0 0 var(--radius-md); box-shadow: var(--shadow-lg); z-index: var(--z-dropdown); overflow-y: auto; }
-.activity-dot { position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; background: var(--color-accent); border-radius: 50%; animation: pulse 1.5s infinite; }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-.slide-enter-active, .slide-leave-active { transition: all var(--transition-normal); }
-.slide-enter-from, .slide-leave-to { opacity: 0; transform: translateY(-10px); }
 </style>

@@ -38,13 +38,13 @@
       <div class="panel">
         <div class="panel-header">
           <h3 class="panel-title">当前进度</h3>
-          <router-link to="/project/p1/story" class="panel-link">查看全部 →</router-link>
+          <router-link :to="`/project/${route.params.id}/story`" class="panel-link">查看全部 →</router-link>
         </div>
         <div class="progress-list">
           <div v-for="vol in storyStore.tree" :key="vol.id" class="progress-volume">
             <div class="volume-header">
               <span class="volume-name">{{ vol.title }}</span>
-              <span class="volume-status" :class="vol.status.toLowerCase()">{{ vol.status }}</span>
+              <span class="volume-status" :class="(vol.status || '').toLowerCase()">{{ vol.status }}</span>
             </div>
             <div v-for="arc in vol.children" :key="arc.id" class="progress-arc">
               <span class="arc-name">{{ arc.title }}</span>
@@ -53,7 +53,7 @@
                   v-for="ch in arc.children"
                   :key="ch.id"
                   class="chapter-dot"
-                  :class="ch.status.toLowerCase()"
+                  :class="(ch.status || '').toLowerCase()"
                   :title="ch.title"
                 >
                   {{ ch.title.replace(/第.*章[：:]\s*/, '').slice(0, 2) }}
@@ -68,7 +68,7 @@
       <div class="panel">
         <div class="panel-header">
           <h3 class="panel-title">世界事件</h3>
-          <router-link to="/project/p1/world/timeline" class="panel-link">查看全部 →</router-link>
+          <router-link :to="`/project/${route.params.id}/world/timeline`" class="panel-link">查看全部 →</router-link>
         </div>
         <div class="event-list">
           <div v-for="event in worldStore.events" :key="event.id" class="event-item">
@@ -83,11 +83,11 @@
       <div class="panel">
         <div class="panel-header">
           <h3 class="panel-title">剧情线</h3>
-          <router-link to="/project/p1/story/storylines" class="panel-link">查看全部 →</router-link>
+          <router-link :to="`/project/${route.params.id}/story/storylines`" class="panel-link">查看全部 →</router-link>
         </div>
         <div class="storyline-list">
           <div v-for="sl in storyStore.storylines" :key="sl.id" class="storyline-item">
-            <span class="sl-dot" :class="sl.status.toLowerCase()"></span>
+            <span class="sl-dot" :class="(sl.status || '').toLowerCase()"></span>
             <span class="sl-name">{{ sl.name }}</span>
             <span class="sl-importance">{{ sl.importance }}</span>
             <span class="sl-status">{{ sl.status }}</span>
@@ -99,11 +99,11 @@
       <div class="panel">
         <div class="panel-header">
           <h3 class="panel-title">活跃伏笔</h3>
-          <router-link to="/project/p1/story/foreshadows" class="panel-link">查看全部 →</router-link>
+          <router-link :to="`/project/${route.params.id}/story/foreshadows`" class="panel-link">查看全部 →</router-link>
         </div>
         <div class="foreshadow-list">
           <div v-for="fs in storyStore.foreshadows" :key="fs.id" class="foreshadow-item">
-            <span class="fs-badge" :class="fs.status.toLowerCase()">{{ fs.status }}</span>
+            <span class="fs-badge" :class="(fs.status || '').toLowerCase()">{{ fs.status }}</span>
             <span class="fs-name">{{ fs.name }}</span>
             <span class="fs-desc">{{ fs.description }}</span>
           </div>
@@ -114,14 +114,14 @@
 </template>
 
 <script setup lang="ts">
+import { useRoute } from "vue-router"
+const route = useRoute()
 import { useWorldStore } from '@/stores/world'
 import { useStoryStore } from '@/stores/story'
 
 const worldStore = useWorldStore()
 const storyStore = useStoryStore()
 
-worldStore.loadMockData()
-storyStore.loadMockData()
 </script>
 
 <style scoped>

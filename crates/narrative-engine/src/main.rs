@@ -57,6 +57,20 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Seed entity types (idempotent)
+    let entity_types = ["Character", "Location", "Faction", "Item", "Creature", "Organization"];
+    for et in &entity_types {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM entity_type WHERE name = $1")
+            .bind(et).fetch_one(&pool).await.unwrap_or((0,));
+        if count.0 == 0 {
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query("INSERT INTO entity_type (id, name, description) VALUES ($1, $2, $3)")
+                .bind(&id).bind(et).bind(format!("{} entity type", et))
+                .execute(&pool).await.ok();
+            tracing::info!("Seeded entity type: {}", et);
+        }
+    }
+
     // Create application state
     let state = AppState::new(pool);
 

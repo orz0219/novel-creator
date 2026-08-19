@@ -20,34 +20,49 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 defineEmits(['close'])
+const route = useRoute()
 const router = useRouter()
 const inputRef = ref<HTMLInputElement>()
 const query = ref('')
 const selectedIndex = ref(0)
-const cmds = [
-  { id: 'home', icon: '🏠', label: '返回首页', cat: '导航', action: () => router.push('/') },
-  { id: 'proj', icon: '📁', label: '项目仪表盘', cat: '导航', action: () => router.push('/project/p1') },
-  { id: 'world', icon: '🌍', label: '世界总览', cat: '世界', action: () => router.push('/project/p1/world') },
-  { id: 'chars', icon: '👤', label: '人物列表', cat: '世界', action: () => router.push('/project/p1/world/characters') },
-  { id: 'locs', icon: '📍', label: '地点列表', cat: '世界', action: () => router.push('/project/p1/world/locations') },
-  { id: 'facs', icon: '⚔️', label: '势力列表', cat: '世界', action: () => router.push('/project/p1/world/factions') },
-  { id: 'tl', icon: '📅', label: '时间线', cat: '世界', action: () => router.push('/project/p1/world/timeline') },
-  { id: 'story', icon: '📖', label: '故事结构', cat: '故事', action: () => router.push('/project/p1/story') },
-  { id: 'sl', icon: '🧵', label: '剧情线', cat: '故事', action: () => router.push('/project/p1/story/storylines') },
-  { id: 'fs', icon: '🔮', label: '伏笔管理', cat: '故事', action: () => router.push('/project/p1/story/foreshadows') },
-  { id: 'write', icon: '✍️', label: '进入写作', cat: '创作', action: () => router.push('/project/p1/write/scene-1') },
-  { id: 'graph', icon: '🗺️', label: '关系图谱', cat: '工具', action: () => router.push('/project/p1/graph') },
-  { id: 'prop', icon: '📋', label: 'AI 提案', cat: 'AI', action: () => router.push('/project/p1/proposals') },
-  { id: 'hist', icon: '📜', label: '历史记录', cat: '工具', action: () => router.push('/project/p1/history') },
-  { id: 'search', icon: '🔍', label: '全局搜索', cat: '工具', action: () => router.push('/search') },
-  { id: 'settings', icon: '⚙️', label: '设置', cat: '系统', action: () => router.push('/settings') },
-]
+
+// Get current project ID from route
+const pid = computed(() => {
+  const m = route.path.match(/\/project\/([^/]+)/)
+  return m ? m[1] : null
+})
+
+const cmds = computed(() => {
+  const p = pid.value
+  const projectCmds = p ? [
+    { id: 'proj', icon: '📁', label: '项目仪表盘', cat: '导航', action: () => router.push('/project/' + p) },
+    { id: 'world', icon: '🌍', label: '世界总览', cat: '世界', action: () => router.push('/project/' + p + '/world') },
+    { id: 'chars', icon: '👤', label: '人物列表', cat: '世界', action: () => router.push('/project/' + p + '/world/characters') },
+    { id: 'locs', icon: '📍', label: '地点列表', cat: '世界', action: () => router.push('/project/' + p + '/world/locations') },
+    { id: 'facs', icon: '⚔️', label: '势力列表', cat: '世界', action: () => router.push('/project/' + p + '/world/factions') },
+    { id: 'tl', icon: '📅', label: '时间线', cat: '世界', action: () => router.push('/project/' + p + '/world/timeline') },
+    { id: 'story', icon: '📖', label: '故事结构', cat: '故事', action: () => router.push('/project/' + p + '/story') },
+    { id: 'sl', icon: '🧵', label: '剧情线', cat: '故事', action: () => router.push('/project/' + p + '/story/storylines') },
+    { id: 'fs', icon: '🔮', label: '伏笔管理', cat: '故事', action: () => router.push('/project/' + p + '/story/foreshadows') },
+    { id: 'write', icon: '✍️', label: '进入写作', cat: '创作', action: () => router.push('/project/' + p + '/write') },
+    { id: 'graph', icon: '🗺️', label: '关系图谱', cat: '工具', action: () => router.push('/project/' + p + '/graph') },
+    { id: 'prop', icon: '📋', label: 'AI 提案', cat: 'AI', action: () => router.push('/project/' + p + '/proposals') },
+    { id: 'hist', icon: '📜', label: '历史记录', cat: '工具', action: () => router.push('/project/' + p + '/history') },
+  ] : []
+
+  return [
+    { id: 'home', icon: '🏠', label: '返回首页', cat: '导航', action: () => router.push('/') },
+    ...projectCmds,
+    { id: 'search', icon: '🔍', label: '全局搜索', cat: '工具', action: () => router.push('/search') },
+    { id: 'settings', icon: '⚙️', label: '设置', cat: '系统', action: () => router.push('/settings') },
+  ]
+})
 const filtered = computed(() => {
-  if (!query.value) return cmds
+  if (!query.value) return cmds.value
   const q = query.value.toLowerCase()
-  return cmds.filter(c => c.label.toLowerCase().includes(q) || c.cat.toLowerCase().includes(q))
+  return cmds.value.filter(c => c.label.toLowerCase().includes(q) || c.cat.toLowerCase().includes(q))
 })
 function executeSelected() { if (filtered.value[selectedIndex.value]) { filtered.value[selectedIndex.value].action() } }
 onMounted(() => inputRef.value?.focus())

@@ -2,65 +2,75 @@
   <div class="snapshots-page">
     <div class="page-header">
       <h1 class="page-title">世界快照</h1>
-      <button class="btn-primary" @click="createSnapshot">+ 创建快照</button>
+      <button class="btn-primary" @click="handleCreate">+ 创建快照</button>
     </div>
-    <div class="snapshot-list">
-      <div v-for="snap in snapshots" :key="snap.id" class="snapshot-card" :class="{ current: snap.isCurrent }">
+    <div v-if="snapshots.length" class="snapshot-list">
+      <div v-for="snap in snapshots" :key="snap.id" class="snapshot-card">
         <div class="snap-header">
-          <span class="snap-id">#{{ snap.id }}</span>
+          <span class="snap-id">#{{ snap.id.slice(0, 8) }}</span>
           <span class="snap-name">{{ snap.name }}</span>
-          <span class="snap-badge" v-if="snap.isCurrent">当前</span>
-          <span class="snap-time">{{ snap.time }}</span>
+          <span class="snap-time">{{ formatDate(snap.created_at) }}</span>
         </div>
         <div class="snap-stats">
-          <span class="stat">👤 {{ snap.characters }} 人物</span>
-          <span class="stat">📍 {{ snap.locations }} 地点</span>
-          <span class="stat">⚔️ {{ snap.factions }} 势力</span>
-          <span class="stat">📖 {{ snap.chapters }} 章</span>
+          <span class="stat">👤 {{ snap.known_characters_count }} 人物</span>
+          <span class="stat">📍 {{ snap.known_locations_count }} 地点</span>
+          <span class="stat">🧵 {{ snap.active_threads_count }} 剧情线</span>
+          <span class="stat">🔮 {{ snap.unresolved_foreshadows_count }} 伏笔</span>
         </div>
         <div class="snap-meta">
-          <span>时间线: {{ snap.timeline }}</span>
-          <span>故事进度: {{ snap.progress }}</span>
+          <span v-if="snap.story_time">时间线: {{ snap.story_time }}</span>
+          <span v-if="snap.progress">进度: {{ snap.progress }}</span>
         </div>
         <div class="snap-actions">
-          <button class="action-btn">恢复</button>
-          <button class="action-btn">对比</button>
-          <button class="action-btn">分支</button>
-          <button class="action-btn danger">删除</button>
+          <button class="action-btn danger" @click="handleDelete(snap.id)">删除</button>
         </div>
       </div>
+    </div>
+    <div v-else class="empty-state">
+      <p>暂无快照</p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-const snapshots = ref([
-  {
-    id: 42, name: '第三卷完成时', isCurrent: false, time: '3月10日 18:00',
-    characters: 3, locations: 3, factions: 2, chapters: 3,
-    timeline: '天玄历381年3月10日', progress: '第一卷·第二弧线·第三章'
-  },
-  {
-    id: 43, name: '地下遗迹发现后', isCurrent: false, time: '3月12日 15:00',
-    characters: 3, locations: 3, factions: 2, chapters: 4,
-    timeline: '天玄历381年3月12日', progress: '第一卷·第二弧线·第四章'
-  },
-  {
-    id: 44, name: '当前状态', isCurrent: true, time: '3月12日 18:30',
-    characters: 3, locations: 3, factions: 2, chapters: 4,
-    timeline: '天玄历381年3月12日', progress: '第一卷·第二弧线·第四章·场景2'
-  },
-])
+import { ref, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
+import { snapshotsApi, type Snapshot } from '@/api/snapshots'
 
-function createSnapshot() {
-  const nextId = Math.max(...snapshots.value.map(s => s.id)) + 1
-  snapshots.value.unshift({
-    id: nextId, name: '手动快照', isCurrent: true, time: '刚刚',
-    characters: 3, locations: 3, factions: 2, chapters: 4,
-    timeline: '天玄历381年3月12日', progress: '第一卷·第二弧线·第四章·场景2'
+const route = useRoute()
+const snapshots = ref<Snapshot[]>([])
+
+async function loadSnapshots() {
+  const projectId = route.params.id as string
+  try {
+    snapshots.value = await snapshotsApi.list(projectId)
+  } catch {
+    snapshots.value = []
+  }
+}
+
+onMounted(loadSnapshots)
+
+function formatDate(dateStr: string) {
+  try {
+    const d = new Date(dateStr)
+    return `${d.getMonth() + 1}月${d.getDate()}日 ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+  } catch {
+    return dateStr
+  }
+}
+
+async function handleCreate() {
+  const projectId = route.params.id as string
+  await snapshotsApi.create(projectId, {
+    name: '手动快照',
   })
-  snapshots.value.forEach(s => { if (s.id !== nextId) s.isCurrent = false })
+  await loadSnapshots()
+}
+
+async function handleDelete(id: string) {
+  await snapshotsApi.delete(id)
+  await loadSnapshots()
 }
 </script>
 
@@ -72,11 +82,10 @@ function createSnapshot() {
 .btn-primary:hover { background: var(--color-primary-hover); }
 .snapshot-list { display: flex; flex-direction: column; gap: var(--space-4); }
 .snapshot-card { padding: var(--space-5); border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-panel); transition: all var(--transition-fast); }
-.snapshot-card.current { border-color: var(--color-primary); background: var(--color-primary-subtle); }
+.snapshot-card:hover { border-color: var(--border-emphasis); }
 .snap-header { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); }
 .snap-id { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--text-tertiary); }
 .snap-name { font-size: var(--text-md); font-weight: 600; }
-.snap-badge { font-size: 10px; padding: 2px 8px; border-radius: 10px; background: var(--color-primary); color: white; }
 .snap-time { margin-left: auto; font-size: var(--text-xs); color: var(--text-tertiary); }
 .snap-stats { display: flex; gap: var(--space-4); margin-bottom: var(--space-3); }
 .stat { font-size: var(--text-sm); color: var(--text-secondary); }
@@ -86,4 +95,5 @@ function createSnapshot() {
 .action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .action-btn.danger { color: var(--color-error); border-color: var(--color-error); }
 .action-btn.danger:hover { background: var(--color-error-subtle); }
+.empty-state { padding: var(--space-12); text-align: center; color: var(--text-tertiary); }
 </style>

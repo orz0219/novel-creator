@@ -318,7 +318,7 @@ const currentSceneTitle = computed(() =>
 )
 
 // Load data and scene
-storyStore.loadMockData()
+
 contextStore.loadMockContext()
 generationStore.loadMockData()
 

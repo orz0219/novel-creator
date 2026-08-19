@@ -1,12 +1,14 @@
 import { defineStore } from "pinia"
 import { ref, computed } from "vue"
 import type { NarrativeNode, NarrativeNodeType, NarrativeNodeStatus, Storyline, Foreshadowing, TreeNode } from "@/types"
+import { narrativeApi, storylineApi, foreshadowApi } from "@/api/story"
 
 export const useStoryStore = defineStore("story", () => {
   const nodes = ref<NarrativeNode[]>([])
   const storylines = ref<Storyline[]>([])
   const foreshadows = ref<Foreshadowing[]>([])
   const loading = ref(false)
+  const error = ref<string | null>(null)
   const selectedNodeId = ref<string | null>(null)
 
   const tree = computed<TreeNode[]>(() => {
@@ -26,85 +28,85 @@ export const useStoryStore = defineStore("story", () => {
     return roots.sort((a, b) => a.sort_order - b.sort_order)
   })
 
-  function loadMockData() {
-    nodes.value = [
-      { id: "vol-1", project_id: "p1", world_id: "w1", node_type: "Volume" as NarrativeNodeType,
-        title: "第一卷：黑石城", description: "主角在黑石城的冒险开始",
-        attributes: { mission: "让主角离开黑石城", theme: "成长与觉醒" },
-        sort_order: 1, status: "InProgress" as NarrativeNodeStatus,
-        created_at: "2024-01-15T08:00:00Z", updated_at: "2024-03-12T14:00:00Z" },
-      { id: "arc-1", project_id: "p1", world_id: "w1", node_type: "Arc" as NarrativeNodeType,
-        parent_id: "vol-1", title: "初入黑石城", description: "林凡初到黑石城，结识苏晚晴",
-        attributes: { goal: "建立主角在黑石城的基础" },
-        sort_order: 1, status: "Completed" as NarrativeNodeStatus,
-        created_at: "2024-01-15T08:00:00Z", updated_at: "2024-02-20T10:00:00Z" },
-      { id: "arc-2", project_id: "p1", world_id: "w1", node_type: "Arc" as NarrativeNodeType,
-        parent_id: "vol-1", title: "王家追杀", description: "王家发现林凡持有古玉，开始追杀",
-        attributes: { goal: "制造核心冲突", conflict: "生存与真相" },
-        sort_order: 2, status: "InProgress" as NarrativeNodeStatus,
-        created_at: "2024-02-01T08:00:00Z", updated_at: "2024-03-12T14:00:00Z" },
-      { id: "ch-1", project_id: "p1", world_id: "w1", node_type: "Chapter" as NarrativeNodeType,
-        parent_id: "arc-1", title: "第一章：边境来客", description: "林凡抵达黑石城",
-        attributes: {}, sort_order: 1, status: "Completed" as NarrativeNodeStatus,
-        created_at: "2024-01-15T08:00:00Z", updated_at: "2024-01-20T10:00:00Z" },
-      { id: "ch-2", project_id: "p1", world_id: "w1", node_type: "Chapter" as NarrativeNodeType,
-        parent_id: "arc-1", title: "第二章：黑市风云", description: "林凡进入黑市",
-        attributes: {}, sort_order: 2, status: "Completed" as NarrativeNodeStatus,
-        created_at: "2024-01-20T10:00:00Z", updated_at: "2024-02-05T14:00:00Z" },
-      { id: "ch-3", project_id: "p1", world_id: "w1", node_type: "Chapter" as NarrativeNodeType,
-        parent_id: "arc-2", title: "第三章：暗流涌动", description: "王家开始注意到林凡",
-        attributes: {}, sort_order: 3, status: "Completed" as NarrativeNodeStatus,
-        created_at: "2024-02-05T10:00:00Z", updated_at: "2024-02-15T16:00:00Z" },
-      { id: "ch-4", project_id: "p1", world_id: "w1", node_type: "Chapter" as NarrativeNodeType,
-        parent_id: "arc-2", title: "第四章：地下遗迹", description: "林凡发现地下遗迹",
-        attributes: {}, sort_order: 4, status: "InProgress" as NarrativeNodeStatus,
-        created_at: "2024-02-15T10:00:00Z", updated_at: "2024-03-12T14:00:00Z" },
-      { id: "ch-5", project_id: "p1", world_id: "w1", node_type: "Chapter" as NarrativeNodeType,
-        parent_id: "arc-2", title: "第五章：逃离黑石城", description: "林凡被迫离开黑石城",
-        attributes: {}, sort_order: 5, status: "Planned" as NarrativeNodeStatus,
-        created_at: "2024-03-01T10:00:00Z", updated_at: "2024-03-01T10:00:00Z" },
-      { id: "scene-1", project_id: "p1", world_id: "w1", node_type: "Scene" as NarrativeNodeType,
-        parent_id: "ch-4", title: "场景1：遗迹入口", description: "林凡找到地下遗迹的入口",
-        attributes: {
-          objective: "发现遗迹入口", pov_character_id: "char-1", location_id: "loc-2",
-          time: "天玄历381年3月12日 14:00", characters_present: ["char-1", "char-2"],
-        },
-        sort_order: 1, status: "InProgress" as NarrativeNodeStatus,
-        created_at: "2024-03-10T10:00:00Z", updated_at: "2024-03-12T14:00:00Z" },
-      { id: "scene-2", project_id: "p1", world_id: "w1", node_type: "Scene" as NarrativeNodeType,
-        parent_id: "ch-4", title: "场景2：机关重重", description: "林凡和苏晚晴在遗迹中遭遇机关",
-        attributes: {
-          objective: "通过遗迹机关", pov_character_id: "char-1", location_id: "loc-2",
-          time: "天玄历381年3月12日 16:00", characters_present: ["char-1", "char-2"],
-        },
-        sort_order: 2, status: "Draft" as NarrativeNodeStatus,
-        created_at: "2024-03-12T10:00:00Z", updated_at: "2024-03-12T10:00:00Z" },
-    ]
+  // Fetch narrative nodes
+  async function fetchNodes(projectId: string) {
+    loading.value = true
+    error.value = null
+    try {
+      nodes.value = await narrativeApi.listNodes(projectId)
+    } catch (e: any) {
+      error.value = e.message
+      nodes.value = []
+    } finally {
+      loading.value = false
+    }
+  }
 
-    storylines.value = [
-      { id: "sl-1", project_id: "p1", name: "主角成长线", description: "林凡从散修到强者的成长之路",
-        status: "Active", importance: "Main",
-        created_at: "2024-01-15T08:00:00Z", updated_at: "2024-03-12T14:00:00Z" },
-      { id: "sl-2", project_id: "p1", name: "王家追杀线", description: "王家追杀林凡的阴谋",
-        status: "Active", importance: "Main",
-        created_at: "2024-02-01T08:00:00Z", updated_at: "2024-03-12T14:00:00Z" },
-      { id: "sl-3", project_id: "p1", name: "古井秘密线", description: "古井背后的远古秘密",
-        status: "Planned", importance: "Important",
-        created_at: "2024-02-20T10:00:00Z", updated_at: "2024-02-20T10:00:00Z" },
-    ]
+  // Fetch storylines
+  async function fetchStorylines(projectId: string) {
+    try {
+      storylines.value = await storylineApi.list(projectId)
+    } catch (e: any) {
+      error.value = e.message
+      storylines.value = []
+    }
+  }
 
-    foreshadows.value = [
-      { id: "fs-1", project_id: "p1", name: "黑色令牌",
-        description: "林凡在古井旁获得的神秘令牌，暗示着远古势力",
-        status: "Introduced", importance: "Core", hint_level: "Subtle",
-        planted_scene_id: "scene-1", related_entity_ids: ["char-1", "loc-3"],
-        created_at: "2024-02-20T14:00:00Z", updated_at: "2024-03-12T14:00:00Z" },
-      { id: "fs-2", project_id: "p1", name: "苏晚晴的身份",
-        description: "苏晚晴似乎知道很多不应该知道的事情",
-        status: "Active", importance: "Important", hint_level: "Direct",
-        related_entity_ids: ["char-2"],
-        created_at: "2024-01-20T10:00:00Z", updated_at: "2024-03-10T16:00:00Z" },
-    ]
+  // Fetch foreshadows
+  async function fetchForeshadows(projectId: string) {
+    try {
+      foreshadows.value = await foreshadowApi.list(projectId)
+    } catch (e: any) {
+      error.value = e.message
+      foreshadows.value = []
+    }
+  }
+
+  // CRUD: Narrative nodes
+  async function createNode(projectId: string, data: Partial<NarrativeNode>) {
+    const result = await narrativeApi.createNode(projectId, data)
+    nodes.value.push(result)
+    return result
+  }
+
+  async function updateNode(id: string, data: Partial<NarrativeNode>) {
+    const result = await narrativeApi.updateNode(id, data)
+    const idx = nodes.value.findIndex(n => n.id === id)
+    if (idx !== -1) nodes.value[idx] = result
+    return result
+  }
+
+  async function deleteNode(id: string) {
+    await narrativeApi.deleteNode(id)
+    nodes.value = nodes.value.filter(n => n.id !== id)
+  }
+
+  // CRUD: Storylines
+  async function createStoryline(projectId: string, data: Partial<Storyline>) {
+    const result = await storylineApi.create(projectId, data)
+    storylines.value.push(result)
+    return result
+  }
+
+  async function updateStoryline(id: string, data: Partial<Storyline>) {
+    const result = await storylineApi.update(id, data)
+    const idx = storylines.value.findIndex(s => s.id === id)
+    if (idx !== -1) storylines.value[idx] = result
+    return result
+  }
+
+  // CRUD: Foreshadows
+  async function createForeshadow(projectId: string, data: Partial<Foreshadowing>) {
+    const result = await foreshadowApi.create(projectId, data)
+    foreshadows.value.push(result)
+    return result
+  }
+
+  async function updateForeshadow(id: string, data: Partial<Foreshadowing>) {
+    const result = await foreshadowApi.update(id, data)
+    const idx = foreshadows.value.findIndex(f => f.id === id)
+    if (idx !== -1) foreshadows.value[idx] = result
+    return result
   }
 
   function selectNode(id: string | null) {
@@ -116,7 +118,11 @@ export const useStoryStore = defineStore("story", () => {
   )
 
   return {
-    nodes, storylines, foreshadows, loading, selectedNodeId, selectedNode, tree,
-    loadMockData, selectNode,
+    nodes, storylines, foreshadows, loading, error, selectedNodeId, selectedNode, tree,
+    fetchNodes, fetchStorylines, fetchForeshadows,
+    createNode, updateNode, deleteNode,
+    createStoryline, updateStoryline,
+    createForeshadow, updateForeshadow,
+    selectNode,
   }
 })

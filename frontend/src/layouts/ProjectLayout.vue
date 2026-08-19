@@ -137,23 +137,54 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUiStore } from '@/stores/ui'
 import { useWorldStore } from '@/stores/world'
 import { useStoryStore } from '@/stores/story'
+import { useProjectStore } from '@/stores/project'
 
 const route = useRoute()
 const router = useRouter()
 const uiStore = useUiStore()
 const worldStore = useWorldStore()
 const storyStore = useStoryStore()
+const projectStore = useProjectStore()
 
 const projectId = computed(() => route.params.id as string)
 
-// Load mock data
-worldStore.loadMockData()
-storyStore.loadMockData()
+// Load real data
+async function loadData() {
+  const pid = projectId.value
+  if (!pid) return
+
+  // Fetch project
+  await projectStore.fetchProject(pid)
+
+  // Fetch world (auto-created if missing)
+  await worldStore.fetchWorld(pid)
+
+  if (worldStore.currentWorld) {
+    const wid = worldStore.currentWorld.id
+    // Fetch all entities in parallel
+    await Promise.all([
+      worldStore.fetchCharacters(wid),
+      worldStore.fetchLocations(wid),
+      worldStore.fetchFactions(wid),
+      worldStore.fetchRelations(wid),
+    ])
+  }
+
+  // Fetch narrative data
+  await Promise.all([
+    storyStore.fetchNodes(pid),
+    storyStore.fetchStorylines(pid),
+    storyStore.fetchForeshadows(pid),
+  ])
+}
+
+onMounted(() => loadData())
+watch(() => route.params.id, () => loadData())
 
 function navigateToNode(node: any) {
   if (node.node_type === 'Scene') {

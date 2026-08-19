@@ -17,7 +17,25 @@ pub async fn get_world(State(state): State<AppState>, Path(project_id): Path<Str
         Some((id, pid, name, desc, rules, created, updated)) => {
             Ok(Json(serde_json::json!({"id": id, "project_id": pid, "name": name, "description": desc, "world_rules": rules, "config": {}, "is_main": true, "created_at": created, "updated_at": updated})))
         }
-        None => Err(AppError(anyhow::anyhow!("World not found")))
+        None => {
+            // Auto-create world for existing projects that don't have one
+            let project_name: Option<(String,)> = sqlx::query_as("SELECT name FROM project WHERE id = $1")
+                .bind(&project_id).fetch_optional(&state.pool).await?;
+            if let Some((name,)) = project_name {
+                let world_id = uuid::Uuid::new_v4().to_string();
+                sqlx::query("INSERT INTO world (id, project_id, name, description, config, is_main) VALUES ($1, $2, $3, $4, '{}', true)")
+                    .bind(&world_id).bind(&project_id).bind(&name).bind::<Option<String>>(None)
+                    .execute(&state.pool).await?;
+                // Return the newly created world
+                let new_row = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, String, String)>(
+                    "SELECT id, project_id, name, description, world_rules, created_at::text, updated_at::text FROM world WHERE id = $1"
+                ).bind(&world_id).fetch_one(&state.pool).await?;
+                let (id, pid, name, desc, rules, created, updated) = new_row;
+                Ok(Json(serde_json::json!({"id": id, "project_id": pid, "name": name, "description": desc, "world_rules": rules, "config": {}, "is_main": true, "created_at": created, "updated_at": updated})))
+            } else {
+                Err(AppError(anyhow::anyhow!("Project not found")))
+            }
+        }
     }
 }
 

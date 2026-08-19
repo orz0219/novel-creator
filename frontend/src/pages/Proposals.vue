@@ -8,7 +8,7 @@
       <div v-for="proposal in proposalStore.proposals" :key="proposal.id" class="proposal-card">
         <div class="proposal-header">
           <span class="proposal-id">#{{ proposal.id.split('-')[1] }}</span>
-          <StatusBadge :status="proposal.status.toLowerCase()" :label="proposal.status" />
+          <StatusBadge :status="(proposal.status || '').toLowerCase()" :label="proposal.status" />
           <span class="proposal-time">{{ formatDate(proposal.created_at) }}</span>
         </div>
         <div class="proposal-reason" v-if="proposal.reason">
@@ -61,7 +61,6 @@ import { ref } from "vue"
 const reviewMode = ref<string | null>(null)
 
 const proposalStore = useProposalStore()
-proposalStore.loadMockData()
 
 const changeTypeLabels: Record<string, string> = {
   Added: '新增',

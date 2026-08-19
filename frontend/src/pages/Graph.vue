@@ -75,7 +75,6 @@ import { ref, computed } from 'vue'
 import { useWorldStore } from '@/stores/world'
 
 const worldStore = useWorldStore()
-worldStore.loadMockData()
 
 import GraphControls from "@/components/graph/GraphControls.vue"
 

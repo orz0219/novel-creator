@@ -25,7 +25,8 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+const route = useRoute()
 const router = useRouter()
 const query = ref('')
 const activeFilter = ref('all')
@@ -36,16 +37,19 @@ const filters = [
   { id: 'Faction', label: '势力' },
   { id: 'Scene', label: '场景' },
 ]
-const allResults = [
-  { id: '1', type: 'Character', name: '林凡', snippet: '主角，边境散修，性格坚韧', route: '/project/p1/world/characters' },
-  { id: '2', type: 'Character', name: '苏晚晴', snippet: '女主，神秘女子', route: '/project/p1/world/characters' },
-  { id: '3', type: 'Location', name: '黑石城', snippet: '天玄大陆北境重镇', route: '/project/p1/world/locations' },
-  { id: '4', type: 'Location', name: '地下遗迹', snippet: '远古修士留下的遗迹', route: '/project/p1/world/locations' },
-  { id: '5', type: 'Faction', name: '王家', snippet: '黑石城四大家族之首', route: '/project/p1/world/factions' },
-  { id: '6', type: 'Scene', name: '场景1：遗迹入口', snippet: '林凡找到地下遗迹的入口', route: '/project/p1/write/scene-1' },
-]
+const allResults = computed(() => {
+  const pid = route.params.id as string
+  return [
+    { id: '1', type: 'Character', name: '林凡', snippet: '主角，边境散修，性格坚韧', route: `/project/${pid}/world/characters` },
+    { id: '2', type: 'Character', name: '苏晚晴', snippet: '女主，神秘女子', route: `/project/${pid}/world/characters` },
+    { id: '3', type: 'Location', name: '黑石城', snippet: '天玄大陆北境重镇', route: `/project/${pid}/world/locations` },
+    { id: '4', type: 'Location', name: '地下遗迹', snippet: '远古修士留下的遗迹', route: `/project/${pid}/world/locations` },
+    { id: '5', type: 'Faction', name: '王家', snippet: '黑石城四大家族之首', route: `/project/${pid}/world/factions` },
+    { id: '6', type: 'Scene', name: '场景1：遗迹入口', snippet: '林凡找到地下遗迹的入口', route: `/project/${pid}/write/scene-1` },
+  ]
+})
 const filteredResults = computed(() => {
-  let results = allResults
+  let results = allResults.value
   if (activeFilter.value !== 'all') results = results.filter(r => r.type === activeFilter.value)
   if (query.value) {
     const q = query.value.toLowerCase()
@@ -55,7 +59,6 @@ const filteredResults = computed(() => {
 })
 function navigateTo(result: any) { router.push(result.route) }
 </script>
-
 <style scoped>
 .search-page { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
 .search-header { padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--border-default); }

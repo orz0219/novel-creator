@@ -24,7 +24,6 @@
 <script setup lang="ts">
 import { useWorldStore } from '@/stores/world'
 const worldStore = useWorldStore()
-worldStore.loadMockData()
 
 function getEntityName(id: string): string {
   const all = [...worldStore.characters, ...worldStore.locations, ...worldStore.factions]

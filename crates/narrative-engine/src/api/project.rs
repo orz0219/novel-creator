@@ -68,6 +68,12 @@ pub async fn create_project(State(state): State<AppState>, Json(input): Json<Cre
         .bind(&id).bind(&input.name).bind(&input.description).bind(&input.language)
         .execute(&state.pool).await?;
 
+    // Auto-create main world for the project
+    let world_id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO world (id, project_id, name, description, config, is_main) VALUES ($1, $2, $3, $4, '{}', true)")
+        .bind(&world_id).bind(&id).bind(&input.name).bind(&input.description)
+        .execute(&state.pool).await.ok();
+
     get_project(State(state), Path(id)).await
 }
 
