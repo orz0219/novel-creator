@@ -7,7 +7,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 世界状态的当前快照
+/// 世界状态的当前快照（Projection / Materialized View）
+///
+/// 只读投影，只能通过 StateCommitter → StateChange → Projector 链路更新。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurrentState {
     pub id: Uuid,
@@ -17,6 +19,8 @@ pub struct CurrentState {
     pub state_value: serde_json::Value,
     pub effective_from: DateTime<Utc>,
     pub effective_to: Option<DateTime<Utc>>,
+    /// 版本号，用于乐观并发控制 (CAS)
+    pub version: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

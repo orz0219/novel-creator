@@ -190,7 +190,10 @@ impl WorldService {
         state_value: serde_json::Value,
     ) -> Result<CurrentState> {
         let repo = state_repo::StateRepo::new(self.pool.clone());
-        let state = repo.upsert_state(project_id, entity_id, state_key, state_value.clone()).await?;
+        // 先获取当前版本号用于 CAS
+        let current = repo.get_current_state(project_id, entity_id, state_key).await?;
+        let expected_version = current.map(|s| s.version);
+        let state = repo.upsert_state(project_id, entity_id, state_key, state_value.clone(), expected_version).await?;
 
         // 同时记录状态变更历史
         repo.record_change(
@@ -217,17 +220,18 @@ impl WorldService {
     /// 获取实体的当前状态
     pub async fn get_entity_state(
         &self,
+        project_id: Uuid,
         entity_id: Uuid,
         state_key: &str,
     ) -> Result<Option<CurrentState>> {
         let repo = state_repo::StateRepo::new(self.pool.clone());
-        repo.get_current_state(entity_id, state_key).await
+        repo.get_current_state(project_id, entity_id, state_key).await
     }
 
     /// 列出实体的所有当前状态
-    pub async fn list_entity_states(&self, entity_id: Uuid) -> Result<Vec<CurrentState>> {
+    pub async fn list_entity_states(&self, project_id: Uuid, entity_id: Uuid) -> Result<Vec<CurrentState>> {
         let repo = state_repo::StateRepo::new(self.pool.clone());
-        repo.list_current_states(entity_id).await
+        repo.list_current_states(project_id, entity_id).await
     }
 
     // ============================================================
@@ -318,13 +322,16 @@ impl WorldService {
                 )
                 .await?;
 
-            // 更新 current_state
+            // 更新 current_state (with CAS)
+            let current = state_repo.get_current_state(project_id, change.target_entity_id, &change.state_key).await?;
+            let expected_version = current.map(|s| s.version);
             state_repo
                 .upsert_state(
                     project_id,
                     change.target_entity_id,
                     &change.state_key,
                     change.new_value.clone(),
+                    expected_version,
                 )
                 .await?;
         }

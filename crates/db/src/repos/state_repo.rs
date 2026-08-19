@@ -3,12 +3,24 @@
 //! Provides both pool-based and transaction-based methods.
 //! Transaction-aware methods (suffixed _tx) accept a &mut PgConnection
 //! and should be used when multiple operations must be atomic.
+//!
+//! All state queries require project_id for project isolation.
+//! upsert_state_tx uses version-based optimistic concurrency control (CAS).
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use domain::{CurrentState, ResourceState, StateChangeRecord};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
+
+/// 并发修改错误
+#[derive(Debug, thiserror::Error)]
+#[error("Concurrent modification detected for entity {entity_id}, state_key {state_key}, expected version {expected_version}")]
+pub struct ConcurrentModificationError {
+    pub entity_id: Uuid,
+    pub state_key: String,
+    pub expected_version: i32,
+}
 
 pub struct StateRepo {
     pool: PgPool,
@@ -19,42 +31,165 @@ impl StateRepo {
         Self { pool }
     }
 
+    // ============================================================
+    // Project-scoped queries
+    // ============================================================
+
+    pub async fn get_current_state(
+        &self,
+        project_id: Uuid,
+        entity_id: Uuid,
+        state_key: &str,
+    ) -> Result<Option<CurrentState>> {
+        Self::get_current_state_tx(
+            &mut *self.pool.acquire().await.context("Failed to acquire connection")?,
+            project_id, entity_id, state_key,
+        ).await
+    }
+
+    /// Transaction-aware get_current_state. Requires project_id for isolation.
+    pub async fn get_current_state_tx(
+        conn: &mut PgConnection,
+        project_id: Uuid,
+        entity_id: Uuid,
+        state_key: &str,
+    ) -> Result<Option<CurrentState>> {
+        let row = sqlx::query_as::<_, CurrentStateRow>(
+            "SELECT id, project_id, entity_id, state_key, state_value, effective_from, effective_to, version, created_at, updated_at \
+             FROM current_state WHERE project_id = $1 AND entity_id = $2 AND state_key = $3 AND effective_to IS NULL",
+        )
+        .bind(project_id)
+        .bind(entity_id)
+        .bind(state_key)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to query current state")?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
+    pub async fn list_current_states(
+        &self,
+        project_id: Uuid,
+        entity_id: Uuid,
+    ) -> Result<Vec<CurrentState>> {
+        let rows = sqlx::query_as::<_, CurrentStateRow>(
+            "SELECT id, project_id, entity_id, state_key, state_value, effective_from, effective_to, version, created_at, updated_at \
+             FROM current_state WHERE project_id = $1 AND entity_id = $2 AND effective_to IS NULL ORDER BY state_key",
+        )
+        .bind(project_id)
+        .bind(entity_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to query current states")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    /// Batch query: requires project_id for isolation.
+    pub async fn list_current_states_batch(
+        &self,
+        project_id: Uuid,
+        entity_ids: &[Uuid],
+    ) -> Result<Vec<CurrentState>> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, CurrentStateRow>(
+            "SELECT id, project_id, entity_id, state_key, state_value, effective_from, effective_to, version, created_at, updated_at \
+             FROM current_state WHERE project_id = $1 AND entity_id = ANY($2) AND effective_to IS NULL ORDER BY entity_id, state_key",
+        )
+        .bind(project_id)
+        .bind(entity_ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to batch query current states")?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    // ============================================================
+    // Upsert with Optimistic Concurrency Control (CAS)
+    // ============================================================
+
     pub async fn upsert_state(
         &self,
         project_id: Uuid,
         entity_id: Uuid,
         state_key: &str,
         state_value: serde_json::Value,
+        expected_version: Option<i32>,
     ) -> Result<CurrentState> {
-        Self::upsert_state_tx(&mut *self.pool.acquire().await.context("Failed to acquire connection")?, project_id, entity_id, state_key, state_value).await
+        Self::upsert_state_tx(
+            &mut *self.pool.acquire().await.context("Failed to acquire connection")?,
+            project_id, entity_id, state_key, state_value, expected_version,
+        ).await
     }
 
-    /// Transaction-aware upsert_state. Use inside a transaction block.
+    /// Transaction-aware upsert_state with version CAS.
+    ///
+    /// If expected_version is Some(v), performs compare-and-swap:
+    ///   UPDATE ... WHERE version = v AND effective_to IS NULL
+    /// Returns ConcurrentModificationError if rows_affected == 0.
+    ///
+    /// If expected_version is None, skips CAS check (for initial state setup).
     pub async fn upsert_state_tx(
         conn: &mut PgConnection,
         project_id: Uuid,
         entity_id: Uuid,
         state_key: &str,
         state_value: serde_json::Value,
+        expected_version: Option<i32>,
     ) -> Result<CurrentState> {
-        let id = Uuid::new_v4();
         let now = Utc::now();
+        let new_version = expected_version.map(|v| v + 1).unwrap_or(1);
 
-        // Invalidate existing state
-        sqlx::query(
-            "UPDATE current_state SET effective_to = $1 WHERE entity_id = $2 AND state_key = $3 AND effective_to IS NULL",
-        )
-        .bind(now)
-        .bind(entity_id)
-        .bind(state_key)
-        .execute(&mut *conn)
-        .await
-        .context("Failed to invalidate")?;
+        // Step 1: Invalidate existing state (with CAS if expected_version provided)
+        let invalidated = if let Some(expected_ver) = expected_version {
+            let result = sqlx::query(
+                "UPDATE current_state SET effective_to = $1 \
+                 WHERE project_id = $2 AND entity_id = $3 AND state_key = $4 \
+                 AND version = $5 AND effective_to IS NULL",
+            )
+            .bind(now)
+            .bind(project_id)
+            .bind(entity_id)
+            .bind(state_key)
+            .bind(expected_ver)
+            .execute(&mut *conn)
+            .await
+            .context("Failed to invalidate")?;
+            result.rows_affected()
+        } else {
+            // No CAS check - just invalidate
+            let result = sqlx::query(
+                "UPDATE current_state SET effective_to = $1 \
+                 WHERE project_id = $2 AND entity_id = $3 AND state_key = $4 AND effective_to IS NULL",
+            )
+            .bind(now)
+            .bind(project_id)
+            .bind(entity_id)
+            .bind(state_key)
+            .execute(&mut *conn)
+            .await
+            .context("Failed to invalidate")?;
+            result.rows_affected()
+        };
 
-        // Insert new state
+        // Step 2: If CAS expected but no rows invalidated, concurrent modification
+        if expected_version.is_some() && invalidated == 0 {
+            return Err(anyhow::anyhow!(ConcurrentModificationError {
+                entity_id,
+                state_key: state_key.to_string(),
+                expected_version: expected_version.unwrap(),
+            }));
+        }
+
+        // Step 3: Insert new state with incremented version
+        let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO current_state (id, project_id, entity_id, state_key, state_value, effective_from, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO current_state (id, project_id, entity_id, state_key, state_value, effective_from, version, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(id)
         .bind(project_id)
@@ -62,6 +197,7 @@ impl StateRepo {
         .bind(state_key)
         .bind(&state_value)
         .bind(now)
+        .bind(new_version)
         .bind(now)
         .bind(now)
         .execute(&mut *conn)
@@ -76,67 +212,15 @@ impl StateRepo {
             state_value,
             effective_from: now,
             effective_to: None,
+            version: new_version,
             created_at: now,
             updated_at: now,
         })
     }
 
-    pub async fn get_current_state(
-        &self,
-        entity_id: Uuid,
-        state_key: &str,
-    ) -> Result<Option<CurrentState>> {
-        Self::get_current_state_tx(&mut *self.pool.acquire().await.context("Failed to acquire connection")?, entity_id, state_key).await
-    }
-
-    /// Transaction-aware get_current_state.
-    pub async fn get_current_state_tx(
-        conn: &mut PgConnection,
-        entity_id: Uuid,
-        state_key: &str,
-    ) -> Result<Option<CurrentState>> {
-        let row = sqlx::query_as::<_, CurrentStateRow>(
-            "SELECT id, project_id, entity_id, state_key, state_value, effective_from, effective_to, created_at, updated_at \
-             FROM current_state WHERE entity_id = $1 AND state_key = $2 AND effective_to IS NULL",
-        )
-        .bind(entity_id)
-        .bind(state_key)
-        .fetch_optional(&mut *conn)
-        .await
-        .context("Failed to query current state")?;
-
-        Ok(row.map(|r| r.into()))
-    }
-
-    pub async fn list_current_states(&self, entity_id: Uuid) -> Result<Vec<CurrentState>> {
-        let rows = sqlx::query_as::<_, CurrentStateRow>(
-            "SELECT id, project_id, entity_id, state_key, state_value, effective_from, effective_to, created_at, updated_at \
-             FROM current_state WHERE entity_id = $1 AND effective_to IS NULL ORDER BY state_key",
-        )
-        .bind(entity_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("Failed to query current states")?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
-    }
-
-    /// 批量获取多个 entity 的当前状态，避免 N+1 query。
-    pub async fn list_current_states_batch(&self, entity_ids: &[Uuid]) -> Result<Vec<CurrentState>> {
-        if entity_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let rows = sqlx::query_as::<_, CurrentStateRow>(
-            "SELECT id, project_id, entity_id, state_key, state_value, effective_from, effective_to, created_at, updated_at \
-             FROM current_state WHERE entity_id = ANY($1) AND effective_to IS NULL ORDER BY entity_id, state_key",
-        )
-        .bind(entity_ids)
-        .fetch_all(&self.pool)
-        .await
-        .context("Failed to batch query current states")?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
-    }
+    // ============================================================
+    // State change recording
+    // ============================================================
 
     pub async fn record_change(
         &self,
@@ -202,6 +286,10 @@ impl StateRepo {
         })
     }
 
+    // ============================================================
+    // Resource state (unchanged)
+    // ============================================================
+
     pub async fn upsert_resource(
         &self,
         project_id: Uuid,
@@ -213,7 +301,6 @@ impl StateRepo {
     ) -> Result<ResourceState> {
         let now = Utc::now();
 
-        // Try update first
         let result = sqlx::query(
             "UPDATE resource_state SET quantity = $1, production_rate = $2, controlled_by_entity_id = $3, updated_at = $4 \
              WHERE project_id = $5 AND location_id = $6 AND resource_name = $7",
@@ -230,7 +317,6 @@ impl StateRepo {
         .context("Failed to update resource")?;
 
         if result.rows_affected() == 0 {
-            // Insert new record
             let id = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO resource_state (id, project_id, location_id, resource_name, quantity, production_rate, controlled_by_entity_id, created_at, updated_at) \
@@ -261,7 +347,6 @@ impl StateRepo {
                 updated_at: now,
             })
         } else {
-            // Return updated record
             let row = sqlx::query_as::<_, ResourceStateRow>(
                 "SELECT id, project_id, location_id, resource_name, quantity, production_rate, controlled_by_entity_id, created_at, updated_at \
                  FROM resource_state WHERE project_id = $1 AND location_id = $2 AND resource_name = $3",
@@ -291,6 +376,10 @@ impl StateRepo {
     }
 }
 
+// ============================================================
+// Row types
+// ============================================================
+
 #[derive(sqlx::FromRow)]
 struct CurrentStateRow {
     id: Uuid,
@@ -300,6 +389,7 @@ struct CurrentStateRow {
     state_value: serde_json::Value,
     effective_from: DateTime<Utc>,
     effective_to: Option<DateTime<Utc>>,
+    version: i32,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -314,6 +404,7 @@ impl From<CurrentStateRow> for CurrentState {
             state_value: r.state_value,
             effective_from: r.effective_from,
             effective_to: r.effective_to,
+            version: r.version,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }

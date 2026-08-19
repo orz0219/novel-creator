@@ -91,6 +91,31 @@ impl ValidationRepo {
         Ok(())
     }
 
+    /// CAS-guarded status transition. Only updates if current status == from_status.
+    ///
+    /// Returns rows_affected: 1 if transition succeeded, 0 if status mismatch.
+    pub async fn update_status_with_guard_tx(
+        conn: &mut PgConnection,
+        change_id: Uuid,
+        to_status: ProposedChangeStatus,
+        from_status: ProposedChangeStatus,
+    ) -> Result<u64> {
+        let to_str = ser::proposed_change_status_str(&to_status);
+        let from_str = ser::proposed_change_status_str(&from_status);
+
+        let result = sqlx::query(
+            "UPDATE proposed_change SET status = $1, resolved_at = $2 WHERE id = $3 AND status = $4",
+        )
+        .bind(&to_str)
+        .bind(Utc::now())
+        .bind(change_id)
+        .bind(&from_str)
+        .execute(&mut *conn)
+        .await
+        .context("Failed to update proposed change with guard")?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn list_pending(&self, project_id: Uuid) -> Result<Vec<ProposedChange>> {
         let rows = sqlx::query_as::<_, ProposedChangeRow>(
             "SELECT id, project_id, task_id, change_type, target_entity_id, description, payload, status, created_at, resolved_at \

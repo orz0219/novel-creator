@@ -13,6 +13,32 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 // ============================================================
+// TokenEstimator - Token 估算抽象
+// ============================================================
+
+/// Token 估算器 trait
+///
+/// Context Engine 不直接调用 chars().count()，而是通过此 trait 估算。
+/// 默认实现 CharacterTokenEstimator 使用字符数估算。
+/// 未来可接入 Qwen/DeepSeek/Claude 等模型的 tokenizer。
+pub trait TokenEstimator: Send + Sync {
+    fn estimate(&self, text: &str) -> i32;
+}
+
+/// 基于字符数的 Token 估算器（默认实现）
+///
+/// 使用 chars().count() 而非 len()，正确处理中文 UTF-8。
+/// 估算公式：(char_count * 2) / 3
+pub struct CharacterTokenEstimator;
+
+impl TokenEstimator for CharacterTokenEstimator {
+    fn estimate(&self, text: &str) -> i32 {
+        let char_count = text.chars().count() as i32;
+        (char_count * 2) / 3
+    }
+}
+
+// ============================================================
 // ContextRequest - 正式输入类型
 // ============================================================
 
@@ -75,11 +101,22 @@ impl TokenBudgets {
 
 pub struct ContextEngine {
     pool: PgPool,
+    token_estimator: Box<dyn TokenEstimator>,
 }
 
 impl ContextEngine {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            token_estimator: Box::new(CharacterTokenEstimator),
+        }
+    }
+
+    pub fn with_token_estimator(pool: PgPool, estimator: Box<dyn TokenEstimator>) -> Self {
+        Self {
+            pool,
+            token_estimator: estimator,
+        }
     }
 
     /// 为指定 Scene 组装上下文包（使用默认策略）
@@ -153,8 +190,8 @@ impl ContextEngine {
         let scene_attrs: SceneAttributes = serde_json::from_value(scene_node.attributes.clone()).unwrap_or_default();
 
         // 第2步: Current State
-        let characters = self.get_relevant_characters(&scene_attrs, &entity_repo, &state_repo).await?;
-        let location = self.get_relevant_location(&scene_attrs, &entity_repo, &state_repo).await?;
+        let characters = self.get_relevant_characters(project_id, &scene_attrs, &entity_repo, &state_repo).await?;
+        let location = self.get_relevant_location(project_id, &scene_attrs, &entity_repo, &state_repo).await?;
 
         // 第3步: Relations
         let relations = self.get_relevant_relations(project_id, &scene_attrs).await?;
@@ -477,6 +514,7 @@ impl ContextEngine {
 
     async fn get_relevant_characters(
         &self,
+        project_id: Uuid,
         scene_attrs: &SceneAttributes,
         entity_repo: &entity_repo::EntityRepo,
         state_repo: &state_repo::StateRepo,
@@ -488,11 +526,22 @@ impl ContextEngine {
             }
         }
 
+        // Batch query entities
+        let entities = entity_repo.list_by_ids(project_id, &character_ids).await?;
+        let entity_map: std::collections::HashMap<Uuid, Entity> = entities.into_iter().map(|e| (e.id, e)).collect();
+
+        // Batch query states
+        let all_states = state_repo.list_current_states_batch(project_id, &character_ids).await?;
+        let mut state_map: std::collections::HashMap<Uuid, Vec<CurrentState>> = std::collections::HashMap::new();
+        for state in all_states {
+            state_map.entry(state.entity_id).or_default().push(state);
+        }
+
         let mut result = Vec::new();
-        for cid in character_ids {
-            if let Some(entity) = entity_repo.get_by_id(cid).await? {
-                let states = state_repo.list_current_states(cid).await?;
-                result.push((entity, states));
+        for cid in &character_ids {
+            if let Some(entity) = entity_map.get(cid) {
+                let states = state_map.remove(cid).unwrap_or_default();
+                result.push((entity.clone(), states));
             }
         }
         Ok(result)
@@ -500,13 +549,14 @@ impl ContextEngine {
 
     async fn get_relevant_location(
         &self,
+        project_id: Uuid,
         scene_attrs: &SceneAttributes,
         entity_repo: &entity_repo::EntityRepo,
         state_repo: &state_repo::StateRepo,
     ) -> Result<Option<(Entity, Vec<CurrentState>)>> {
         if let Some(loc_id) = scene_attrs.location_id {
             if let Some(entity) = entity_repo.get_by_id(loc_id).await? {
-                let states = state_repo.list_current_states(loc_id).await?;
+                let states = state_repo.list_current_states(project_id, loc_id).await?;
                 return Ok(Some((entity, states)));
             }
         }
@@ -526,33 +576,29 @@ impl ContextEngine {
             }
         }
 
-        let mut all_relations = Vec::new();
-        for entity_id in &entity_ids {
-            let rows = match sqlx::query_as::<_, RelationRow>(
-                "SELECT id, project_id, source_entity_id, target_entity_id, relation_type, description, attributes, valid_from, valid_until, created_at, updated_at \
-                 FROM relation WHERE project_id = $1 AND (source_entity_id = $2 OR target_entity_id = $2) ORDER BY created_at DESC LIMIT 20"
-            )
-            .bind(project_id)
-            .bind(entity_id)
-            .fetch_all(&self.pool)
-            .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::warn!("Failed to query relations for entity {}: {}. Treating as empty.", entity_id, e);
-                    continue;
-                }
-            };
-
-            for row in rows {
-                let rel: Relation = row.into();
-                if !all_relations.iter().any(|r: &Relation| r.id == rel.id) {
-                    all_relations.push(rel);
-                }
-            }
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
         }
 
-        Ok(all_relations)
+        // Single batch query instead of N+1
+        let rows = match sqlx::query_as::<_, RelationRow>(
+            "SELECT id, project_id, source_entity_id, target_entity_id, relation_type, description, attributes, valid_from, valid_until, created_at, updated_at \
+             FROM relation WHERE project_id = $1 AND (source_entity_id = ANY($2) OR target_entity_id = ANY($2)) ORDER BY created_at DESC"
+        )
+        .bind(project_id)
+        .bind(&entity_ids)
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("Failed to query relations for project {}: {}. Treating as empty.", project_id, e);
+                return Ok(Vec::new());
+            }
+        };
+
+        let relations: Vec<Relation> = rows.into_iter().map(|r| r.into()).collect();
+        Ok(relations)
     }
 
     async fn get_character_knowledge(
@@ -671,37 +717,30 @@ impl ContextEngine {
             }
         }
 
-        let mut all_events = Vec::new();
-        for entity_id in &entity_ids {
-            let rows = match sqlx::query_as::<_, EventRow>(
-                "SELECT e.id, e.project_id, e.name, e.description, e.event_type, e.event_time, e.duration, e.created_at, e.updated_at \
-                 FROM event e INNER JOIN event_entity ee ON e.id = ee.event_id \
-                 WHERE e.project_id = $1 AND ee.entity_id = $2 ORDER BY e.created_at DESC LIMIT 5"
-            )
-            .bind(project_id)
-            .bind(entity_id)
-            .fetch_all(&self.pool)
-            .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::warn!("Failed to query events for entity {}: {}. Treating as empty.", entity_id, e);
-                    continue;
-                }
-            };
-
-            for row in rows {
-                let event: Event = row.into();
-                if !all_events.iter().any(|e: &Event| e.id == event.id) {
-                    all_events.push(event);
-                }
-            }
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
         }
 
-        all_events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        all_events.truncate(10);
+        // Single batch query instead of N+1
+        let rows = match sqlx::query_as::<_, EventRow>(
+            "SELECT DISTINCT e.id, e.project_id, e.name, e.description, e.event_type, e.event_time, e.duration, e.created_at, e.updated_at \
+             FROM event e INNER JOIN event_entity ee ON e.id = ee.event_id \
+             WHERE e.project_id = $1 AND ee.entity_id = ANY($2) ORDER BY e.created_at DESC LIMIT 20"
+        )
+        .bind(project_id)
+        .bind(&entity_ids)
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("Failed to query events for project {}: {}. Treating as empty.", project_id, e);
+                return Ok(Vec::new());
+            }
+        };
 
-        Ok(all_events)
+        let events: Vec<Event> = rows.into_iter().map(|r| r.into()).collect();
+        Ok(events)
     }
 
     // ============================================================
@@ -816,12 +855,7 @@ impl ContextEngine {
     }
 
     fn estimate_tokens(&self, content: &str) -> i32 {
-        // Use char count instead of byte length for accurate Chinese token estimation.
-        // String::len() returns UTF-8 bytes: Chinese chars are 3 bytes each, causing underestimation.
-        // Rough estimate: ~1.5 chars per token for mixed Chinese/English text.
-        let char_count = content.chars().count() as i32;
-        // Conservative: 1 token per 1.5 characters (Chinese-heavy text gets ~2 chars/token)
-        (char_count * 2) / 3
+        self.token_estimator.estimate(content)
     }
 }
 

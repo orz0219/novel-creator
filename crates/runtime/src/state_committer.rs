@@ -2,6 +2,11 @@
 //!
 //! 将 ProposedChange 列表事务化提交到世界状态。
 //! 所有操作在同一个数据库事务中执行，任何一步失败则整体 ROLLBACK。
+//!
+//! 核心不变量：
+//! - 只有 Approved 的 ProposedChange 才能进入 StateCommitter
+//! - 所有 State 查询必须具备 Project Isolation
+//! - 使用 version CAS 防止并发覆盖
 
 use anyhow::{Context, Result};
 use db::repos::{state_repo, validation_repo};
@@ -24,15 +29,12 @@ impl DbStateCommitter {
 
     /// 事务化提交一批 ProposedChange。
     ///
-    /// 整个 batch 在单个事务中执行：
-    ///   BEGIN
-    ///     validate approved changes
-    ///     insert state_change
-    ///     update current_state
-    ///     mark proposed_change applied
-    ///   COMMIT
+    /// 核心不变量：
+    ///   - 只接受 status == Approved 的 change
+    ///   - 使用 project_id + entity_id + state_key 做 project isolation
+    ///   - 使用 version CAS 防止并发覆盖
     ///
-    /// 任何一步失败 → ROLLBACK（由 sqlx Transaction drop 自动执行）。
+    /// 任何一步失败 → ROLLBACK。
     pub async fn commit(
         &self,
         project_id: Uuid,
@@ -42,6 +44,26 @@ impl DbStateCommitter {
         let mut records = Vec::new();
 
         for change in changes {
+            // ============================================================
+            // 不变量 1: 只有 Approved 的 ProposedChange 才能进入
+            // ============================================================
+            if change.status != ProposedChangeStatus::Approved {
+                return Err(anyhow::anyhow!(
+                    "Cannot commit ProposedChange {}: status is {:?}, expected Approved",
+                    change.id, change.status
+                ));
+            }
+
+            // ============================================================
+            // 不变量 2: Project isolation - change 必须属于当前 project
+            // ============================================================
+            if change.project_id != project_id {
+                return Err(anyhow::anyhow!(
+                    "Cannot commit ProposedChange {}: project_id {} does not match expected {}",
+                    change.id, change.project_id, project_id
+                ));
+            }
+
             match &change.change_type {
                 ProposedChangeType::StateChange => {
                     let state_key = change.payload.get("state_key")
@@ -51,13 +73,16 @@ impl DbStateCommitter {
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
 
-                    // 1. 获取旧状态（在同一事务内）
+                    // ============================================================
+                    // 不变量 3: Project-scoped 查询
+                    // ============================================================
                     let old_state = state_repo::StateRepo::get_current_state_tx(
-                        &mut *tx, change.target_entity_id, state_key,
+                        &mut *tx, project_id, change.target_entity_id, state_key,
                     ).await?;
-                    let old_value = old_state.map(|s| s.state_value);
+                    let old_value = old_state.as_ref().map(|s| s.state_value.clone());
+                    let expected_version = old_state.as_ref().map(|s| s.version);
 
-                    // 2. 记录变更历史
+                    // 记录变更历史（source of truth）
                     let record = state_repo::StateRepo::record_change_tx(
                         &mut *tx,
                         project_id, None, "STATE_CHANGE",
@@ -66,19 +91,31 @@ impl DbStateCommitter {
                         Some("committer"),
                     ).await?;
 
-                    // 3. 更新当前状态
+                    // ============================================================
+                    // 不变量 4: CAS - 使用 version 做 compare-and-swap
+                    // ============================================================
                     state_repo::StateRepo::upsert_state_tx(
                         &mut *tx,
                         project_id, change.target_entity_id,
                         state_key, new_value,
+                        expected_version,
                     ).await?;
 
-                    // 4. 标记 ProposedChange 为 Applied
-                    validation_repo::ValidationRepo::update_status_tx(
+                    // 标记 ProposedChange 为 Applied
+                    // 使用 CAS: 只有从 Approved 才能转为 Applied
+                    let rows_affected = validation_repo::ValidationRepo::update_status_with_guard_tx(
                         &mut *tx,
                         change.id,
                         ProposedChangeStatus::Applied,
+                        ProposedChangeStatus::Approved,
                     ).await?;
+
+                    if rows_affected == 0 {
+                        return Err(anyhow::anyhow!(
+                            "Cannot commit ProposedChange {}: status transition from Approved to Applied failed (concurrent modification or invalid state)",
+                            change.id
+                        ));
+                    }
 
                     records.push(record);
                 }
