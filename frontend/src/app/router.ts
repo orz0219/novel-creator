@@ -29,6 +29,7 @@ const router = createRouter({
             { path: 'story/foreshadows', name: 'Foreshadows', component: () => import('@/pages/Foreshadows.vue') },
             { path: 'graph', name: 'Graph', component: () => import('@/pages/Graph.vue') },
             { path: 'proposals', name: 'Proposals', component: () => import('@/pages/Proposals.vue') },
+            { path: 'extract', name: 'Extract', component: () => import('@/pages/Extract.vue') },
             { path: 'history', name: 'History', component: () => import('@/pages/History.vue') },
             { path: 'snapshots', name: 'Snapshots', component: () => import('@/pages/Snapshots.vue') },
           ],

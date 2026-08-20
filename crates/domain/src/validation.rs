@@ -17,7 +17,7 @@ use crate::StateChangeRecord;
 pub struct ProposedChange {
     pub id: Uuid,
     pub project_id: Uuid,
-    pub task_id: Uuid,
+    pub task_id: Option<Uuid>,
     pub change_type: ProposedChangeType,
     pub target_entity_id: Uuid,
     pub description: String,

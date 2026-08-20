@@ -47,10 +47,18 @@ impl ProposalService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("proposal {} not found", id))?;
 
+        // 先翻到 Approved：提交器要求 Approved -> Applied 的守卫。
+        self.repo.approve_proposal(id).await?;
         let cmd = self.to_command(&change)?;
         self.committer.commit(cmd).await?;
 
-        self.repo.approve_proposal(id).await
+        // 提交成功后重新读取，返回最新状态（数据已落到 Canon，提案停留在 Approved 终态）。
+        let updated = self
+            .repo
+            .get_proposal(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("proposal {} disappeared after commit", id))?;
+        Ok(updated)
     }
 
     /// 把一条 ProposedChange 转换为统一的 MutationCommand。
@@ -111,7 +119,7 @@ impl ProposalService {
     pub async fn create_proposal(
         &self,
         project_id: Uuid,
-        task_id: Uuid,
+        task_id: Option<Uuid>,
         change_type: domain::validation::ProposedChangeType,
         target_entity_id: Uuid,
         description: &str,

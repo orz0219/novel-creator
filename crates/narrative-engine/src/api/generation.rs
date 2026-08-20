@@ -13,24 +13,18 @@ use db::application_ports::DbGenerationRepositoryPort;
 use super::error::AppError;
 use application::generation_service::GenerationService;
 use application::generation_executor::GenerationExecutor;
-use application::mutation::MutationCommitter;
-use application::proposal_service::ProposalService;
-use db::mutation_committer::DbMutationCommitter;
 use infrastructure::llm::{InfraLlmPort, LlmClient, OpenAiCompatibleProvider};
 
 #[derive(Deserialize)]
 pub struct CreateGenerationInput { pub r#type: String, pub target_id: Option<String>, pub model: Option<String>, pub parameters: Option<serde_json::Value> }
 
-/// 构建 GenerationExecutor：repo + snapshot repo + ProposalService（committer 背书）+ LlmPort。
+/// 构建 GenerationExecutor：repo + snapshot repo + proposal repo（落库草稿） + LlmPort。
+///
+/// 生成文本经抽取后直接通过 ProposalRepositoryPort 写入可提交的草稿，
+/// 批准时由 ProposalService + MutationCommitter 落到 World Canon。
 fn generation_executor(state: &AppState) -> GenerationExecutor {
     let pool = state.pool.clone();
-    let committer = Arc::new(MutationCommitter::new(Arc::new(DbMutationCommitter::new(
-        pool.clone(),
-    ))));
-    let proposals = Arc::new(ProposalService::new(
-        Arc::new(db::application_ports::DbProposalRepositoryPort::new(pool.clone())),
-        committer,
-    ));
+    let prop_repo = Arc::new(db::application_ports::DbProposalRepositoryPort::new(pool.clone()));
     let snapshots = Arc::new(db::application_ports::DbContextSnapshotRepositoryPort::new(
         pool.clone(),
     ));
@@ -47,7 +41,7 @@ fn generation_executor(state: &AppState) -> GenerationExecutor {
     GenerationExecutor::new(
         Arc::new(DbGenerationRepositoryPort::new(pool.clone())),
         snapshots,
-        proposals,
+        prop_repo,
         llm,
     )
 }

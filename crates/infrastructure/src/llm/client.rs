@@ -64,13 +64,43 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::provider::LocalProvider;
+    use crate::llm::types::LlmUsage;
+    use async_trait::async_trait;
+
+    /// 测试用假 Provider：实现 LlmProvider 但不触网，替换已删除的 LocalProvider。
+    struct MockProvider {
+        name: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockProvider {
+        async fn generate(&self, _request: LlmRequest) -> Result<LlmResponse> {
+            Ok(LlmResponse {
+                content: "mock".to_string(),
+                usage: LlmUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                },
+                model: self.name.clone(),
+            })
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn health_check(&self) -> Result<bool> {
+            Ok(true)
+        }
+    }
 
     #[tokio::test]
     async fn test_llm_client() {
-        let mut client = LlmClient::new("local".to_string());
-        let provider = Arc::new(LocalProvider::new("test".to_string()));
-        client.add_provider(provider);
+        let mut client = LlmClient::new("mock".to_string());
+        client.add_provider(Arc::new(MockProvider {
+            name: "mock".to_string(),
+        }));
 
         let request = LlmRequest {
             messages: vec![],
@@ -79,14 +109,15 @@ mod tests {
         };
 
         let response = client.generate(request).await.unwrap();
-        assert_eq!(response.model, "local");
+        assert_eq!(response.model, "mock");
     }
 
     #[tokio::test]
     async fn test_llm_client_health_check() {
-        let mut client = LlmClient::new("local".to_string());
-        let provider = Arc::new(LocalProvider::new("test".to_string()));
-        client.add_provider(provider);
+        let mut client = LlmClient::new("mock".to_string());
+        client.add_provider(Arc::new(MockProvider {
+            name: "mock".to_string(),
+        }));
 
         let results = client.health_check().await.unwrap();
         assert_eq!(results.len(), 1);

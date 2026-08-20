@@ -40,7 +40,7 @@ pub struct Skill {
 pub struct GenerationTask {
     pub id: Uuid,
     pub project_id: Uuid,
-    pub skill_id: Uuid,
+    pub skill_id: Option<Uuid>,
     pub scene_id: Option<Uuid>,
     pub input: serde_json::Value,
     pub output: Option<serde_json::Value>,

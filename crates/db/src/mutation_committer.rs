@@ -173,7 +173,7 @@ async fn apply(
 
     match cmd.payload {
         MutationPayload::CreateEntity {
-            world_id,
+            world_id: _world_id,
             entity_type,
             name,
             summary,
@@ -182,9 +182,24 @@ async fn apply(
         } => {
             let et = crate::repos::entity_repo::EntityTypeRepo::ensure_tx(&mut **tx, &entity_type, None)
                 .await?;
+            // world_id 由项目主世界解析（提案的 target_entity_id 在抽取场景是实体 id，而非 world）。
+            let world_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM world WHERE project_id = $1 AND is_main = TRUE LIMIT 1",
+            )
+            .bind(project_id)
+            .fetch_one(&mut **tx)
+            .await
+            .context("No main world found for project")?;
+            // 实体 id 取提案 target_entity_id（抽取时已分配稳定 id），为 nil 时回退随机 id。
+            let entity_id = if cmd.target == Uuid::nil() {
+                Uuid::new_v4()
+            } else {
+                cmd.target
+            };
             let entity = crate::repos::entity_repo::EntityRepo::create_tx(
                 &mut **tx,
                 project_id,
+                entity_id,
                 world_id,
                 et.id,
                 &name,

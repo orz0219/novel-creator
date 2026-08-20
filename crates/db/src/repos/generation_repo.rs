@@ -154,7 +154,7 @@ impl TaskRepo {
     pub async fn create(
         &self,
         project_id: Uuid,
-        skill_id: Uuid,
+        skill_id: Option<Uuid>,
         scene_id: Option<Uuid>,
         input: serde_json::Value,
     ) -> Result<GenerationTask> {
@@ -162,7 +162,7 @@ impl TaskRepo {
         let now = Utc::now();
 
         sqlx::query(
-            "INSERT INTO generation_task (id, project_id, skill_id, scene_id, input, status, created_at) \
+            "INSERT INTO generation_task (id, project_id, skill_id, scene_id, parameters, status, created_at) \
              VALUES ($1, $2, $3, $4, $5, 'Pending', $6)",
         )
         .bind(id)
@@ -200,7 +200,7 @@ impl TaskRepo {
         let status_str = ser::task_status_str(&status);
 
         sqlx::query(
-            "UPDATE generation_task SET status = $1, output = $2, error = $3, completed_at = $4 WHERE id = $5",
+            "UPDATE generation_task SET status = $1, result = $2, error = $3, updated_at = $4 WHERE id = $5",
         )
         .bind(&status_str)
         .bind(output.as_ref())
@@ -215,7 +215,7 @@ impl TaskRepo {
 
     pub async fn get_by_id(&self, task_id: Uuid) -> Result<Option<GenerationTask>> {
         let row = sqlx::query_as::<_, GenerationTaskRow>(
-            "SELECT id, project_id, skill_id, scene_id, input, output, status, error, created_at, completed_at \
+            "SELECT id, project_id, skill_id, scene_id, parameters AS input, result AS output, status, error, created_at, updated_at AS completed_at \
              FROM generation_task WHERE id = $1",
         )
         .bind(task_id)
@@ -228,7 +228,7 @@ impl TaskRepo {
 
     pub async fn update_output(&self, task_id: Uuid, output: serde_json::Value) -> Result<()> {
         sqlx::query(
-            "UPDATE generation_task SET output = $1, status = 'Completed', completed_at = NOW() WHERE id = $2",
+            "UPDATE generation_task SET result = $1, status = 'Completed', updated_at = NOW() WHERE id = $2",
         )
         .bind(&output)
         .bind(task_id)
@@ -290,7 +290,7 @@ impl RunRepo {
 struct GenerationTaskRow {
     id: Uuid,
     project_id: Uuid,
-    skill_id: Uuid,
+    skill_id: Option<Uuid>,
     scene_id: Option<Uuid>,
     input: Option<serde_json::Value>,
     output: Option<serde_json::Value>,

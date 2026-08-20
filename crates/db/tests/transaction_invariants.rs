@@ -126,7 +126,7 @@ async fn invariant_a_batch_same_key_conflict_no_partial_write() {
     let c1 = val
         .create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::StateChange,
             entity_id,
             "c1",
@@ -137,7 +137,7 @@ async fn invariant_a_batch_same_key_conflict_no_partial_write() {
     let c2 = val
         .create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::StateChange,
             entity_id,
             "c2",
@@ -212,7 +212,7 @@ async fn invariant_c_state_change_full_chain_and_world_version() {
     let c1 = val
         .create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::StateChange,
             entity_id,
             "c1",
@@ -305,7 +305,7 @@ async fn invariant_c_entity_create_full_chain() {
     let c1 = val
         .create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::EntityCreate,
             Uuid::new_v4(),
             "create hero",
@@ -351,7 +351,7 @@ async fn world_version_only_advanced_by_canonical_commit() {
     let c1 = val
         .create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::StateChange,
             entity_id,
             "c1",
@@ -405,7 +405,7 @@ async fn invariant_payload_must_match_change_type() {
     let c1 = val
         .create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::EntityCreate,
             Uuid::new_v4(),
             "bad create",

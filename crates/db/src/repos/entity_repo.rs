@@ -319,6 +319,7 @@ impl EntityRepo {
     pub async fn create_tx<'c>(
         executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
         project_id: Uuid,
+        id: Uuid,
         world_id: Uuid,
         entity_type_id: Uuid,
         name: &str,
@@ -326,8 +327,6 @@ impl EntityRepo {
         description: Option<&str>,
         attributes: serde_json::Value,
     ) -> Result<Entity> {
-        let id = Uuid::new_v4();
-
         sqlx::query(
             "INSERT INTO entity (id, project_id, world_id, entity_type_id, name, summary, description, attributes, version, created_by, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 'system', NOW(), NOW())",

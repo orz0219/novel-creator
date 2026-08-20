@@ -17,3 +17,4 @@ chrono = { workspace = true }
 db = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }

@@ -155,7 +155,7 @@ mod tests {
         ensure_task(&pool, project_id, task_id).await?;
         let change = val_repo.create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::StateChange,
             entity_id,
             "Test change",
@@ -192,7 +192,7 @@ mod tests {
         ensure_task(&pool, project_id, task_id).await?;
         let change = val_repo.create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::StateChange,
             entity_id,
             "Test change",
@@ -227,7 +227,7 @@ mod tests {
         ensure_task(&pool, project_id, task_id).await?;
         let change = val_repo.create_proposed_change(
             project_id,
-            task_id,
+            Some(task_id),
             ProposedChangeType::StateChange,
             entity_id,
             "Move to forest",

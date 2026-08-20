@@ -120,7 +120,7 @@ mod integration_tests {
         ensure_task(&pool, project_id, task_id1).await?;
         let change1 = val_repo.create_proposed_change(
             project_id,
-            task_id1,
+            Some(task_id1),
             ProposedChangeType::StateChange,
             entity_id,
             "Take damage",
@@ -131,7 +131,7 @@ mod integration_tests {
         ensure_task(&pool, project_id, task_id2).await?;
         let change2 = val_repo.create_proposed_change(
             project_id,
-            task_id2,
+            Some(task_id2),
             ProposedChangeType::StateChange,
             entity_id,
             "Heal",
@@ -259,7 +259,7 @@ mod integration_tests {
         ensure_task(&pool, project_id, task_id1).await?;
         let change1 = val_repo.create_proposed_change(
             project_id,
-            task_id1,
+            Some(task_id1),
             ProposedChangeType::StateChange,
             entity_id,
             "Change 1",
@@ -270,7 +270,7 @@ mod integration_tests {
         ensure_task(&pool, project_id, task_id2).await?;
         let change2 = val_repo.create_proposed_change(
             project_id,
-            task_id2,
+            Some(task_id2),
             ProposedChangeType::StateChange,
             entity_id,
             "Change 2",

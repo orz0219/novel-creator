@@ -27,7 +27,7 @@ impl ValidationRepo {
     pub async fn create_proposed_change(
         &self,
         project_id: Uuid,
-        task_id: Uuid,
+        task_id: Option<Uuid>,
         change_type: ProposedChangeType,
         target_entity_id: Uuid,
         description: &str,
@@ -372,7 +372,7 @@ impl ValidationRepo {
 struct ProposedChangeRow {
     id: Uuid,
     project_id: Uuid,
-    task_id: Uuid,
+    task_id: Option<Uuid>,
     change_type: String,
     target_entity_id: Uuid,
     description: String,

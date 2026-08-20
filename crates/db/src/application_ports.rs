@@ -388,7 +388,7 @@ impl DbProposalRepositoryPort {
 struct ProposedChangeRow {
     id: Uuid,
     project_id: Uuid,
-    task_id: Uuid,
+    task_id: Option<Uuid>,
     change_type: String,
     target_entity_id: Uuid,
     description: String,
@@ -444,7 +444,7 @@ impl ProposalRepositoryPort for DbProposalRepositoryPort {
     async fn create_proposal(
         &self,
         project_id: Uuid,
-        task_id: Uuid,
+        task_id: Option<Uuid>,
         change_type: ProposedChangeType,
         target_entity_id: Uuid,
         description: &str,
@@ -487,9 +487,12 @@ impl ProposalRepositoryPort for DbProposalRepositoryPort {
             .get_proposal(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Proposal not found"))?;
-        if !current
+        // 批准即提交：允许从 Draft 直接批准（隐式完成校验），
+        // 同时保留 Valid -> Approved 等既有流转（can_transition_to 不变）。
+        if !(current
             .status
             .can_transition_to(&ProposedChangeStatus::Approved)
+            || current.status == ProposedChangeStatus::Draft)
         {
             return Err(anyhow::anyhow!(
                 "Invalid state transition: {} -> {}",
@@ -522,9 +525,10 @@ impl ProposalRepositoryPort for DbProposalRepositoryPort {
             .get_proposal(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Proposal not found"))?;
-        if !current
+        if !(current
             .status
             .can_transition_to(&ProposedChangeStatus::Rejected)
+            || current.status == ProposedChangeStatus::Draft)
         {
             return Err(anyhow::anyhow!(
                 "Invalid state transition: {} -> {}",

@@ -79,7 +79,7 @@ fn to_event(r: EventRow) -> Event {
 struct ProposedChangeRow {
     id: Uuid,
     project_id: Uuid,
-    task_id: Uuid,
+    task_id: Option<Uuid>,
     change_type: String,
     target_entity_id: Uuid,
     description: String,
@@ -360,7 +360,7 @@ async fn commit_changes(pool: &PgPool, project_id: Uuid, change_ids: &[Uuid]) ->
                     .map_err(|e| anyhow::anyhow!("Invalid EntityCreate payload for {}: {}", change.id, e))?;
                 let entity_type_obj = crate::repos::entity_repo::EntityTypeRepo::ensure_tx(&mut *tx, &p.entity_type, None).await?;
                 let world_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM world WHERE project_id = $1 AND is_main = TRUE LIMIT 1").bind(project_id).fetch_one(&mut *tx).await.context("No main world found for project")?;
-                let entity = crate::repos::entity_repo::EntityRepo::create_tx(&mut *tx, project_id, world_id, entity_type_obj.id, &p.name, None, None, p.attributes).await?;
+                let entity = crate::repos::entity_repo::EntityRepo::create_tx(&mut *tx, project_id, Uuid::new_v4(), world_id, entity_type_obj.id, &p.name, None, None, p.attributes).await?;
                 let rows_affected = crate::repos::validation_repo::ValidationRepo::update_status_with_guard_tx(&mut *tx, change.id, ProposedChangeStatus::Applied, ProposedChangeStatus::Approved).await?;
                 if rows_affected == 0 {
                     return Err(anyhow::anyhow!("Concurrent modification detected for ProposedChange {}", change.id));

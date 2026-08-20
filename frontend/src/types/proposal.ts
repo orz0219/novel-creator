@@ -37,3 +37,23 @@ export interface ValidationResult {
   suggestion?: string
   related_entity_ids: string[]
 }
+
+// M1 文本抽取结果（对应后端 domain::extraction::ExtractionResult）
+export interface EntityCandidate {
+  name: string
+  entity_type: string
+  summary?: string
+  attributes?: unknown
+}
+
+export interface RelationCandidate {
+  from: string
+  to: string
+  relation_type: string
+  description?: string
+}
+
+export interface ExtractionResult {
+  entities: EntityCandidate[]
+  relations: RelationCandidate[]
+}

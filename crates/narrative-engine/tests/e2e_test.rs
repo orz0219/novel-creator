@@ -139,7 +139,7 @@ mod e2e_tests {
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
         let task_id = uuid::Uuid::new_v4();
         ensure_task(&pool, project.id, task_id).await;
-        let change = val_repo.create_proposed_change(project.id, task_id, ProposedChangeType::StateChange, lin_fan.id, "Enter city", serde_json::json!({"state_key": "location", "new_value": "Black Stone City"})).await.unwrap();
+        let change = val_repo.create_proposed_change(project.id, Some(task_id), ProposedChangeType::StateChange, lin_fan.id, "Enter city", serde_json::json!({"state_key": "location", "new_value": "Black Stone City"})).await.unwrap();
         let run = validator.validate_changes(project.id, task_id, &[change.clone()]).await.unwrap();
         assert_eq!(run.changes_approved, 1);
 

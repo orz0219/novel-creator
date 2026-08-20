@@ -271,7 +271,7 @@ pub trait ProposalRepositoryPort: Send + Sync {
     async fn create_proposal(
         &self,
         project_id: Uuid,
-        task_id: Uuid,
+        task_id: Option<Uuid>,
         change_type: ProposedChangeType,
         target_entity_id: Uuid,
         description: &str,

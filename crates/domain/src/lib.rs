@@ -34,8 +34,10 @@ pub mod state_mgmt;
 pub mod repair;
 pub mod world_version;
 pub mod util;
+pub mod extraction;
 
 pub use util::{deterministic_uuid, sha256_hex};
+pub use extraction::*;
 
 // Re-export commonly used types
 pub use entity::*;

@@ -8,6 +8,7 @@ pub mod entity;
 pub mod narrative;
 pub mod context;
 pub mod generation;
+pub mod extraction;
 pub mod proposal;
 pub mod validation;
 pub mod history;
@@ -76,6 +77,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/generations/{id}", get(generation::get_task))
         .route("/api/v1/generations/{id}/cancel", post(generation::cancel_task))
         .route("/api/v1/generations/{id}/execute", post(generation::execute_task))
+        // Extraction (M1: 文本 → 实体/关系抽取闭环)
+        .route("/api/v1/projects/{id}/extract", post(extraction::extract_text))
         // Proposals
         .route("/api/v1/projects/{id}/proposals", get(proposal::list_proposals))
         .route("/api/v1/proposals/{id}", get(proposal::get_proposal))
