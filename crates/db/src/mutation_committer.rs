@@ -11,18 +11,26 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono::Utc;
 use domain::events::{DomainEvent, DomainEventType};
 use domain::mutation::*;
+use domain::{WorldVersion, WorldVersionKind};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
+use crate::repos::world_version_repo::WorldVersionRepo;
+
 pub struct DbMutationCommitter {
     pool: PgPool,
+    world_version: WorldVersionRepo,
 }
 
 impl DbMutationCommitter {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool: pool.clone(),
+            world_version: WorldVersionRepo::new(pool),
+        }
     }
 }
 
@@ -32,22 +40,31 @@ impl MutationCommitterPort for DbMutationCommitter {
         &self,
         cmd: MutationCommand,
     ) -> Result<MutationCommitResult, MutationError> {
-        let mut results = self.commit_batch(vec![cmd]).await?;
+        let batch = MutationBatch {
+            commands: vec![cmd.clone()],
+            affected_worlds: vec![],
+            source: cmd.source,
+            plan_id: None,
+        };
+        let mut results = self.commit_batch(batch).await?;
         Ok(results.remove(0))
     }
 
     async fn commit_batch(
         &self,
-        cmds: Vec<MutationCommand>,
+        batch: MutationBatch,
     ) -> Result<Vec<MutationCommitResult>, MutationError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .context("Failed to begin mutation transaction")?;
-        let mut out = Vec::with_capacity(cmds.len());
+        let mut out = Vec::with_capacity(batch.commands.len());
+        // 在移动 batch.commands 之前先记录长度与首命令 id，供下方 world_version 元数据使用。
+        let n_cmds = batch.commands.len();
+        let first_cmd_id = batch.commands.first().map(|c| c.command_id);
 
-        for cmd in cmds {
+        for cmd in batch.commands {
             // 幂等：mutation_ledger(command_id) 唯一约束
             if let Some(cached) = ledger_try_insert(&mut *tx, &cmd).await? {
                 out.push(cached);
@@ -57,6 +74,39 @@ impl MutationCommitterPort for DbMutationCommitter {
             let result = apply(&mut tx, cmd).await?;
             ledger_mark_done(&mut *tx, &result).await?;
             out.push(result);
+        }
+
+        // 同一事务内为每个受影响世界产出 world_version（git-commit 式），
+        // 保证「Canon commit == world version commit」是同一原子事实。
+        // 不在此处从 command 推断 world_id——由调用方在 batch.affected_worlds 显式给出。
+        let mut worlds = batch.affected_worlds.clone();
+        worlds.sort_unstable();
+        worlds.dedup();
+        for world_id in worlds {
+            let parent = self.world_version.latest_tx(&mut *tx, world_id).await?;
+            let new_version = parent.as_ref().map(|p| p.version).unwrap_or(0) + 1;
+            let parent_id = parent.as_ref().map(|p| p.id);
+            let kind = match batch.source {
+                MutationSource::User => WorldVersionKind::UserEdit,
+                MutationSource::AI => WorldVersionKind::AiProposal,
+                MutationSource::System => WorldVersionKind::System,
+            };
+            let trigger = batch.plan_id.or(first_cmd_id);
+            let v = WorldVersion {
+                id: Uuid::new_v4(),
+                world_id,
+                version: new_version,
+                kind,
+                trigger_id: trigger,
+                summary: Some(format!(
+                    "MutationCommit: {} commands (source={})",
+                    n_cmds,
+                    batch.source.as_str()
+                )),
+                parent_version_id: parent_id,
+                created_at: Utc::now(),
+            };
+            self.world_version.create_tx(&mut *tx, &v).await?;
         }
 
         tx.commit()

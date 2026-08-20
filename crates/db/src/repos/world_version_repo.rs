@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use domain::{WorldVersion, WorldVersionKind};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 pub struct WorldVersionRepo {
@@ -59,6 +59,47 @@ impl WorldVersionRepo {
         .await
         .context("Failed to query world versions")?;
         Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    /// 在已有事务中取某世界当前最新版本（None 表示尚无版本）。
+    pub async fn latest_tx(
+        &self,
+        executor: &mut PgConnection,
+        world_id: Uuid,
+    ) -> Result<Option<WorldVersion>> {
+        let row: Option<WorldVersionRow> = sqlx::query_as::<_, WorldVersionRow>(
+            "SELECT id, world_id, version, kind, trigger_id, summary, parent_version_id, created_at \
+             FROM world_version WHERE world_id = $1 ORDER BY version DESC LIMIT 1",
+        )
+        .bind(world_id)
+        .fetch_optional(executor)
+        .await
+        .context("Failed to query latest world version (tx)")?;
+        Ok(row.map(|r| r.into()))
+    }
+
+    /// 在已有事务中写入一条 world_version。
+    pub async fn create_tx(
+        &self,
+        executor: &mut PgConnection,
+        v: &WorldVersion,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO world_version (id, world_id, version, kind, trigger_id, summary, parent_version_id, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(v.id)
+        .bind(v.world_id)
+        .bind(v.version)
+        .bind(v.kind.as_str())
+        .bind(v.trigger_id)
+        .bind(v.summary.clone())
+        .bind(v.parent_version_id)
+        .bind(v.created_at)
+        .execute(executor)
+        .await
+        .context("Failed to create world version (tx)")?;
+        Ok(())
     }
 }
 

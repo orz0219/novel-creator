@@ -201,15 +201,23 @@ pub struct MutationPlan {
     pub proposal_id: Option<Uuid>,
     pub source: MutationSource,
     pub commands: Vec<MutationCommand>,
+    /// 本次计划影响的世界列表（ChatGPT 评审 P2/B：world_version 落点显式化）。
+    /// 由调用方（知道世界上下文的上层服务）给出；DB 层不负责从 command 推断 world_id。
+    pub affected_worlds: Vec<Uuid>,
 }
 
 impl MutationPlan {
-    pub fn new(source: MutationSource, commands: Vec<MutationCommand>) -> Self {
+    pub fn new(
+        source: MutationSource,
+        commands: Vec<MutationCommand>,
+        affected_worlds: Vec<Uuid>,
+    ) -> Self {
         Self {
             plan_id: Uuid::new_v4(),
             proposal_id: None,
             source,
             commands,
+            affected_worlds,
         }
     }
 
@@ -217,14 +225,33 @@ impl MutationPlan {
         proposal_id: Uuid,
         source: MutationSource,
         commands: Vec<MutationCommand>,
+        affected_worlds: Vec<Uuid>,
     ) -> Self {
         Self {
             plan_id: Uuid::new_v4(),
             proposal_id: Some(proposal_id),
             source,
             commands,
+            affected_worlds,
         }
     }
+}
+
+/// 一次 Canon 提交批次（ChatGPT 评审 P2/B：把 world_version 落点显式化）。
+///
+/// 与单条 [`MutationCommand`] 不同，批次携带「受影响的世界列表」，由调用方
+/// （知道世界上下文的上层服务）显式给出——DB 层不负责从 command 推断 world_id
+/// （否则 commit path 会变复杂，且以后跨 world mutation 更麻烦）。
+///
+/// 提交者在同一事务里：落实命令 + 为每个 affected_world 产出一个 world_version
+/// （git-commit 式），保证「Canon commit == world version commit」是同一原子事实。
+#[derive(Debug, Clone)]
+pub struct MutationBatch {
+    pub commands: Vec<MutationCommand>,
+    pub affected_worlds: Vec<Uuid>,
+    pub source: MutationSource,
+    /// 关联的 MutationPlan id（用于 world_version.trigger_id 追溯）
+    pub plan_id: Option<Uuid>,
 }
 
 /// Mutation 错误类型
@@ -263,21 +290,28 @@ pub trait MutationCommitterPort: Send + Sync {
         cmd: MutationCommand,
     ) -> Result<MutationCommitResult, MutationError>;
 
-    /// 在同一事务中提交一批命令；任一条失败整体回滚
+    /// 在同一事务中提交一批命令；任一条失败整体回滚。
+    /// `batch.affected_worlds` 决定本次提交要推进哪些世界的 world_version。
     async fn commit_batch(
         &self,
-        cmds: Vec<MutationCommand>,
+        batch: MutationBatch,
     ) -> Result<Vec<MutationCommitResult>, MutationError>;
 
     /// 提交一个 [`MutationPlan`]（推荐的规范写入口）。
     ///
-    /// 默认实现直接批量提交其 `commands`；实现方可用它统一注入
-    /// 来源 / 提案追踪 / 领域事件，确保"任何 Canon 写操作都经过此边界"。
+    /// 默认实现将计划展开为 [`MutationBatch`] 并提交；实现方可用它统一注入
+    /// 来源 / 提案追踪 / 领域事件 / world_version，确保"任何 Canon 写操作都经过此边界"。
     async fn commit_plan(
         &self,
         plan: MutationPlan,
     ) -> Result<Vec<MutationCommitResult>, MutationError> {
-        self.commit_batch(plan.commands).await
+        self.commit_batch(MutationBatch {
+            commands: plan.commands,
+            affected_worlds: plan.affected_worlds,
+            source: plan.source,
+            plan_id: Some(plan.plan_id),
+        })
+        .await
     }
 }
 

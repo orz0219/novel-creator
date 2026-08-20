@@ -288,7 +288,7 @@ mod tests {
 
         // Try to build context for non-existent scene
         let engine = build_context_engine(pool.clone());
-        let result = engine.build_context(project_id, Uuid::new_v4(), 10000).await;
+        let result = engine.build_context(project_id, Uuid::new_v4(), 10000, None).await;
 
         // Should fail because scene doesn't exist
         assert!(result.is_err(), "Required context failure should propagate error");
@@ -330,7 +330,7 @@ mod tests {
 
         // Build context - optional relations/events should not fail the whole build
         let engine = build_context_engine(pool.clone());
-        let result = engine.build_context(project_id, scene_id, 10000).await;
+        let result = engine.build_context(project_id, scene_id, 10000, None).await;
 
         // Should succeed even if optional queries fail
         assert!(result.is_ok(), "Optional context failure should not fail the build");

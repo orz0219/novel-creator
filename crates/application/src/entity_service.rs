@@ -70,7 +70,16 @@ impl EntityService {
             summary,
             description,
         );
-        let result = self.committer.commit(cmd).await?;
+        // 实体创建属于「影响该世界的 Canon 写」：显式声明 affected_worlds，
+        // 让提交者在同一事务内推进这个世界的 world_version（ChatGPT 评审 P2/B）。
+        let results = self
+            .committer
+            .commit_with_worlds(cmd, vec![world_id])
+            .await?;
+        let result = results
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("mutation returned no result"))?;
         let entity_id = *result
             .created_ids
             .first()

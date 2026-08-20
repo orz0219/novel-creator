@@ -10,6 +10,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use domain::generation::{ContextLayer, ContextPackage, ReproducibilityMeta};
+use domain::sha256_hex;
 use domain::ports::{ContextSnapshotRepositoryPort, GenerationRepositoryPort, LlmPort};
 use domain::validation::ProposedChangeType;
 use std::sync::Arc;
@@ -107,8 +108,12 @@ impl GenerationExecutor {
             .await?;
 
         // 记录 GenerationRun（提案 十 / 十一，关联 ContextSnapshot 提案 十二）
+        // 生成请求参数在此固定：prompt_hash 取最终拼装 prompt 的 sha256，
+        // 而非 ContextPackage（上下文是输入材料，不是最终 prompt）——符合 ChatGPT 评审 P1。
         let reproducibility = ReproducibilityMeta {
             model: Some(model.to_string()),
+            temperature: None,
+            prompt_hash: Some(sha256_hex(&format!("{}\n{}", system_prompt, user_prompt))),
             ..Default::default()
         };
         self.repo

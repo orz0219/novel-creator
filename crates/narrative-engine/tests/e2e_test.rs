@@ -109,14 +109,14 @@ mod e2e_tests {
 
         // Scene Writer policy
         let writer_policy = domain::ContextPolicy::scene_writer();
-        let ctx_writer = engine.build_context_with_policy(project.id, scene_id, TokenBudgets::MEDIUM, &writer_policy).await.unwrap();
+        let ctx_writer = engine.build_context_with_policy(project.id, scene_id, TokenBudgets::MEDIUM, &writer_policy, None).await.unwrap();
         assert!(!ctx_writer.l0_essential.content.is_empty());
         assert!(ctx_writer.l0_essential.content.contains("Lin Fan"));
         assert!(ctx_writer.l0_essential.content.contains("Black Stone City"));
 
         // Location Designer policy (should NOT include L4 Character Knowledge)
         let loc_policy = domain::ContextPolicy::location_designer();
-        let ctx_loc = engine.build_context_with_policy(project.id, scene_id, TokenBudgets::MEDIUM, &loc_policy).await.unwrap();
+        let ctx_loc = engine.build_context_with_policy(project.id, scene_id, TokenBudgets::MEDIUM, &loc_policy, None).await.unwrap();
         assert!(!ctx_loc.l4_character_knowledge.included);
 
         // 5. Validate and apply changes via the canonical commit path
@@ -190,7 +190,7 @@ mod e2e_tests {
 
         for st in skill_types {
             let policy = st.context_policy();
-            let ctx = engine.build_context_with_policy(project.id, scene_id, TokenBudgets::MEDIUM, &policy).await.unwrap();
+            let ctx = engine.build_context_with_policy(project.id, scene_id, TokenBudgets::MEDIUM, &policy, None).await.unwrap();
             assert!(!ctx.l0_essential.content.is_empty(), "L0 should always be included for {:?}", st);
         }
     }
@@ -267,8 +267,8 @@ mod e2e_tests {
             serde_json::json!({"pov_character_id": char.id})).await.unwrap();
         let scene_id: uuid::Uuid = serde_json::from_value(scene["id"].clone()).unwrap();
 
-        let ctx_small = engine.build_context(project.id, scene_id, TokenBudgets::SMALL).await.unwrap();
-        let ctx_large = engine.build_context(project.id, scene_id, TokenBudgets::LARGE).await.unwrap();
+        let ctx_small = engine.build_context(project.id, scene_id, TokenBudgets::SMALL, None).await.unwrap();
+        let ctx_large = engine.build_context(project.id, scene_id, TokenBudgets::LARGE, None).await.unwrap();
 
         assert!(ctx_small.actual_tokens <= TokenBudgets::SMALL);
         assert!(ctx_large.actual_tokens <= TokenBudgets::LARGE);

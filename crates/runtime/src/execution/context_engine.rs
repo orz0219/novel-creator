@@ -12,8 +12,10 @@ use anyhow::Result;
 use crate::context::{budget, ranking, CharacterTokenEstimator, RetrievalResult, TokenEstimator};
 use crate::retrieval::Retriever;
 use domain::*;
+use domain::generation::{ReproducibilityMeta, RetrievedDocRef};
 use domain::ports::*;
 use domain::skill::ContextPolicy;
+use domain::{deterministic_uuid, sha256_hex};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -84,9 +86,16 @@ impl ContextEngine {
         project_id: Uuid,
         scene_node_id: Uuid,
         token_budget: i32,
+        world_version: Option<i32>,
     ) -> Result<ContextPackage> {
-        self.build_context_with_policy(project_id, scene_node_id, token_budget, &ContextPolicy::scene_writer())
-            .await
+        self.build_context_with_policy(
+            project_id,
+            scene_node_id,
+            token_budget,
+            &ContextPolicy::scene_writer(),
+            world_version,
+        )
+        .await
     }
 
     /// 为指定 Scene 组装上下文包（使用指定策略）
@@ -96,6 +105,7 @@ impl ContextEngine {
         scene_node_id: Uuid,
         token_budget: i32,
         policy: &ContextPolicy,
+        world_version: Option<i32>,
     ) -> Result<ContextPackage> {
         // 获取 World ID
         // Project-scoped query ensures the scene belongs to the current project.
@@ -111,11 +121,15 @@ impl ContextEngine {
             .retrieve_context(project_id, world_id, scene_node_id, policy)
             .await?;
 
+        // 1.5) 先固化「检索文档引用」——必须在 ranking 消费 retrieval_result 之前，
+        // 因为 ranking::filter 会 move 它。可复现性需要原始检索载荷的 hash。
+        let retrieved_doc_refs = build_retrieved_doc_refs(&retrieval_result);
+
         // 2) 可见性 + 排序（Ranking）
         let filtered = ranking::filter(retrieval_result, policy)?;
 
         // 3) Token 预算分配（Budget）
-        let context_package = budget::allocate(
+        let mut context_package = budget::allocate(
             project_id,
             scene_node_id,
             token_budget,
@@ -123,6 +137,24 @@ impl ContextEngine {
             policy,
             &*self.token_estimator,
         );
+
+        // 3.5) 填充可复现性元数据（ChatGPT 评审 P1）。
+        // 上下文确定性信息在此固定；生成请求参数（model/temperature/prompt_hash）
+        // 由 Generation Runtime 负责，不回写 ContextPackage。
+        // world_version 由调用方显式传入——不让 Context Engine 自己查 latest，
+        // 否则相同输入在不同时间可能得到不同快照，破坏 reproducibility。
+        context_package.reproducibility = ReproducibilityMeta {
+            world_version,
+            // ContextPolicy 本身无数值版本（以 name 标识），故此处留空；
+            // 策略身份已并入 retrieval_strategy 文本，保证快照可追溯到具体策略。
+            context_policy_version: None,
+            retrieval_strategy: Some(format!(
+                "relation+event+knowledge+canon (policy={})",
+                policy.name
+            )),
+            retrieved_documents: retrieved_doc_refs,
+            ..Default::default()
+        };
 
         // 4) 持久化 ContextSnapshot
         if let Err(e) = self.snapshot.save(&context_package).await {
@@ -363,4 +395,52 @@ impl ContextEngine {
         }
         Ok(None)
     }
+}
+
+/// 把检索结果转为可复现的文档引用列表。
+///
+/// 每个引用带一个「确定性 id」（由 label 派生，保证跨次生成一致）与
+/// 一份内容 sha256。hash 的是「规范化后的检索载荷」而非数据库行——
+/// 这样 DB 行更新时间的变化不会改变语义 hash，能检测检索内容漂移，
+/// 也支持未来不同的 storage backend。
+fn build_retrieved_doc_refs(r: &RetrievalResult) -> Vec<RetrievedDocRef> {
+    let mut docs = Vec::new();
+    let mut push = |label: &str, content: String| {
+        if !content.trim().is_empty() {
+            docs.push(RetrievedDocRef {
+                id: deterministic_uuid(label),
+                hash: sha256_hex(&content),
+            });
+        }
+    };
+
+    if let Ok(s) = serde_json::to_string(&r.characters) {
+        push("characters", s);
+    }
+    if let Some((e, st)) = &r.location {
+        if let Ok(s) = serde_json::to_string(&(e, st)) {
+            push("location", s);
+        }
+    }
+    if let Ok(s) = serde_json::to_string(&r.relations) {
+        push("relations", s);
+    }
+    if let Ok(s) = serde_json::to_string(&r.recent_events) {
+        push("recent_events", s);
+    }
+    push("knowledge", r.knowledge.clone());
+    push("world_rules", r.world_rules.clone());
+    if let Some(c) = &r.chapter_summary {
+        push("chapter_summary", c.clone());
+    }
+    if let Some(c) = &r.volume_summary {
+        push("volume_summary", c.clone());
+    }
+    if let Some(c) = &r.arc_summary {
+        push("arc_summary", c.clone());
+    }
+    if let Some(c) = &r.prev_scene_summary {
+        push("prev_scene_summary", c.clone());
+    }
+    docs
 }
