@@ -68,6 +68,7 @@ pub enum NarrativeNodeStatus {
 
 /// 卷的扩展属性
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct VolumeAttributes {
     pub mission: Option<String>,
     pub theme: Option<String>,
@@ -87,6 +88,7 @@ pub struct VolumeAttributes {
 
 /// 弧线的扩展属性
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ArcAttributes {
     /// 弧线目标
     pub goal: Option<String>,
@@ -108,6 +110,7 @@ pub struct ArcAttributes {
 
 /// 场景的扩展属性
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SceneAttributes {
     pub objective: Option<String>,
     pub conflict: Option<String>,
@@ -129,6 +132,7 @@ pub struct SceneAttributes {
 
 /// 节拍的扩展属性
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct BeatAttributes {
     pub action: String,
     pub emotion: Option<String>,

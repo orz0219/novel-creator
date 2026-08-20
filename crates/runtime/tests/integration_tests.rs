@@ -23,6 +23,20 @@ mod integration_tests {
         Ok(pool)
     }
 
+    // Ensure a generation_task exists for the given task_id.
+    // proposed_change.task_id FKs to generation_task(id); tests mint random task_ids.
+    async fn ensure_task(pool: &PgPool, project_id: Uuid, task_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO generation_task (id, project_id, task_type, status, created_at) \
+             VALUES ($1, $2, 'general', 'Pending', NOW()) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn create_test_project(pool: &PgPool) -> Result<Uuid> {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO project (id, name, created_at, updated_at) VALUES ($1, $2, $3, $4)")
@@ -38,15 +52,30 @@ mod integration_tests {
     async fn create_test_entity(pool: &PgPool, project_id: Uuid) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let world_id = Uuid::new_v4();
-        let entity_type_id = Uuid::new_v4();
 
-        sqlx::query("INSERT INTO entity_type (id, name, created_at, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING")
-            .bind(entity_type_id)
-            .bind("Character")
-            .bind(Utc::now())
-            .bind(Utc::now())
-            .execute(pool)
-            .await?;
+        // find-or-create entity_type "Character" (name is UNIQUE)
+        let entity_type_id = match sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM entity_type WHERE name = $1",
+        )
+        .bind("Character")
+        .fetch_optional(pool)
+        .await?
+        {
+            Some(eid) => eid,
+            None => {
+                let new_id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO entity_type (id, name, created_at, updated_at) VALUES ($1, $2, $3, $4)",
+                )
+                .bind(new_id)
+                .bind("Character")
+                .bind(Utc::now())
+                .bind(Utc::now())
+                .execute(pool)
+                .await?;
+                new_id
+            }
+        };
 
         sqlx::query("INSERT INTO world (id, project_id, name, is_main, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING")
             .bind(world_id)
@@ -87,22 +116,26 @@ mod integration_tests {
         // 创建两个 Approved 的 ProposedChange
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
+        let task_id1 = Uuid::new_v4();
+        ensure_task(&pool, project_id, task_id1).await?;
         let change1 = val_repo.create_proposed_change(
             project_id,
-            Uuid::new_v4(),
+            task_id1,
             ProposedChangeType::StateChange,
             entity_id,
             "Take damage",
             serde_json::json!({"state_key": "hp", "new_value": 80}),
         ).await?;
 
+        let task_id2 = Uuid::new_v4();
+        ensure_task(&pool, project_id, task_id2).await?;
         let change2 = val_repo.create_proposed_change(
             project_id,
-            Uuid::new_v4(),
+            task_id2,
             ProposedChangeType::StateChange,
             entity_id,
             "Heal",
-            serde_json::json!({"state_key": "hp", "new_value": 90}),
+            serde_json::json!({"state_key": "mp", "new_value": 90}),
         ).await?;
 
         // 更新状态为 Approved
@@ -123,10 +156,13 @@ mod integration_tests {
         assert_eq!(response.results.len(), 2, "Should have 2 results");
         assert_eq!(response.events.len(), 2, "Should have 2 events");
 
-        // 验证最终状态
-        let final_state = state_repo.get_current_state(project_id, entity_id, "hp").await?;
-        assert!(final_state.is_some());
-        assert_eq!(final_state.unwrap().state_value, serde_json::json!(90));
+        // 验证最终状态（两个不同 state_key 的变化都应原子地生效）
+        let final_hp = state_repo.get_current_state(project_id, entity_id, "hp").await?;
+        assert!(final_hp.is_some());
+        assert_eq!(final_hp.unwrap().state_value, serde_json::json!(80));
+        let final_mp = state_repo.get_current_state(project_id, entity_id, "mp").await?;
+        assert!(final_mp.is_some());
+        assert_eq!(final_mp.unwrap().state_value, serde_json::json!(90));
 
         // 验证 proposal 状态
         let pc1 = val_repo.get_proposed_change_by_id(change1.id).await?;
@@ -139,7 +175,7 @@ mod integration_tests {
         sqlx::query("DELETE FROM state_change WHERE project_id = $1").bind(project_id).execute(&pool).await?;
         sqlx::query("DELETE FROM current_state WHERE project_id = $1").bind(project_id).execute(&pool).await?;
         sqlx::query("DELETE FROM proposed_change WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM system_event WHERE project_id = $1").bind(project_id).execute(&pool).await?;
+        sqlx::query("DELETE FROM system_events WHERE project_id = $1").bind(project_id).execute(&pool).await?;
         sqlx::query("DELETE FROM entity WHERE project_id = $1").bind(project_id).execute(&pool).await?;
         sqlx::query("DELETE FROM world WHERE project_id = $1").bind(project_id).execute(&pool).await?;
         sqlx::query("DELETE FROM project WHERE id = $1").bind(project_id).execute(&pool).await?;
@@ -219,18 +255,22 @@ mod integration_tests {
         // 创建两个 Approved 的 ProposedChange
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
+        let task_id1 = Uuid::new_v4();
+        ensure_task(&pool, project_id, task_id1).await?;
         let change1 = val_repo.create_proposed_change(
             project_id,
-            Uuid::new_v4(),
+            task_id1,
             ProposedChangeType::StateChange,
             entity_id,
             "Change 1",
             serde_json::json!({"state_key": "hp", "new_value": 80}),
         ).await?;
 
+        let task_id2 = Uuid::new_v4();
+        ensure_task(&pool, project_id, task_id2).await?;
         let change2 = val_repo.create_proposed_change(
             project_id,
-            Uuid::new_v4(),
+            task_id2,
             ProposedChangeType::StateChange,
             entity_id,
             "Change 2",

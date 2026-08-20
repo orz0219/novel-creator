@@ -214,10 +214,14 @@ impl CanonRulePort for DbCanonRulePort {
         Ok(rows.into_iter().map(to_canon_rule).collect())
     }
     async fn get_main_world_rules_text(&self, project_id: Uuid) -> Result<Option<String>> {
-        let world_rules: Option<String> = sqlx::query_scalar("SELECT world_rules FROM world WHERE project_id = $1 AND is_main = TRUE")
-            .bind(project_id).fetch_optional(&self.pool).await
-            .context("Failed to query world rules - critical database error")?;
-        Ok(world_rules)
+        let world_rules: Option<Option<String>> = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT world_rules FROM world WHERE project_id = $1 AND is_main = TRUE"
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query world rules - critical database error")?;
+        Ok(world_rules.flatten())
     }
 }
 
@@ -287,6 +291,11 @@ async fn commit_changes(pool: &PgPool, project_id: Uuid, change_ids: &[Uuid]) ->
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let mut results = Vec::new();
     let mut event_ids = Vec::new();
+    // Intra-batch CAS guard: two changes in the *same* commit batch that target the
+    // same (entity_id, state_key) are mutually exclusive — the second one must fail
+    // so the whole transaction rolls back (last-write-wins across an atomic commit is
+    // non-deterministic and must be rejected at commit time).
+    let mut committed_state_keys: std::collections::HashSet<(Uuid, String)> = std::collections::HashSet::new();
 
     for change_id in change_ids {
         let change = crate::repos::validation_repo::ValidationRepo::get_proposed_change_by_id_for_update_tx(&mut *tx, *change_id).await?
@@ -301,47 +310,67 @@ async fn commit_changes(pool: &PgPool, project_id: Uuid, change_ids: &[Uuid]) ->
 
         let event = DomainEvent::new(DomainEventType::ProposalCommitted, project_id, Some(change.target_entity_id), serde_json::json!({"proposed_change_id": change.id, "change_type": format!("{:?}", change.change_type), "payload": change.payload}));
 
-        sqlx::query("INSERT INTO system_event (id, event_type, project_id, entity_id, data, source, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+        sqlx::query("INSERT INTO system_events (id, event_type, project_id, entity_id, data, source, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)")
             .bind(event.id).bind(format!("{:?}", event.event_type)).bind(event.project_id).bind(event.entity_id).bind(&event.data).bind(&event.metadata.source).bind(event.created_at)
             .execute(&mut *tx).await.context("Failed to persist DomainEvent")?;
 
         event_ids.push(event.id);
 
-        let payload: ChangePayload = serde_json::from_value(change.payload.clone()).unwrap_or_else(|_| ChangePayload::Custom(change.payload.clone()));
-
-        match payload {
-            ChangePayload::StateChange { state_key, new_value } => {
+        // Dispatch on the authoritative change_type (the stored JSON payload has no
+        // serde discriminator, so it cannot be deserialized into ChangePayload directly).
+        match change.change_type {
+            ProposedChangeType::StateChange => {
+                #[derive(serde::Deserialize)]
+                struct StateChangePayload { state_key: String, new_value: serde_json::Value }
+                let p: StateChangePayload = serde_json::from_value(change.payload.clone())
+                    .map_err(|e| anyhow::anyhow!("Invalid StateChange payload for {}: {}", change.id, e))?;
+                let state_key = (change.target_entity_id, p.state_key.clone());
+                if committed_state_keys.contains(&state_key) {
+                    return Err(anyhow::anyhow!(
+                        "CAS conflict in commit batch: ProposedChange {} targets state_key '{}' on entity {} which was already modified by another change in this same commit",
+                        change.id, p.state_key, change.target_entity_id
+                    ));
+                }
+                committed_state_keys.insert(state_key);
                 let entity = crate::repos::entity_repo::EntityRepo::get_by_id_with_project_tx(&mut *tx, project_id, change.target_entity_id).await?;
                 if entity.is_none() {
                     return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: target entity {} not found in project {}", change.id, change.target_entity_id, project_id));
                 }
-                let (record, new_version) = crate::repos::state_repo::StateRepo::commit_state_change_tx(&mut *tx, project_id, Some(event.id), "STATE_CHANGE", change.target_entity_id, &state_key, new_value, Some("committer")).await?;
+                let (record, new_version) = crate::repos::state_repo::StateRepo::commit_state_change_tx(&mut *tx, project_id, Some(event.id), "STATE_CHANGE", change.target_entity_id, &p.state_key, p.new_value, Some("committer")).await?;
                 let rows_affected = crate::repos::validation_repo::ValidationRepo::update_status_with_guard_tx(&mut *tx, change.id, ProposedChangeStatus::Applied, ProposedChangeStatus::Approved).await?;
                 if rows_affected == 0 {
                     return Err(anyhow::anyhow!("Concurrent modification detected for ProposedChange {}", change.id));
                 }
                 results.push(CommitResult::StateChange { record, new_version });
             }
-            ChangePayload::EntityCreate { entity_type, name, attributes } => {
-                let entity_type_obj = crate::repos::entity_repo::EntityTypeRepo::ensure_tx(&mut *tx, &entity_type, None).await?;
+            ProposedChangeType::EntityCreate => {
+                #[derive(serde::Deserialize)]
+                struct EntityCreatePayload { entity_type: String, name: String, attributes: serde_json::Value }
+                let p: EntityCreatePayload = serde_json::from_value(change.payload.clone())
+                    .map_err(|e| anyhow::anyhow!("Invalid EntityCreate payload for {}: {}", change.id, e))?;
+                let entity_type_obj = crate::repos::entity_repo::EntityTypeRepo::ensure_tx(&mut *tx, &p.entity_type, None).await?;
                 let world_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM world WHERE project_id = $1 AND is_main = TRUE LIMIT 1").bind(project_id).fetch_one(&mut *tx).await.context("No main world found for project")?;
-                let entity = crate::repos::entity_repo::EntityRepo::create_tx(&mut *tx, project_id, world_id, entity_type_obj.id, &name, None, None, attributes).await?;
+                let entity = crate::repos::entity_repo::EntityRepo::create_tx(&mut *tx, project_id, world_id, entity_type_obj.id, &p.name, None, None, p.attributes).await?;
                 let rows_affected = crate::repos::validation_repo::ValidationRepo::update_status_with_guard_tx(&mut *tx, change.id, ProposedChangeStatus::Applied, ProposedChangeStatus::Approved).await?;
                 if rows_affected == 0 {
                     return Err(anyhow::anyhow!("Concurrent modification detected for ProposedChange {}", change.id));
                 }
                 results.push(CommitResult::EntityCreated { entity_id: entity.id, entity_name: entity.name });
             }
-            ChangePayload::RelationCreate { target_entity_id, relation_type, attributes } => {
+            ProposedChangeType::RelationCreate => {
+                #[derive(serde::Deserialize)]
+                struct RelationCreatePayload { target_entity_id: Uuid, relation_type: String, attributes: serde_json::Value }
+                let p: RelationCreatePayload = serde_json::from_value(change.payload.clone())
+                    .map_err(|e| anyhow::anyhow!("Invalid RelationCreate payload for {}: {}", change.id, e))?;
                 let source = crate::repos::entity_repo::EntityRepo::get_by_id_with_project_tx(&mut *tx, project_id, change.target_entity_id).await?;
                 if source.is_none() {
                     return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: source entity {} not found in project {}", change.id, change.target_entity_id, project_id));
                 }
-                let target = crate::repos::entity_repo::EntityRepo::get_by_id_with_project_tx(&mut *tx, project_id, target_entity_id).await?;
+                let target = crate::repos::entity_repo::EntityRepo::get_by_id_with_project_tx(&mut *tx, project_id, p.target_entity_id).await?;
                 if target.is_none() {
-                    return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: target entity {} not found", change.id, target_entity_id));
+                    return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: target entity {} not found", change.id, p.target_entity_id));
                 }
-                let relation = crate::repos::entity_repo::RelationRepo::create_tx(&mut *tx, project_id, change.target_entity_id, target_entity_id, &relation_type, None, attributes).await?;
+                let relation = crate::repos::entity_repo::RelationRepo::create_tx(&mut *tx, project_id, change.target_entity_id, p.target_entity_id, &p.relation_type, None, p.attributes).await?;
                 let rows_affected = crate::repos::validation_repo::ValidationRepo::update_status_with_guard_tx(&mut *tx, change.id, ProposedChangeStatus::Applied, ProposedChangeStatus::Approved).await?;
                 if rows_affected == 0 {
                     return Err(anyhow::anyhow!("Concurrent modification detected for ProposedChange {}", change.id));

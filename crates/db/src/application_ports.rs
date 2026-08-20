@@ -176,7 +176,7 @@ impl DbNarrativeRepositoryPort {
 #[async_trait]
 impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
     async fn list_nodes(&self, project_id: Uuid) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, String, String, Option<String>, String, Option<String>, String, i32, String, String, String)> =
+        let rows: Vec<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, String, i32, String, String, String)> =
             sqlx::query_as(
                 "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE project_id = $1 AND status != 'Deleted' ORDER BY sort_order"
             )
@@ -199,7 +199,7 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
     }
 
     async fn get_node(&self, id: Uuid) -> Result<Option<Value>> {
-        let row: Option<(String, String, String, String, Option<String>, String, Option<String>, String, i32, String, String, String)> =
+        let row: Option<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, String, i32, String, String, String)> =
             sqlx::query_as(
                 "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE id = $1"
             )
@@ -228,7 +228,7 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
         attributes: Value,
     ) -> Result<Value> {
         let id = Uuid::new_v4();
-        let world_id: (String,) = sqlx::query_as("SELECT id FROM world WHERE project_id = $1 LIMIT 1")
+        let world_id: (Uuid,) = sqlx::query_as("SELECT id FROM world WHERE project_id = $1 LIMIT 1")
             .bind(project_id)
             .fetch_one(&self.pool)
             .await
@@ -1307,7 +1307,7 @@ impl RuleRepositoryPort for DbRuleRepositoryPort {
         enforcement: Option<&str>,
     ) -> Result<Value> {
         let id = Uuid::new_v4();
-        let project_id: (String,) = sqlx::query_as("SELECT project_id FROM world WHERE id = $1")
+        let project_id: (Uuid,) = sqlx::query_as("SELECT project_id FROM world WHERE id = $1")
             .bind(world_id)
             .fetch_one(&self.pool)
             .await
@@ -1358,7 +1358,7 @@ impl RuleRepositoryPort for DbRuleRepositoryPort {
         rule_content: Option<&str>,
         rule_level: Option<&str>,
     ) -> Result<Value> {
-        let maybe_project_id: Option<(String,)> =
+        let maybe_project_id: Option<(Uuid,)> =
             sqlx::query_as("SELECT project_id FROM canon_rule WHERE id = $1")
                 .bind(id)
                 .fetch_optional(&self.pool)
@@ -1756,12 +1756,12 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         description: Option<&str>,
     ) -> Result<Value> {
         let id = Uuid::new_v4();
-        let world: (String,) = sqlx::query_as("SELECT project_id FROM world WHERE id = $1")
+        let world: (Uuid,) = sqlx::query_as("SELECT project_id FROM world WHERE id = $1")
             .bind(world_id)
             .fetch_one(&self.pool)
             .await
             .context("Failed to resolve project for world")?;
-        let etype: (String,) = sqlx::query_as("SELECT id FROM entity_type WHERE name = $1")
+        let etype: (Uuid,) = sqlx::query_as("SELECT id FROM entity_type WHERE name = $1")
             .bind(entity_type_name)
             .fetch_one(&self.pool)
             .await
@@ -1831,7 +1831,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
 
     async fn delete_entity(&self, id: Uuid) -> Result<Value> {
         // 软删除：仅标记 Deleted；RETURNING project_id 同时保证 project 作用域。
-        let maybe_project_id: Option<(String,)> = sqlx::query_as(
+        let maybe_project_id: Option<(Uuid,)> = sqlx::query_as(
             "UPDATE entity SET status = 'Deleted', version = version + 1, updated_at = NOW() \
              WHERE id = $1 AND status = 'Active' \
              RETURNING project_id",
@@ -1882,7 +1882,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         description: Option<&str>,
     ) -> Result<Value> {
         // 校验 source / target 实体存在且同属一个 project，避免跨项目关系。
-        let rows: Vec<(String,)> = sqlx::query_as(
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
             "SELECT project_id FROM entity WHERE id = $1 OR id = $2",
         )
         .bind(source_entity_id)

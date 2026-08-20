@@ -390,7 +390,7 @@ async fn apply(
                 serde_json::json!({ "state_key": state_key }),
             );
             sqlx::query(
-                "INSERT INTO system_event (id, event_type, project_id, entity_id, data, source, created_at) \
+                "INSERT INTO system_events (id, event_type, project_id, entity_id, data, source, created_at) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
             .bind(event.id)
@@ -639,7 +639,7 @@ async fn record_event(
 ) -> Result<(), MutationError> {
     let event = DomainEvent::new(etype, project_id, entity_id, data);
     sqlx::query(
-        "INSERT INTO system_event (id, event_type, project_id, entity_id, data, source, created_at) \
+        "INSERT INTO system_events (id, event_type, project_id, entity_id, data, source, created_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(event.id)

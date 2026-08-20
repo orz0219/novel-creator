@@ -69,20 +69,51 @@ mod tests {
         Ok(id)
     }
 
+    // Ensure a generation_task (and its required skill) exists for the given task_id.
+    // proposed_change.task_id and validation_run.task_id both FK to generation_task(id);
+    // the tests mint random task_ids, so we must create the referenced rows or the
+    // insert violates the foreign key.
+    async fn ensure_task(pool: &PgPool, project_id: Uuid, task_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO generation_task (id, project_id, task_type, status, created_at) \
+             VALUES ($1, $2, 'general', 'Pending', NOW()) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     // Helper to create a test entity
     async fn create_test_entity(pool: &PgPool, project_id: Uuid) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let world_id = Uuid::new_v4();
-        let entity_type_id = Uuid::new_v4();
-
-        // Ensure entity_type exists
-        sqlx::query("INSERT INTO entity_type (id, name, created_at, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING")
-            .bind(entity_type_id)
-            .bind("Character")
-            .bind(Utc::now())
-            .bind(Utc::now())
-            .execute(pool)
-            .await?;
+        // Ensure entity_type "Character" exists. entity_type.name is UNIQUE,
+        // so reuse the existing row when present (find-or-create) instead of
+        // blindly INSERTing (which collides under concurrent test execution).
+        let entity_type_id = match sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM entity_type WHERE name = $1",
+        )
+        .bind("Character")
+        .fetch_optional(pool)
+        .await?
+        {
+            Some(id) => id,
+            None => {
+                let new_id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO entity_type (id, name, created_at, updated_at) VALUES ($1, $2, $3, $4)",
+                )
+                .bind(new_id)
+                .bind("Character")
+                .bind(Utc::now())
+                .bind(Utc::now())
+                .execute(pool)
+                .await?;
+                new_id
+            }
+        };
 
         // Ensure world exists
         sqlx::query("INSERT INTO world (id, project_id, name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING")
@@ -120,9 +151,11 @@ mod tests {
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
         // P1-2: 先在 DB 中创建 ProposedChange，然后直接更新状态为 Rejected
+        let task_id = Uuid::new_v4();
+        ensure_task(&pool, project_id, task_id).await?;
         let change = val_repo.create_proposed_change(
             project_id,
-            Uuid::new_v4(),
+            task_id,
             ProposedChangeType::StateChange,
             entity_id,
             "Test change",
@@ -155,9 +188,11 @@ mod tests {
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
         // P1-2: 先在 DB 中创建 ProposedChange（状态为 Pending）
+        let task_id = Uuid::new_v4();
+        ensure_task(&pool, project_id, task_id).await?;
         let change = val_repo.create_proposed_change(
             project_id,
-            Uuid::new_v4(),
+            task_id,
             ProposedChangeType::StateChange,
             entity_id,
             "Test change",
@@ -188,9 +223,11 @@ mod tests {
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
         // P1-2: 先在 DB 中创建 ProposedChange，然后更新状态为 Approved
+        let task_id = Uuid::new_v4();
+        ensure_task(&pool, project_id, task_id).await?;
         let change = val_repo.create_proposed_change(
             project_id,
-            Uuid::new_v4(),
+            task_id,
             ProposedChangeType::StateChange,
             entity_id,
             "Move to forest",
@@ -356,10 +393,12 @@ mod tests {
         // Create multiple proposed changes
         let mut changes = Vec::new();
         for entity_id in &entity_ids {
+            let task_id = Uuid::new_v4();
+            ensure_task(&pool, project_id, task_id).await?;
             changes.push(ProposedChange {
                 id: Uuid::new_v4(),
                 project_id,
-                task_id: Uuid::new_v4(),
+                task_id,
                 change_type: ProposedChangeType::StateChange,
                 target_entity_id: *entity_id,
                 description: "Test change".to_string(),
@@ -372,7 +411,9 @@ mod tests {
 
         // Validate - should use batch queries
         let validator = build_validator(pool.clone());
-        let run = validator.validate_changes(project_id, Uuid::new_v4(), &changes).await?;
+        let run_task_id = Uuid::new_v4();
+        ensure_task(&pool, project_id, run_task_id).await?;
+        let run = validator.validate_changes(project_id, run_task_id, &changes).await?;
 
         // All should be approved (no canon rules, valid entities)
         assert_eq!(run.changes_approved, 5);
@@ -419,10 +460,12 @@ mod tests {
         let validator = build_validator(pool.clone());
 
         // Test 1: element = fire (should be rejected)
+        let fire_task_id = Uuid::new_v4();
+        ensure_task(&pool, project_id, fire_task_id).await?;
         let fire_change = ProposedChange {
             id: Uuid::new_v4(),
             project_id,
-            task_id: Uuid::new_v4(),
+            task_id: fire_task_id,
             change_type: ProposedChangeType::StateChange,
             target_entity_id: entity_id,
             description: "Set fire element".to_string(),
@@ -432,14 +475,23 @@ mod tests {
             resolved_at: None,
         };
 
-        let run = validator.validate_changes(project_id, Uuid::new_v4(), &[fire_change]).await?;
+        let fire_run_task_id = Uuid::new_v4();
+        ensure_task(&pool, project_id, fire_run_task_id).await?;
+        // Persist the in-memory proposed change so validation issues can reference it.
+        sqlx::query("INSERT INTO proposed_change (id, project_id, task_id, change_type, target_entity_id, description, payload, status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'Draft',$8) ON CONFLICT (id) DO NOTHING")
+            .bind(fire_change.id).bind(project_id).bind(fire_task_id).bind("StateChange")
+            .bind(entity_id).bind(&fire_change.description).bind(&fire_change.payload).bind(fire_change.created_at)
+            .execute(&pool).await?;
+        let run = validator.validate_changes(project_id, fire_run_task_id, &[fire_change]).await?;
         assert_eq!(run.changes_rejected, 1, "Fire element should be rejected");
 
         // Test 2: element = water (should be approved)
+        let water_task_id = Uuid::new_v4();
+        ensure_task(&pool, project_id, water_task_id).await?;
         let water_change = ProposedChange {
             id: Uuid::new_v4(),
             project_id,
-            task_id: Uuid::new_v4(),
+            task_id: water_task_id,
             change_type: ProposedChangeType::StateChange,
             target_entity_id: entity_id,
             description: "Set water element".to_string(),
@@ -449,7 +501,14 @@ mod tests {
             resolved_at: None,
         };
 
-        let run = validator.validate_changes(project_id, Uuid::new_v4(), &[water_change]).await?;
+        let water_run_task_id = Uuid::new_v4();
+        ensure_task(&pool, project_id, water_run_task_id).await?;
+        // Persist the in-memory proposed change so validation issues can reference it.
+        sqlx::query("INSERT INTO proposed_change (id, project_id, task_id, change_type, target_entity_id, description, payload, status, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'Draft',$8) ON CONFLICT (id) DO NOTHING")
+            .bind(water_change.id).bind(project_id).bind(water_task_id).bind("StateChange")
+            .bind(entity_id).bind(&water_change.description).bind(&water_change.payload).bind(water_change.created_at)
+            .execute(&pool).await?;
+        let run = validator.validate_changes(project_id, water_run_task_id, &[water_change]).await?;
         assert_eq!(run.changes_approved, 1, "Water element should be approved");
 
         Ok(())

@@ -1674,7 +1674,10 @@ CREATE INDEX idx_outbox_created ON event_outbox(created_at);
 -- ============================================================
 -- MIGRATION TRACKING
 -- ============================================================
-CREATE TABLE _migrations (
+-- 注意：migration runner（crates/db/src/migration.rs）在应用任何迁移前
+-- 已用 `CREATE TABLE IF NOT EXISTS _migrations` 自建追踪表。此处仅做幂等兜底，
+-- 使用 IF NOT EXISTS 避免全新数据库首次迁移时与 runner 的建表语句冲突。
+CREATE TABLE IF NOT EXISTS _migrations (
     id SERIAL PRIMARY KEY,
     name VARCHAR NOT NULL UNIQUE,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

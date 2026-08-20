@@ -50,6 +50,21 @@ mod e2e_tests {
         db
     }
 
+    /// 确保 generation_task 行存在（proposed_change.task_id 的外键目标）。
+    /// generation_task 没有 skill_id 列，只能填 task_type / status。
+    async fn ensure_task(pool: &sqlx::PgPool, project_id: uuid::Uuid, task_id: uuid::Uuid) {
+        sqlx::query(
+            "INSERT INTO generation_task (id, project_id, task_type, status, created_at) \
+             VALUES ($1, $2, 'general', 'completed', NOW()) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     /// 测试完整的 World -> Narrative -> Context -> Validation 流水线
     #[tokio::test]
     async fn test_full_pipeline() {
@@ -123,6 +138,7 @@ mod e2e_tests {
         let validator = build_validator(pool.clone());
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
         let task_id = uuid::Uuid::new_v4();
+        ensure_task(&pool, project.id, task_id).await;
         let change = val_repo.create_proposed_change(project.id, task_id, ProposedChangeType::StateChange, lin_fan.id, "Enter city", serde_json::json!({"state_key": "location", "new_value": "Black Stone City"})).await.unwrap();
         let run = validator.validate_changes(project.id, task_id, &[change.clone()]).await.unwrap();
         assert_eq!(run.changes_approved, 1);

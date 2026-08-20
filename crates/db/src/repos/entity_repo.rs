@@ -68,10 +68,11 @@ impl EntityTypeRepo {
     }
 
     pub async fn ensure(&self, name: &str, description: Option<&str>) -> Result<EntityType> {
-        if let Some(existing) = self.get_by_name(name).await? {
-            return Ok(existing);
-        }
-        self.create(name, description).await
+        // 原子地 find-or-create：用 ON CONFLICT(name) 避免并发 check-then-insert 竞争
+        // （entity_type.name 为 UNIQUE，多个调用方（如并发集成测试）同时 ensure 同一
+        // 名称时会触发 duplicate key）。原先的 check-then-insert 实现存在竞态，已改为
+        // 复用 ensure_tx 的幂等路径。
+        Self::ensure_tx(&self.pool, name, description).await
     }
 
     /// Transactional ensure: atomically insert-or-return using ON CONFLICT.

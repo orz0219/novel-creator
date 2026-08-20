@@ -312,8 +312,8 @@ async fn test_e2e_contract_validation() {
     // 验证契约
     let validator = runtime::contract_validator::ContractValidator::new();
 
-    // 通过的草稿
-    let draft_pass = "林凡进入黑市，遇到了老板，了解了黑市的情况。他获得了通行资格。";
+    // 通过的草稿（需覆盖契约要求的必需事件/事实/读者学习/主角学习/世界变化）
+    let draft_pass = "林凡进入黑市，遇到了老板，了解了黑市的情况。黑市存在王家眼线，王家正在调查自己。他获得了通行资格。";
     let result_pass = validator.validate(&contract, draft_pass).unwrap();
     assert!(result_pass.passed);
 
