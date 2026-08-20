@@ -211,7 +211,7 @@ impl EntityRepo {
     /// Returns None if entity doesn't exist OR doesn't belong to the project.
     pub async fn get_by_id_with_project(&self, project_id: Uuid, id: Uuid) -> Result<Option<Entity>> {
         let row = sqlx::query_as::<_, EntityRow>(
-            "SELECT id, project_id, world_id, entity_type_id, name, summary, description,              attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at              FROM entity WHERE id = $1 AND project_id = $2",
+            "SELECT id, project_id, world_id, entity_type_id, name, summary, description,              attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at              FROM entity WHERE id = $1 AND project_id = $2 AND status != 'Deleted'",
         )
         .bind(id)
         .bind(project_id)
@@ -226,7 +226,7 @@ impl EntityRepo {
         let rows = sqlx::query_as::<_, EntityRow>(
             "SELECT id, project_id, world_id, entity_type_id, name, summary, description, \
              attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at \
-             FROM entity WHERE project_id = $1 ORDER BY name",
+             FROM entity WHERE project_id = $1 AND status != 'Deleted' ORDER BY name",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -240,7 +240,7 @@ impl EntityRepo {
         let rows = sqlx::query_as::<_, EntityRow>(
             "SELECT id, project_id, world_id, entity_type_id, name, summary, description, \
              attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at \
-             FROM entity WHERE project_id = $1 AND entity_type_id = $2 ORDER BY name",
+             FROM entity WHERE project_id = $1 AND entity_type_id = $2 AND status != 'Deleted' ORDER BY name",
         )
         .bind(project_id)
         .bind(entity_type_id)
@@ -295,13 +295,14 @@ impl EntityRepo {
         Ok(())
     }
 
-    pub async fn delete(&self, project_id: Uuid, id: Uuid) -> Result<bool> {
+    pub async fn delete(&self, project_id: Uuid, id: Uuid, expected_version: i32) -> Result<bool> {
         let result = sqlx::query(
-            "UPDATE entity SET status = 'Deleted', updated_at = NOW() \
-             WHERE id = $1 AND project_id = $2 AND status != 'Deleted'",
+            "UPDATE entity SET status = 'Deleted', version = version + 1, updated_at = NOW() \
+             WHERE id = $1 AND project_id = $2 AND version = $3 AND status = 'Active'",
         )
         .bind(id)
         .bind(project_id)
+        .bind(expected_version)
         .execute(&self.pool)
         .await
         .context("Failed to soft-delete entity")?;
@@ -369,7 +370,7 @@ impl EntityRepo {
         let row = sqlx::query_as::<_, EntityRow>(
             "SELECT id, project_id, world_id, entity_type_id, name, summary, description, \
              attributes, version, created_by, updated_by, source_generation_id, created_at, updated_at \
-             FROM entity WHERE id = $1 AND project_id = $2",
+             FROM entity WHERE id = $1 AND project_id = $2 AND status != 'Deleted'",
         )
         .bind(id)
         .bind(project_id)
@@ -410,13 +411,15 @@ impl EntityRepo {
         executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
         project_id: Uuid,
         id: Uuid,
+        expected_version: i32,
     ) -> Result<bool> {
         let result = sqlx::query(
-            "UPDATE entity SET status = 'Deleted', updated_at = NOW() \
-             WHERE id = $1 AND project_id = $2 AND status != 'Deleted'",
+            "UPDATE entity SET status = 'Deleted', version = version + 1, updated_at = NOW() \
+             WHERE id = $1 AND project_id = $2 AND version = $3 AND status = 'Active'",
         )
         .bind(id)
         .bind(project_id)
+        .bind(expected_version)
         .execute(executor)
         .await
         .context("Failed to soft-delete entity")?;
@@ -534,18 +537,34 @@ impl RelationRepo {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    pub async fn delete(&self, id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM relation WHERE id = $1")
+    pub async fn delete(&self, project_id: Uuid, id: Uuid) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM relation WHERE id = $1 AND project_id = $2")
             .bind(id)
+            .bind(project_id)
             .execute(&self.pool)
             .await
             .context("Failed to delete relation")?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     // ============================================================
     // Transactional methods
     // ============================================================
+
+    /// Transactional delete relation with project isolation.
+    pub async fn delete_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        id: Uuid,
+    ) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM relation WHERE id = $1 AND project_id = $2")
+            .bind(id)
+            .bind(project_id)
+            .execute(executor)
+            .await
+            .context("Failed to delete relation")?;
+        Ok(result.rows_affected() > 0)
+    }
 
     /// Transactional create relation.
     pub async fn create_tx<'c>(
@@ -739,6 +758,50 @@ impl FactRepo {
             .await
             .context("Failed to delete fact")?;
         Ok(())
+    }
+
+    /// Transactional create fact with all fact_entity associations atomically.
+    pub async fn create_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres> + Copy,
+        project_id: Uuid,
+        content: &str,
+        category: Option<&str>,
+        certainty: &str,
+        related_entity_ids: &[Uuid],
+    ) -> Result<Fact> {
+        let id = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO fact (id, project_id, content, category, certainty, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(content)
+        .bind(category.unwrap_or(""))
+        .bind(certainty)
+        .execute(executor)
+        .await
+        .context("Failed to create fact")?;
+
+        for entity_id in related_entity_ids {
+            sqlx::query("INSERT INTO fact_entity (id, fact_id, entity_id) VALUES (gen_random_uuid(), $1, $2)")
+                .bind(id)
+                .bind(entity_id)
+                .execute(executor)
+                .await
+                .context("Failed to create fact_entity")?;
+        }
+
+        Ok(Fact {
+            id,
+            project_id,
+            content: content.to_string(),
+            category: category.map(|s| s.to_string()),
+            certainty: domain::canon::FactCertainty::from_str(certainty),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
     }
 }
 

@@ -80,3 +80,14 @@ pub struct RevelationTarget {
     pub subject_id: Option<Uuid>,
     pub knowledge_level: KnowledgeLevel,
 }
+/// A fact a character actually knows, joined with fact content.
+///
+/// Returned by the knowledge retrieval port so the Context Engine can render
+/// what a point-of-view character genuinely knows (vs. world truth).
+pub struct CharacterKnowledgeItem {
+    pub fact_content: String,
+    pub fact_category: Option<String>,
+    pub fact_certainty: String,
+    pub knowledge_level: KnowledgeLevel,
+    pub source: Option<String>,
+}

@@ -1,7 +1,6 @@
 //! Contract Validator - Narrative Contract 验证
 
 use anyhow::Result;
-use db::connection::Database;
 use domain::*;
 
 /// 合约验证结果
@@ -18,14 +17,13 @@ pub struct ContractValidationResult {
     pub issues: Vec<String>,
 }
 
-#[allow(dead_code)]
-pub struct ContractValidator<'a> {
-    db: &'a Database,
-}
+/// Contract Validator. Pure function: validates a draft against a contract.
+/// No database access is required.
+pub struct ContractValidator;
 
-impl<'a> ContractValidator<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+impl ContractValidator {
+    pub fn new() -> Self {
+        Self
     }
 
     /// 验证场景是否满足契约

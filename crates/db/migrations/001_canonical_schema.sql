@@ -67,7 +67,7 @@ CREATE TABLE entity_type (
 CREATE TABLE entity (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id UUID NOT NULL REFERENCES project(id),
-    world_id UUID NOT NULL,
+    world_id UUID NOT NULL REFERENCES world(id),
     entity_type_id UUID NOT NULL REFERENCES entity_type(id),
     name VARCHAR NOT NULL,
     summary TEXT,
@@ -225,7 +225,8 @@ CREATE TABLE resource_state (
     production_rate DOUBLE PRECISION,
     controlled_by_entity_id UUID REFERENCES entity(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(project_id, location_id, resource_name)
 );
 
 CREATE INDEX idx_resource_location ON resource_state(location_id);

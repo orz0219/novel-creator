@@ -11,6 +11,11 @@ mod integration_tests {
     use sqlx::PgPool;
     use uuid::Uuid;
 
+
+    fn build_state_committer(pool: sqlx::PgPool) -> runtime::state_committer::DbStateCommitter {
+        runtime::state_committer::DbStateCommitter::new(std::sync::Arc::new(db::runtime_ports::DbStateCommitterPort::new(pool)))
+    }
+
     async fn test_pool() -> Result<PgPool> {
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://novel:novel_pass@localhost:5432/novel_engine".to_string());
@@ -108,7 +113,7 @@ mod integration_tests {
             .await?;
 
         // 执行 commit
-        let state_committer = runtime::state_committer::DbStateCommitter::new(pool.clone());
+        let state_committer = build_state_committer(pool.clone());
         let result = state_committer.commit(project_id, &[change1.id, change2.id]).await;
 
         // 验证结果
@@ -241,7 +246,7 @@ mod integration_tests {
 
         // 模拟并发：手动修改状态版本
         // change1 会成功，change2 应该因为 CAS 冲突而失败
-        let state_committer = runtime::state_committer::DbStateCommitter::new(pool.clone());
+        let state_committer = build_state_committer(pool.clone());
         let result = state_committer.commit(project_id, &[change1.id, change2.id]).await;
 
         // 由于两个 change 都修改同一个 state_key，第二个应该因为 CAS 冲突失败

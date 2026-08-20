@@ -5,7 +5,7 @@
 //! 这些是 runtime 层的核心接口。
 
 use anyhow::Result;
-use crate::*;
+use domain::*;
 use uuid::Uuid;
 
 /// StateChangeExtractor - 从 LLM 输出中提取状态变更

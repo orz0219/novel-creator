@@ -4,7 +4,9 @@
 //! 依赖 domain，不依赖 infrastructure (db)。
 //! 这确保了将来换 LLM provider 或换数据库时，runtime 层不受影响。
 
+pub mod context;
 pub mod context_engine;
+pub mod retrieval;
 pub mod validator;
 pub mod state_committer;
 pub mod contract_validator;

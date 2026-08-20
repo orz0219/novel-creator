@@ -12,6 +12,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "domain",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -38,10 +51,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "db",
  "domain",
  "serde_json",
- "sqlx",
  "tracing",
  "uuid",
 ]
@@ -273,7 +284,9 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
+ "ai",
  "anyhow",
+ "async-trait",
  "chrono",
  "domain",
  "dotenvy",
@@ -970,6 +983,7 @@ dependencies = [
 name = "narrative-engine"
 version = "0.1.0"
 dependencies = [
+ "ai",
  "anyhow",
  "application",
  "axum",
@@ -1262,6 +1276,7 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "ai",
  "anyhow",
  "application",
  "chrono",
@@ -1269,6 +1284,7 @@ dependencies = [
  "domain",
  "serde_json",
  "sqlx",
+ "tokio",
  "tracing",
  "uuid",
 ]

@@ -10,16 +10,6 @@ use uuid::Uuid;
 
 use crate::ser;
 
-/// A fact joined with its knowledge state - used for context assembly.
-#[derive(Debug, Clone)]
-pub struct CharacterKnowledgeItem {
-    pub fact_content: String,
-    pub fact_category: Option<String>,
-    pub fact_certainty: String,
-    pub knowledge_level: KnowledgeLevel,
-    pub source: Option<String>,
-}
-
 pub struct KnowledgeRepo {
     pool: PgPool,
 }
@@ -128,7 +118,7 @@ impl KnowledgeRepo {
         &self,
         character_id: Uuid,
         project_id: Uuid,
-    ) -> Result<Vec<CharacterKnowledgeItem>> {
+    ) -> Result<Vec<domain::knowledge::CharacterKnowledgeItem>> {
         let rows = sqlx::query_as::<_, KnownFactRow>(
             "SELECT f.content, f.category, COALESCE(f.certainty, 'CANON'), ks.knowledge_level, ks.source \
              FROM knowledge_state ks \
@@ -145,7 +135,16 @@ impl KnowledgeRepo {
         .await
         .context("Failed to query known facts")?;
 
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| domain::knowledge::CharacterKnowledgeItem {
+                fact_content: r.content,
+                fact_category: r.category,
+                fact_certainty: r.certainty,
+                knowledge_level: ser::parse_knowledge_level(&r.knowledge_level),
+                source: r.source,
+            })
+            .collect())
     }
 
     pub async fn create_revelation(
@@ -249,14 +248,4 @@ struct KnownFactRow {
     source: Option<String>,
 }
 
-impl From<KnownFactRow> for CharacterKnowledgeItem {
-    fn from(r: KnownFactRow) -> Self {
-        CharacterKnowledgeItem {
-            fact_content: r.content,
-            fact_category: r.category,
-            fact_certainty: r.certainty,
-            knowledge_level: ser::parse_knowledge_level(&r.knowledge_level),
-            source: r.source,
-        }
-    }
-}
+

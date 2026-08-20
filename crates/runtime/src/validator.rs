@@ -6,24 +6,41 @@
 //!
 //! 性能要求：批量查询，避免 N+1 Query。
 
-use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use db::repos::{approval_repo, entity_repo, validation_repo};
+use anyhow::Result;
+use chrono::Utc;
 use domain::*;
-use sqlx::PgPool;
+use domain::ports::*;
+use std::sync::Arc;
 use uuid::Uuid;
 
-/// Validator - 变更验证器
-///
-/// 只负责验证 ProposedChange 的合规性。
+/// Ports required by the Validator. Injected at the composition root.
+pub struct ValidatorDeps {
+    pub entity: Arc<dyn EntityPort>,
+    pub validation: Arc<dyn ValidationPort>,
+    pub approval: Arc<dyn ApprovalPort>,
+    pub canon: Arc<dyn CanonRulePort>,
+    pub proposed_change: Arc<dyn ProposedChangeQueryPort>,
+}
+
+/// Validator - 变更验证器。只负责验证 ProposedChange 的合规性。
 /// 不负责 state commit - 那是 StateCommitter 的职责。
 pub struct Validator {
-    pool: PgPool,
+    entity: Arc<dyn EntityPort>,
+    validation: Arc<dyn ValidationPort>,
+    approval: Arc<dyn ApprovalPort>,
+    canon: Arc<dyn CanonRulePort>,
+    proposed_change: Arc<dyn ProposedChangeQueryPort>,
 }
 
 impl Validator {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(deps: ValidatorDeps) -> Self {
+        Self {
+            entity: deps.entity,
+            validation: deps.validation,
+            approval: deps.approval,
+            canon: deps.canon,
+            proposed_change: deps.proposed_change,
+        }
     }
 
     /// 验证一批 ProposedChange
@@ -35,25 +52,19 @@ impl Validator {
         task_id: Uuid,
         changes: &[ProposedChange],
     ) -> Result<ValidationRun> {
-        let val_repo = validation_repo::ValidationRepo::new(self.pool.clone());
-        let entity_repo = entity_repo::EntityRepo::new(self.pool.clone());
-
-        // ============================================================
         // 批量查询：收集所有 entity_ids，一次加载
-        // ============================================================
         let entity_ids: Vec<Uuid> = changes.iter().map(|c| c.target_entity_id).collect();
-        let entities = entity_repo.list_by_ids(project_id, &entity_ids).await?;
+        let entities = self.entity.list_entities_by_ids(project_id, &entity_ids).await?;
         let entity_map: std::collections::HashMap<Uuid, Entity> = entities.into_iter().map(|e| (e.id, e)).collect();
 
         // 批量加载 Canon Rules
         let canon_rules = self.load_canon_rules(project_id).await?;
 
-        let mut run = val_repo.create_validation_run(project_id, task_id).await?;
+        let mut run = self.validation.create_validation_run(project_id, task_id).await?;
         let mut approved = 0;
         let mut rejected = 0;
 
         for change in changes {
-            // 从内存 map 查找 entity，避免数据库查询
             let entity = entity_map.get(&change.target_entity_id);
             let issues = self.validate_single_change(change, entity, &canon_rules).await?;
 
@@ -61,15 +72,14 @@ impl Validator {
             let has_warning = issues.iter().any(|i| i.severity == IssueSeverity::Warning);
 
             if has_critical {
-                val_repo.update_status(change.id, ProposedChangeStatus::Rejected).await?;
+                self.validation.update_status(change.id, ProposedChangeStatus::Rejected).await?;
                 rejected += 1;
                 for issue in &issues {
-                    val_repo.create_issue(run.id, change.id, issue.issue_type.clone(), issue.severity.clone(), &issue.message, issue.suggestion.as_deref()).await?;
+                    self.validation.create_issue(run.id, change.id, issue.issue_type.clone(), issue.severity.clone(), &issue.message, issue.suggestion.as_deref()).await?;
                 }
             } else if has_warning {
-                val_repo.update_status(change.id, ProposedChangeStatus::PendingApproval).await?;
-                let app_repo = approval_repo::ApprovalRepo::new(self.pool.clone());
-                let _ = app_repo.create(
+                self.validation.update_status(change.id, ProposedChangeStatus::PendingApproval).await?;
+                let _ = self.approval.create(
                     change.project_id,
                     ApprovalTargetType::Entity,
                     change.target_entity_id,
@@ -82,10 +92,10 @@ impl Validator {
                     }),
                 ).await;
                 for issue in &issues {
-                    val_repo.create_issue(run.id, change.id, issue.issue_type.clone(), issue.severity.clone(), &issue.message, issue.suggestion.as_deref()).await?;
+                    self.validation.create_issue(run.id, change.id, issue.issue_type.clone(), issue.severity.clone(), &issue.message, issue.suggestion.as_deref()).await?;
                 }
             } else {
-                val_repo.update_status(change.id, ProposedChangeStatus::Approved).await?;
+                self.validation.update_status(change.id, ProposedChangeStatus::Approved).await?;
                 approved += 1;
             }
         }
@@ -95,7 +105,7 @@ impl Validator {
         run.changes_rejected = rejected;
         run.status = ValidationStatus::Completed;
         run.completed_at = Some(Utc::now());
-        val_repo.update_validation_run(&run).await?;
+        self.validation.update_validation_run(&run).await?;
 
         tracing::info!("Validation complete: {} validated, {} approved, {} rejected", changes.len(), approved, rejected);
         Ok(run)
@@ -169,18 +179,8 @@ impl Validator {
     }
 
     /// 批量加载 Canon Rules
-    async fn load_canon_rules(&self, project_id: Uuid) -> Result<Vec<CanonRule>> {
-        let rows = sqlx::query_as::<_, CanonRuleRow>(
-            "SELECT id, project_id, world_id, rule_level, rule_content, affected_scope, enforcement, constraints, source, created_at, updated_at \
-             FROM canon_rule WHERE project_id = $1"
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        // P2-3: Database errors must be propagated, not silently converted to empty data
-        .context("Failed to load canon rules - this is a critical database error")?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        async fn load_canon_rules(&self, project_id: Uuid) -> Result<Vec<CanonRule>> {
+        self.canon.list_canon_rules(project_id).await
     }
 
     /// 结构化 Canon Rule 验证
@@ -298,85 +298,11 @@ impl Validator {
     }
 
     /// 列出已批准的变更
-    pub async fn list_approved_changes(&self, project_id: Uuid, task_id: Uuid) -> Result<Vec<ProposedChange>> {
-        let rows = sqlx::query_as::<_, ProposedChangeRow>(
-            "SELECT id, project_id, task_id, change_type, target_entity_id, description, payload, status, created_at, resolved_at \
-             FROM proposed_change WHERE project_id = $1 AND task_id = $2 AND status = 'Approved' ORDER BY created_at",
-        )
-        .bind(project_id)
-        .bind(task_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("Failed to query approved changes")?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        pub async fn list_approved_changes(&self, project_id: Uuid, task_id: Uuid) -> Result<Vec<ProposedChange>> {
+        self.proposed_change.list_approved_changes(project_id, task_id).await
     }
 }
 
 // ============================================================
 // Row types
 // ============================================================
-
-#[derive(sqlx::FromRow)]
-struct ProposedChangeRow {
-    id: Uuid,
-    project_id: Uuid,
-    task_id: Uuid,
-    change_type: String,
-    target_entity_id: Uuid,
-    description: String,
-    payload: Option<serde_json::Value>,
-    status: String,
-    created_at: DateTime<Utc>,
-    resolved_at: Option<DateTime<Utc>>,
-}
-
-impl From<ProposedChangeRow> for ProposedChange {
-    fn from(r: ProposedChangeRow) -> Self {
-        ProposedChange {
-            id: r.id,
-            project_id: r.project_id,
-            task_id: r.task_id,
-            change_type: db::ser::parse_proposed_change_type(&r.change_type),
-            target_entity_id: r.target_entity_id,
-            description: r.description,
-            payload: r.payload.unwrap_or_default(),
-            status: db::ser::parse_proposed_change_status(&r.status),
-            created_at: r.created_at,
-            resolved_at: r.resolved_at,
-        }
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct CanonRuleRow {
-    id: Uuid,
-    project_id: Uuid,
-    world_id: Uuid,
-    rule_level: String,
-    rule_content: String,
-    affected_scope: String,
-    enforcement: String,
-    constraints: Option<serde_json::Value>,
-    source: Option<String>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-impl From<CanonRuleRow> for CanonRule {
-    fn from(r: CanonRuleRow) -> Self {
-        CanonRule {
-            id: r.id,
-            project_id: r.project_id,
-            world_id: r.world_id,
-            rule_level: RuleLevel::from_str(&r.rule_level),
-            rule_content: r.rule_content,
-            affected_scope: r.affected_scope,
-            enforcement: EnforcementAction::from_str(&r.enforcement),
-            constraints: r.constraints.unwrap_or_default(),
-            source: r.source,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }
-    }
-}

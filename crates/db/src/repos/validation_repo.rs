@@ -228,6 +228,23 @@ impl ValidationRepo {
         Ok(row.map(|r| r.into()))
     }
 
+    /// Transaction-aware version with FOR UPDATE row lock.
+    /// Prevents concurrent modification of the same proposal during commit.
+    pub async fn get_proposed_change_by_id_for_update_tx(
+        conn: &mut PgConnection,
+        change_id: Uuid,
+    ) -> Result<Option<ProposedChange>> {
+        let row = sqlx::query_as::<_, ProposedChangeRow>(
+            "SELECT id, project_id, task_id, change_type, target_entity_id, description, payload, status, created_at, resolved_at FROM proposed_change WHERE id = $1 FOR UPDATE",
+        )
+        .bind(change_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("Failed to query proposed change with FOR UPDATE")?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
     pub async fn list_pending(&self, project_id: Uuid) -> Result<Vec<ProposedChange>> {
         let rows = sqlx::query_as::<_, ProposedChangeRow>(
             "SELECT id, project_id, task_id, change_type, target_entity_id, description, payload, status, created_at, resolved_at \

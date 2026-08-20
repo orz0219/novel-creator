@@ -18,6 +18,36 @@ mod tests {
     use sqlx::PgPool;
     use uuid::Uuid;
 
+
+    fn build_context_engine(pool: sqlx::PgPool) -> runtime::context_engine::ContextEngine {
+        let deps = runtime::context_engine::ContextEngineDeps {
+            narrative: std::sync::Arc::new(db::runtime_ports::DbNarrativePort::new(pool.clone())),
+            entity: std::sync::Arc::new(db::runtime_ports::DbEntityPort::new(pool.clone())),
+            state: std::sync::Arc::new(db::runtime_ports::DbStatePort::new(pool.clone())),
+            knowledge: std::sync::Arc::new(db::runtime_ports::DbKnowledgePort::new(pool.clone())),
+            relation: std::sync::Arc::new(db::runtime_ports::DbRelationPort::new(pool.clone())),
+            event: std::sync::Arc::new(db::runtime_ports::DbEventPort::new(pool.clone())),
+            canon: std::sync::Arc::new(db::runtime_ports::DbCanonRulePort::new(pool.clone())),
+            snapshot: std::sync::Arc::new(db::runtime_ports::DbContextSnapshotPort::new(pool.clone())),
+        };
+        runtime::context_engine::ContextEngine::new(deps)
+    }
+
+    fn build_validator(pool: sqlx::PgPool) -> runtime::validator::Validator {
+        let deps = runtime::validator::ValidatorDeps {
+            entity: std::sync::Arc::new(db::runtime_ports::DbEntityPort::new(pool.clone())),
+            validation: std::sync::Arc::new(db::runtime_ports::DbValidationPort::new(pool.clone())),
+            approval: std::sync::Arc::new(db::runtime_ports::DbApprovalPort::new(pool.clone())),
+            canon: std::sync::Arc::new(db::runtime_ports::DbCanonRulePort::new(pool.clone())),
+            proposed_change: std::sync::Arc::new(db::runtime_ports::DbProposedChangeQueryPort::new(pool.clone())),
+        };
+        runtime::validator::Validator::new(deps)
+    }
+
+    fn build_state_committer(pool: sqlx::PgPool) -> runtime::state_committer::DbStateCommitter {
+        runtime::state_committer::DbStateCommitter::new(std::sync::Arc::new(db::runtime_ports::DbStateCommitterPort::new(pool)))
+    }
+
     // Helper to create a test pool (requires DATABASE_URL)
     async fn test_pool() -> Result<PgPool> {
         let database_url = std::env::var("DATABASE_URL")
@@ -86,7 +116,7 @@ mod tests {
         let project_id = create_test_project(&pool).await?;
         let entity_id = create_test_entity(&pool, project_id).await?;
 
-        let state_committer = runtime::state_committer::DbStateCommitter::new(pool.clone());
+        let state_committer = build_state_committer(pool.clone());
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
         // P1-2: 先在 DB 中创建 ProposedChange，然后直接更新状态为 Rejected
@@ -121,7 +151,7 @@ mod tests {
         let project_id = create_test_project(&pool).await?;
         let entity_id = create_test_entity(&pool, project_id).await?;
 
-        let state_committer = runtime::state_committer::DbStateCommitter::new(pool.clone());
+        let state_committer = build_state_committer(pool.clone());
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
         // P1-2: 先在 DB 中创建 ProposedChange（状态为 Pending）
@@ -154,7 +184,7 @@ mod tests {
         let state_repo = db::repos::state_repo::StateRepo::new(pool.clone());
         state_repo.upsert_state(project_id, entity_id, "location", serde_json::json!("city"), None).await?;
 
-        let state_committer = runtime::state_committer::DbStateCommitter::new(pool.clone());
+        let state_committer = build_state_committer(pool.clone());
         let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
 
         // P1-2: 先在 DB 中创建 ProposedChange，然后更新状态为 Approved
@@ -257,7 +287,7 @@ mod tests {
         let project_id = create_test_project(&pool).await?;
 
         // Try to build context for non-existent scene
-        let engine = runtime::context_engine::ContextEngine::new(pool.clone());
+        let engine = build_context_engine(pool.clone());
         let result = engine.build_context(project_id, Uuid::new_v4(), 10000).await;
 
         // Should fail because scene doesn't exist
@@ -299,7 +329,7 @@ mod tests {
             .await?;
 
         // Build context - optional relations/events should not fail the whole build
-        let engine = runtime::context_engine::ContextEngine::new(pool.clone());
+        let engine = build_context_engine(pool.clone());
         let result = engine.build_context(project_id, scene_id, 10000).await;
 
         // Should succeed even if optional queries fail
@@ -341,7 +371,7 @@ mod tests {
         }
 
         // Validate - should use batch queries
-        let validator = runtime::validator::Validator::new(pool.clone());
+        let validator = build_validator(pool.clone());
         let run = validator.validate_changes(project_id, Uuid::new_v4(), &changes).await?;
 
         // All should be approved (no canon rules, valid entities)
@@ -386,7 +416,7 @@ mod tests {
             .execute(&pool)
             .await?;
 
-        let validator = runtime::validator::Validator::new(pool.clone());
+        let validator = build_validator(pool.clone());
 
         // Test 1: element = fire (should be rejected)
         let fire_change = ProposedChange {

@@ -6,6 +6,7 @@ members = [
     "crates/application",
     "crates/runtime",
     "crates/infrastructure",
+    "crates/ai",
     "crates/narrative-engine",
 ]
 
@@ -52,3 +53,4 @@ db = { path = "crates/db" }
 application = { path = "crates/application" }
 runtime = { path = "crates/runtime" }
 infrastructure = { path = "crates/infrastructure" }
+ai = { path = "crates/ai" }
