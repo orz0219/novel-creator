@@ -21,7 +21,7 @@ use std::sync::Arc;
 #[derive(Deserialize)]
 pub struct CreateNodeInput { pub node_type: String, pub parent_id: Option<String>, pub title: String, pub description: Option<String>, pub attributes: Option<serde_json::Value> }
 #[derive(Deserialize)]
-pub struct UpdateNodeInput { pub title: Option<String>, pub description: Option<String>, pub status: Option<String> }
+pub struct UpdateNodeInput { pub title: Option<String>, pub description: Option<String>, pub content: Option<String>, pub status: Option<String> }
 #[derive(Deserialize)]
 pub struct CreateStorylineInput { pub name: String, pub description: Option<String>, pub importance: Option<String> }
 #[derive(Deserialize)]
@@ -81,6 +81,7 @@ pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, 
         id,
         input.title.as_deref(),
         input.description.as_deref(),
+        input.content.as_deref(),
         input.status.as_deref(),
     ).await?;
 

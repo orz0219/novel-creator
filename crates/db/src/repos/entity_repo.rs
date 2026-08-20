@@ -442,16 +442,28 @@ impl RelationRepo {
         id: Uuid,
         valid_until: Option<String>,
     ) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE relation SET valid_until = $3, updated_at = NOW() \
-             WHERE id = $1 AND project_id = $2 AND valid_until IS NULL",
-        )
-        .bind(id)
-        .bind(project_id)
-        .bind(valid_until)
-        .execute(executor)
-        .await
-        .context("Failed to end relation")?;
+        // valid_until = None 表示「至今结束」，需用 NOW()；直接写 NULL 等于未结束。
+        let result = match valid_until {
+            Some(vu) => sqlx::query(
+                "UPDATE relation SET valid_until = $3, updated_at = NOW() \
+                 WHERE id = $1 AND project_id = $2 AND valid_until IS NULL",
+            )
+            .bind(id)
+            .bind(project_id)
+            .bind(vu)
+            .execute(executor)
+            .await
+            .context("Failed to end relation")?,
+            None => sqlx::query(
+                "UPDATE relation SET valid_until = NOW(), updated_at = NOW() \
+                 WHERE id = $1 AND project_id = $2 AND valid_until IS NULL",
+            )
+            .bind(id)
+            .bind(project_id)
+            .execute(executor)
+            .await
+            .context("Failed to end relation")?,
+        };
 
         Ok(result.rows_affected() > 0)
     }

@@ -36,7 +36,7 @@ impl NarrativeRepo {
         let status_str = ser::narrative_node_status_str(&NarrativeNodeStatus::Draft);
 
         sqlx::query(
-            "INSERT INTO narrative_node (id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at) \
+            "INSERT INTO narrative_node (id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(id)
@@ -63,6 +63,7 @@ impl NarrativeRepo {
             parent_id,
             title: title.to_string(),
             description: description.map(|s| s.to_string()),
+            content: None,
             attributes,
             sort_order,
             status: NarrativeNodeStatus::Draft,
@@ -73,7 +74,7 @@ impl NarrativeRepo {
 
     pub async fn get_node_by_id(&self, id: Uuid) -> Result<Option<NarrativeNode>> {
         let row = sqlx::query_as::<_, NarrativeNodeRow>(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at \
              FROM narrative_node WHERE id = $1",
         )
         .bind(id)
@@ -90,7 +91,7 @@ impl NarrativeRepo {
     /// Returns None if node doesn't exist OR doesn't belong to the project.
     pub async fn get_node_by_id_with_project(&self, project_id: Uuid, id: Uuid) -> Result<Option<NarrativeNode>> {
         let row = sqlx::query_as::<_, NarrativeNodeRow>(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at              FROM narrative_node WHERE id = $1 AND project_id = $2",
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at              FROM narrative_node WHERE id = $1 AND project_id = $2",
         )
         .bind(id)
         .bind(project_id)
@@ -103,7 +104,7 @@ impl NarrativeRepo {
 
     pub async fn list_nodes_by_project(&self, project_id: Uuid) -> Result<Vec<NarrativeNode>> {
         let rows = sqlx::query_as::<_, NarrativeNodeRow>(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at \
              FROM narrative_node WHERE project_id = $1 ORDER BY sort_order",
         )
         .bind(project_id)
@@ -116,7 +117,7 @@ impl NarrativeRepo {
 
     pub async fn list_children(&self, parent_id: Uuid) -> Result<Vec<NarrativeNode>> {
         let rows = sqlx::query_as::<_, NarrativeNodeRow>(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at \
              FROM narrative_node WHERE parent_id = $1 ORDER BY sort_order",
         )
         .bind(parent_id)
@@ -130,10 +131,11 @@ impl NarrativeRepo {
     pub async fn update_node(&self, node: &NarrativeNode) -> Result<()> {
         let status_str = ser::narrative_node_status_str(&node.status);
         sqlx::query(
-            "UPDATE narrative_node SET title = $1, description = $2, attributes = $3, sort_order = $4, status = $5, updated_at = $6 WHERE id = $7",
+            "UPDATE narrative_node SET title = $1, description = $2, content = $3, attributes = $4, sort_order = $5, status = $6, updated_at = $7 WHERE id = $8",
         )
         .bind(&node.title)
         .bind(&node.description)
+        .bind(&node.content)
         .bind(&node.attributes)
         .bind(node.sort_order)
         .bind(&status_str)
@@ -165,7 +167,7 @@ impl NarrativeRepo {
         id: Uuid,
     ) -> Result<Option<NarrativeNode>> {
         let row = sqlx::query_as::<_, NarrativeNodeRow>(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at \
              FROM narrative_node WHERE id = $1 AND project_id = $2",
         )
         .bind(id)
@@ -184,11 +186,12 @@ impl NarrativeRepo {
     ) -> Result<bool> {
         let status_str = ser::narrative_node_status_str(&node.status);
         let result = sqlx::query(
-            "UPDATE narrative_node SET title=$1, description=$2, attributes=$3, sort_order=$4, status=$5, version=version+1, updated_at=NOW() \
-             WHERE id=$6 AND project_id=$7 AND version=$8",
+            "UPDATE narrative_node SET title=$1, description=$2, content=$3, attributes=$4, sort_order=$5, status=$6, version=version+1, updated_at=NOW() \
+             WHERE id=$7 AND project_id=$8 AND version=$9",
         )
         .bind(&node.title)
         .bind(&node.description)
+        .bind(&node.content)
         .bind(&node.attributes)
         .bind(node.sort_order)
         .bind(&status_str)
@@ -230,6 +233,7 @@ struct NarrativeNodeRow {
     parent_id: Option<Uuid>,
     title: String,
     description: Option<String>,
+    content: Option<String>,
     attributes: Option<serde_json::Value>,
     sort_order: i32,
     status: String,
@@ -247,6 +251,7 @@ impl From<NarrativeNodeRow> for NarrativeNode {
             parent_id: r.parent_id,
             title: r.title,
             description: r.description,
+            content: r.content,
             attributes: r.attributes.unwrap_or_default(),
             sort_order: r.sort_order,
             status: ser::parse_narrative_node_status(&r.status),

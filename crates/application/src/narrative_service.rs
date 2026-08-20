@@ -59,6 +59,7 @@ impl NarrativeService {
         id: Uuid,
         title: Option<&str>,
         description: Option<&str>,
+        content: Option<&str>,
         status: Option<&str>,
     ) -> Result<Value> {
         let project_id = self
@@ -72,6 +73,7 @@ impl NarrativeService {
             title.map(|s| s.to_string()),
             description.map(|s| s.to_string()),
             None,
+            content.map(|s| s.to_string()),
             status.map(|s| s.to_string()),
         );
         self.committer.commit(cmd).await?;

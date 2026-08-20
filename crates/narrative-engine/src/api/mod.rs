@@ -13,6 +13,7 @@ pub mod validation;
 pub mod history;
 pub mod rules;
 pub mod snapshots;
+pub mod settings;
 pub mod error;
 
 use axum::{Router, routing::{get, post, put, delete}};
@@ -96,6 +97,8 @@ pub fn router(state: AppState) -> Router {
         // Snapshots
         .route("/api/v1/projects/{id}/snapshots", get(snapshots::list_snapshots).post(snapshots::create_snapshot))
         .route("/api/v1/snapshots/{id}", delete(snapshots::delete_snapshot))
+        // Settings (global)
+        .route("/api/v1/settings", get(settings::get_settings).put(settings::update_settings))
         // Health
         .route("/api/v1/health", get(health_check))
         .with_state(state)

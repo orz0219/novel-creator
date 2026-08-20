@@ -501,6 +501,7 @@ async fn apply(
             title,
             description,
             attributes,
+            content,
             status,
         } => {
             // 叙事节点乐观锁（提案 四 / 六）：CAS on version，绝不物理 DELETE。
@@ -523,6 +524,9 @@ async fn apply(
             }
             if let Some(v) = description {
                 node.description = Some(v);
+            }
+            if let Some(v) = content {
+                node.content = Some(v);
             }
             if let Some(v) = attributes {
                 node.attributes = v;

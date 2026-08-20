@@ -12,6 +12,7 @@
         :entity="fac"
         type="Faction"
         @click="openEdit(fac)"
+        @delete="handleDelete(fac)"
       />
     </div>
     <div v-else class="empty-state">
@@ -59,6 +60,11 @@ async function handleSubmit(data: { name: string; summary?: string; description?
     await worldStore.createFaction(worldId, data)
   }
   editingEntity.value = null
+}
+
+async function handleDelete(entity: Entity) {
+  if (!confirm(`确认删除「${entity.name}」？此操作不可撤销。`)) return
+  await worldStore.deleteFaction(entity.id)
 }
 
 watch(showCreateDialog, (v) => {

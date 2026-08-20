@@ -24,12 +24,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useProjectStore } from '@/stores/project'
 const route = useRoute()
 const router = useRouter()
+const projectStore = useProjectStore()
 const query = ref('')
 const activeFilter = ref('all')
+onMounted(async () => {
+  if (!projectStore.projects.length) await projectStore.fetchProjects()
+})
 const filters = [
   { id: 'all', label: '全部' },
   { id: 'Character', label: '人物' },
@@ -37,15 +42,16 @@ const filters = [
   { id: 'Faction', label: '势力' },
   { id: 'Scene', label: '场景' },
 ]
+const pid = computed(() => projectStore.currentProject?.id ?? projectStore.projects[0]?.id ?? '')
 const allResults = computed(() => {
-  const pid = route.params.id as string
+  const p = pid.value
   return [
-    { id: '1', type: 'Character', name: '林凡', snippet: '主角，边境散修，性格坚韧', route: `/project/${pid}/world/characters` },
-    { id: '2', type: 'Character', name: '苏晚晴', snippet: '女主，神秘女子', route: `/project/${pid}/world/characters` },
-    { id: '3', type: 'Location', name: '黑石城', snippet: '天玄大陆北境重镇', route: `/project/${pid}/world/locations` },
-    { id: '4', type: 'Location', name: '地下遗迹', snippet: '远古修士留下的遗迹', route: `/project/${pid}/world/locations` },
-    { id: '5', type: 'Faction', name: '王家', snippet: '黑石城四大家族之首', route: `/project/${pid}/world/factions` },
-    { id: '6', type: 'Scene', name: '场景1：遗迹入口', snippet: '林凡找到地下遗迹的入口', route: `/project/${pid}/write/scene-1` },
+    { id: '1', type: 'Character', name: '林凡', snippet: '主角，边境散修，性格坚韧', route: `/project/${p}/world/characters` },
+    { id: '2', type: 'Character', name: '苏晚晴', snippet: '女主，神秘女子', route: `/project/${p}/world/characters` },
+    { id: '3', type: 'Location', name: '黑石城', snippet: '天玄大陆北境重镇', route: `/project/${p}/world/locations` },
+    { id: '4', type: 'Location', name: '地下遗迹', snippet: '远古修士留下的遗迹', route: `/project/${p}/world/locations` },
+    { id: '5', type: 'Faction', name: '王家', snippet: '黑石城四大家族之首', route: `/project/${p}/world/factions` },
+    { id: '6', type: 'Scene', name: '场景1：遗迹入口', snippet: '林凡找到地下遗迹的入口', route: `/project/${p}/write/scene-1` },
   ]
 })
 const filteredResults = computed(() => {

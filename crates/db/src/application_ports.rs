@@ -32,7 +32,7 @@ impl DbGenerationRepositoryPort {
 impl GenerationRepositoryPort for DbGenerationRepositoryPort {
     async fn list_tasks(&self, project_id: Uuid) -> Result<Vec<Value>> {
         let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>, Option<i32>, String)>(
-            "SELECT id, task_type, status, COALESCE(model, ''), target_id, result::text, context_tokens, created_at::text              FROM generation_task WHERE project_id = $1 ORDER BY created_at DESC"
+            "SELECT id::text, task_type, status, COALESCE(model, ''), target_id::text, result::text, context_tokens, created_at::text              FROM generation_task WHERE project_id = $1 ORDER BY created_at DESC"
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -53,7 +53,7 @@ impl GenerationRepositoryPort for DbGenerationRepositoryPort {
 
     async fn get_task(&self, id: Uuid) -> Result<Option<Value>> {
         let row = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>, Option<i32>, String)>(
-            "SELECT id, task_type, status, COALESCE(model, ''), target_id, result::text, context_tokens, created_at::text              FROM generation_task WHERE id = $1"
+            "SELECT id::text, task_type, status, COALESCE(model, ''), target_id::text, result::text, context_tokens, created_at::text              FROM generation_task WHERE id = $1"
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -176,9 +176,9 @@ impl DbNarrativeRepositoryPort {
 #[async_trait]
 impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
     async fn list_nodes(&self, project_id: Uuid) -> Result<Vec<Value>> {
-        let rows: Vec<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, String, i32, String, String, String)> =
+        let rows: Vec<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, Option<String>, String, i32, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE project_id = $1 AND status != 'Deleted' ORDER BY sort_order"
+                "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE project_id = $1 AND status != 'Deleted' ORDER BY sort_order"
             )
             .bind(project_id)
             .fetch_all(&self.pool)
@@ -187,10 +187,10 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
 
         Ok(rows
             .into_iter()
-            .map(|(id, pid, wid, nt, par, title, desc, attrs, ord, st, cr, up)| {
+            .map(|(id, pid, wid, nt, par, title, desc, content, attrs, ord, st, cr, up)| {
                 serde_json::json!({
                     "id": id, "project_id": pid, "world_id": wid, "node_type": nt,
-                    "parent_id": par, "title": title, "description": desc,
+                    "parent_id": par, "title": title, "description": desc, "content": content,
                     "attributes": serde_json::from_str::<Value>(&attrs).unwrap_or(serde_json::json!({})),
                     "sort_order": ord, "status": st, "created_at": cr, "updated_at": up
                 })
@@ -199,19 +199,19 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
     }
 
     async fn get_node(&self, id: Uuid) -> Result<Option<Value>> {
-        let row: Option<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, String, i32, String, String, String)> =
+        let row: Option<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, Option<String>, String, i32, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE id = $1"
+                "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE id = $1"
             )
             .bind(id)
             .fetch_optional(&self.pool)
             .await
             .context("Failed to get narrative node")?;
 
-        Ok(row.map(|(id, pid, wid, nt, par, title, desc, attrs, ord, st, cr, up)| {
+        Ok(row.map(|(id, pid, wid, nt, par, title, desc, content, attrs, ord, st, cr, up)| {
             serde_json::json!({
                 "id": id, "project_id": pid, "world_id": wid, "node_type": nt,
-                "parent_id": par, "title": title, "description": desc,
+                "parent_id": par, "title": title, "description": desc, "content": content,
                 "attributes": serde_json::from_str::<Value>(&attrs).unwrap_or(serde_json::json!({})),
                 "sort_order": ord, "status": st, "created_at": cr, "updated_at": up
             })
@@ -601,7 +601,7 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
     async fn list_storylines(&self, project_id: Uuid) -> Result<Vec<Value>> {
         let rows: Vec<(String, String, Option<String>, String, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, name, description, status, importance, created_at::text, updated_at::text FROM storyline WHERE project_id=$1",
+                "SELECT id::text, name, description, status, importance, created_at::text, updated_at::text FROM storyline WHERE project_id=$1",
             )
             .bind(project_id)
             .fetch_all(&self.pool)
@@ -685,7 +685,7 @@ impl ForeshadowRepositoryPort for DbForeshadowRepositoryPort {
     async fn list_foreshadows(&self, project_id: Uuid) -> Result<Vec<Value>> {
         let rows: Vec<(String, String, Option<String>, String, String, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, name, description, status, importance, hint_level, created_at::text, updated_at::text FROM foreshadowing WHERE project_id=$1",
+                "SELECT id::text, name, description, status, importance, hint_level, created_at::text, updated_at::text FROM foreshadowing WHERE project_id=$1",
             )
             .bind(project_id)
             .fetch_all(&self.pool)
@@ -1141,7 +1141,7 @@ impl ProjectRepositoryPort for DbProjectRepositoryPort {
     async fn list_projects(&self) -> Result<Vec<Value>> {
         let rows: Vec<(String, String, Option<String>, Option<String>, String, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, name, description, language, status, config::text, created_at::text, updated_at::text FROM project ORDER BY updated_at DESC",
+                "SELECT id::text, name, description, language, COALESCE(status, 'Concept'), COALESCE(config::text, '{}'), created_at::text, updated_at::text FROM project ORDER BY updated_at DESC",
             )
             .fetch_all(&self.pool)
             .await
@@ -1163,7 +1163,7 @@ impl ProjectRepositoryPort for DbProjectRepositoryPort {
     async fn get_project(&self, id: Uuid) -> Result<Option<Value>> {
         let row: Option<(String, String, Option<String>, Option<String>, String, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, name, description, language, status, config::text, created_at::text, updated_at::text FROM project WHERE id = $1",
+                "SELECT id::text, name, description, language, COALESCE(status, 'Concept'), COALESCE(config::text, '{}'), created_at::text, updated_at::text FROM project WHERE id = $1",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -1278,7 +1278,7 @@ impl RuleRepositoryPort for DbRuleRepositoryPort {
     async fn list_rules(&self, world_id: Uuid) -> Result<Vec<Value>> {
         let rows: Vec<(String, String, String, String, String, String, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, project_id, world_id, COALESCE(rule_level, ''), rule_content, COALESCE(affected_scope, ''), enforcement, created_at::text, updated_at::text FROM canon_rule WHERE world_id = $1 ORDER BY created_at",
+                "SELECT id::text, project_id::text, world_id::text, COALESCE(rule_level, ''), rule_content, COALESCE(affected_scope, ''), enforcement, created_at::text, updated_at::text FROM canon_rule WHERE world_id = $1 ORDER BY created_at",
             )
             .bind(world_id)
             .fetch_all(&self.pool)
@@ -1335,7 +1335,7 @@ impl RuleRepositoryPort for DbRuleRepositoryPort {
     async fn get_rule(&self, id: Uuid) -> Result<Option<Value>> {
         let row: Option<(String, String, String, String, String, String, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, project_id, world_id, COALESCE(rule_level, ''), rule_content, COALESCE(affected_scope, ''), enforcement, created_at::text, updated_at::text FROM canon_rule WHERE id = $1",
+                "SELECT id::text, project_id::text, world_id::text, COALESCE(rule_level, ''), rule_content, COALESCE(affected_scope, ''), enforcement, created_at::text, updated_at::text FROM canon_rule WHERE id = $1",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -1429,7 +1429,7 @@ impl DbHistoryRepositoryPort {
 impl HistoryRepositoryPort for DbHistoryRepositoryPort {
     async fn list_events(&self, project_id: Uuid, limit: i64) -> Result<Vec<Value>> {
         let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, String)>(
-            "SELECT id, name, description, event_type, timestamp, created_at::text FROM event WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2",
+            "SELECT id::text, name, description, event_type, timestamp, created_at::text FROM event WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2",
         )
         .bind(project_id)
         .bind(limit)
@@ -1472,7 +1472,7 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
 
     async fn list_facts(&self, project_id: Uuid) -> Result<Vec<Value>> {
         let rows = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
-            "SELECT id, content, category, certainty, created_at::text FROM fact WHERE project_id = $1 ORDER BY created_at DESC",
+            "SELECT id::text, content, category, certainty, created_at::text FROM fact WHERE project_id = $1 ORDER BY created_at DESC",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -1555,7 +1555,7 @@ impl SnapshotRepositoryPort for DbSnapshotRepositoryPort {
             String,
             String,
         )> = sqlx::query_as(
-            "SELECT id, scene_id, story_time, world_summary, main_character_state, current_location, active_threads_count, unresolved_foreshadows_count, known_characters_count, known_locations_count, state_data::text, created_at::text FROM novel_state_snapshot WHERE project_id = $1 ORDER BY created_at DESC",
+            "SELECT id::text, scene_id::text, story_time, world_summary, main_character_state, current_location, active_threads_count, unresolved_foreshadows_count, known_characters_count, known_locations_count, state_data::text, created_at::text FROM novel_state_snapshot WHERE project_id = $1 ORDER BY created_at DESC",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -1685,7 +1685,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         let rows: Vec<(String, String, String, Option<String>, Option<String>, String, i32, String, String)> =
             if let Some(t) = entity_type {
                 sqlx::query_as(
-                    "SELECT e.id, e.name, et.name, e.summary, e.description, e.attributes::text, e.version, e.created_at::text, e.updated_at::text FROM entity e JOIN entity_type et ON e.entity_type_id = et.id WHERE e.world_id = $1 AND et.name = $2 AND e.status != 'Deleted' ORDER BY e.name",
+                    "SELECT e.id::text, e.name, et.name, e.summary, e.description, e.attributes::text, e.version, e.created_at::text, e.updated_at::text FROM entity e JOIN entity_type et ON e.entity_type_id = et.id WHERE e.world_id = $1 AND et.name = $2 AND e.status != 'Deleted' ORDER BY e.name",
                 )
                 .bind(world_id)
                 .bind(t)
@@ -1694,7 +1694,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
                 .context("Failed to list entities")?
             } else {
                 sqlx::query_as(
-                    "SELECT e.id, e.name, et.name, e.summary, e.description, e.attributes::text, e.version, e.created_at::text, e.updated_at::text FROM entity e JOIN entity_type et ON e.entity_type_id = et.id WHERE e.world_id = $1 AND e.status != 'Deleted' ORDER BY e.name",
+                    "SELECT e.id::text, e.name, et.name, e.summary, e.description, e.attributes::text, e.version, e.created_at::text, e.updated_at::text FROM entity e JOIN entity_type et ON e.entity_type_id = et.id WHERE e.world_id = $1 AND e.status != 'Deleted' ORDER BY e.name",
                 )
                 .bind(world_id)
                 .fetch_all(&self.pool)
@@ -1730,7 +1730,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             String,
             String,
         )> = sqlx::query_as(
-            "SELECT e.id, e.project_id, e.world_id, e.name, e.summary, e.description, e.attributes::text, e.version, e.created_by, e.created_at::text, e.updated_at::text FROM entity e WHERE e.id = $1 AND e.status != 'Deleted'",
+            "SELECT e.id::text, e.project_id::text, e.world_id::text, e.name, e.summary, e.description, e.attributes::text, e.version, e.created_by, e.created_at::text, e.updated_at::text FROM entity e WHERE e.id = $1 AND e.status != 'Deleted'",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1854,7 +1854,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
     async fn list_relations(&self, world_id: Uuid) -> Result<Vec<Value>> {
         let rows: Vec<(String, String, String, String, Option<String>, String, String, String)> =
             sqlx::query_as(
-                "SELECT r.id, r.source_entity_id, r.target_entity_id, r.relation_type, r.description, r.attributes::text, r.created_at::text, r.updated_at::text FROM relation r JOIN entity e ON r.source_entity_id = e.id WHERE e.world_id = $1",
+                "SELECT r.id::text, r.source_entity_id::text, r.target_entity_id::text, r.relation_type, r.description, r.attributes::text, r.created_at::text, r.updated_at::text FROM relation r JOIN entity e ON r.source_entity_id = e.id WHERE e.world_id = $1 AND r.valid_until IS NULL",
             )
             .bind(world_id)
             .fetch_all(&self.pool)
@@ -1955,7 +1955,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             Option<String>,
             Option<String>,
         )> = sqlx::query_as(
-            "SELECT id, entity_id, real_name, nickname, age, gender, identity, appearance, background, social_status, core_personality FROM character_profile WHERE entity_id = $1",
+            "SELECT id::text, entity_id::text, real_name, nickname, age, gender, identity, appearance, background, social_status, core_personality FROM character_profile WHERE entity_id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1981,7 +1981,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             Option<String>,
             Option<String>,
         )> = sqlx::query_as(
-            "SELECT id, entity_id, location, health, cultivation, resources, current_status, emotion FROM character_state WHERE entity_id = $1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT id::text, entity_id::text, location, health, cultivation, resources, current_status, emotion FROM character_state WHERE entity_id = $1 ORDER BY updated_at DESC LIMIT 1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1997,7 +1997,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
 
     async fn get_character_knowledge(&self, id: Uuid) -> Result<Vec<Value>> {
         let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT ks.id, ks.knowledge_level, COALESCE(ks.source, ''), f.content FROM knowledge_state ks JOIN fact f ON ks.fact_id = f.id WHERE ks.subject_id = $1",
+            "SELECT ks.id::text, ks.knowledge_level, COALESCE(ks.source, ''), f.content FROM knowledge_state ks JOIN fact f ON ks.fact_id = f.id WHERE ks.subject_id = $1",
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -2013,7 +2013,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
 
     async fn get_character_relationships(&self, id: Uuid) -> Result<Vec<Value>> {
         let rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT r.id, r.relation_type, e2.name, e2.id, r.description FROM relation r JOIN entity e2 ON r.target_entity_id = e2.id WHERE r.source_entity_id = $1",
+            "SELECT r.id::text, r.relation_type, e2.name, e2.id::text, r.description FROM relation r JOIN entity e2 ON r.target_entity_id = e2.id WHERE r.source_entity_id = $1",
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -2052,5 +2052,44 @@ impl ContextSnapshotRepositoryPort for DbContextSnapshotRepositoryPort {
             .save(&pkg)
             .await?;
         Ok(id)
+    }
+}
+
+/// 全局应用设置仓储（设置页持久化）。单全球行（id='default'），settings 存 JSONB。
+pub struct DbSettingsRepositoryPort {
+    pool: PgPool,
+}
+
+impl DbSettingsRepositoryPort {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// 读取全局设置；无记录时返回空对象 {}。
+    pub async fn get_settings(&self) -> Result<Value> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT settings::text FROM app_settings WHERE id = 'default'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to read app settings")?;
+
+        match row {
+            Some((s,)) => Ok(serde_json::from_str::<Value>(&s).unwrap_or_else(|_| serde_json::json!({}))),
+            None => Ok(serde_json::json!({})),
+        }
+    }
+
+    /// 覆盖写入全局设置（upsert）。
+    pub async fn upsert_settings(&self, settings: Value) -> Result<Value> {
+        sqlx::query(
+            "INSERT INTO app_settings (id, settings, updated_at) VALUES ('default', $1, NOW()) \
+             ON CONFLICT (id) DO UPDATE SET settings = EXCLUDED.settings, updated_at = NOW()",
+        )
+        .bind(&settings)
+        .execute(&self.pool)
+        .await
+        .context("Failed to upsert app settings")?;
+        Ok(settings)
     }
 }

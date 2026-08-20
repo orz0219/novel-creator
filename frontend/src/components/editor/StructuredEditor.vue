@@ -62,10 +62,10 @@ const blockIcons: Record<string, string> = {
 
 const blocks = ref<EditorBlock[]>([])
 
-// Initialize blocks from modelValue
-onMounted(() => {
-  if (props.modelValue) {
-    const lines = props.modelValue.split('\n')
+// 由纯文本（按 \n 分行）重建块。异步 loadScene 后 modelValue 才就绪，必须可重建。
+function rebuildBlocks(text: string) {
+  if (text) {
+    const lines = text.split('\n')
     blocks.value = lines.map(line => {
       const type = detectBlockType(line)
       return {
@@ -82,6 +82,18 @@ onMounted(() => {
       content: '',
       html: '',
     }]
+  }
+}
+
+// Initialize blocks from modelValue
+onMounted(() => {
+  rebuildBlocks(props.modelValue)
+})
+
+// 外部载入（切换节点 / 异步拉取）时重建；自身输入触发的 modelValue 变化跳过，避免清空正在编辑的内容。
+watch(() => props.modelValue, (val) => {
+  if (val !== serialize()) {
+    rebuildBlocks(val)
   }
 })
 
@@ -164,9 +176,12 @@ function addBlock(type: EditorBlock['type'], insertAt?: number) {
   emitContent()
 }
 
+function serialize() {
+  return blocks.value.map(b => b.content).join('\n')
+}
+
 function emitContent() {
-  const content = blocks.value.map(b => b.content).join('\n')
-  emit('update:modelValue', content)
+  emit('update:modelValue', serialize())
 }
 
 // Listen for entity clicks

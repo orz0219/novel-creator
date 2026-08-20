@@ -39,7 +39,7 @@ pub fn validate_mutation(cmd: &MutationCommand) -> Result<(), MutationError> {
                 return Err(MutationError::Validation("event name is required".into()));
             }
         }
-        MutationPayload::DeleteEntity | MutationPayload::EndRelation { .. } => {
+        MutationPayload::DeleteEntity => {
             if cmd.expected_version.is_none() {
                 return Err(MutationError::Validation(format!(
                     "{:?} requires expected_version for optimistic locking",

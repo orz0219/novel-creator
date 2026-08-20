@@ -11,6 +11,7 @@
         :entity="item"
         type="Item"
         @click="openEdit(item)"
+        @delete="handleDelete(item)"
       />
     </div>
     <div v-else class="empty-state">
@@ -67,6 +68,12 @@ async function handleSubmit(data: { name: string; summary?: string; description?
   }
   editingEntity.value = null
   await loadItems()
+}
+
+async function handleDelete(entity: Entity) {
+  if (!confirm(`确认删除「${entity.name}」？此操作不可撤销。`)) return
+  await worldStore.deleteEntity(entity.id)
+  items.value = items.value.filter(e => e.id !== entity.id)
 }
 
 watch(showCreateDialog, (v) => {

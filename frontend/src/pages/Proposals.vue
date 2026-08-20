@@ -5,8 +5,7 @@
     </div>
 
     <div class="proposal-list">
-      <div v-for="proposal in proposalStore.proposals" :key="proposal.id" class="proposal-card">
-        <div class="proposal-header">
+      <div v-for="proposal in proposalStore.proposals" :key="proposal.id" class="proposal-card">        <div class="proposal-header">
           <span class="proposal-id">#{{ proposal.id.split('-')[1] }}</span>
           <StatusBadge :status="(proposal.status || '').toLowerCase()" :label="proposal.status" />
           <span class="proposal-time">{{ formatDate(proposal.created_at) }}</span>
@@ -50,6 +49,15 @@
         </div>
       </div>
     </div>
+
+    <div v-if="proposalStore.proposals.length === 0 && !proposalStore.loading" class="empty-state">
+      <div class="empty-icon">📋</div>
+      <div class="empty-title">暂无 AI 提案</div>
+      <div class="empty-desc">
+        提案由 AI 在剧情推进中自动生成。可先在「人物 / 地点 / 势力」页丰富世界观，
+        或于写作页使用「AI 生成」触发分析与建议。
+      </div>
+    </div>
   </div>
 </template>
 
@@ -57,10 +65,17 @@
 import { useProposalStore } from '@/stores/proposal'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 
-import { ref } from "vue"
+import { ref, onMounted } from "vue"
+import { useRoute } from 'vue-router'
 const reviewMode = ref<string | null>(null)
 
+const route = useRoute()
 const proposalStore = useProposalStore()
+
+onMounted(() => {
+  const projectId = route.params.id as string
+  if (projectId) proposalStore.fetchProposals(projectId)
+})
 
 const changeTypeLabels: Record<string, string> = {
   Added: '新增',
@@ -213,4 +228,19 @@ function formatDate(dateStr: string): string {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
 }
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-16) var(--space-8);
+  text-align: center;
+  color: var(--text-tertiary);
+}
+.empty-icon { font-size: 48px; }
+.empty-title { font-size: var(--text-lg); color: var(--text-secondary); font-weight: 600; }
+.empty-desc { font-size: var(--text-sm); max-width: 420px; line-height: 1.6; }
+
 </style>

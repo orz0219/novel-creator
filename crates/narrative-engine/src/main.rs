@@ -64,11 +64,10 @@ async fn main() -> Result<()> {
     // Seed entity types (idempotent using ON CONFLICT)
     let entity_types = ["Character", "Location", "Faction", "Item", "Creature", "Organization"];
     for et in &entity_types {
-        let id = uuid::Uuid::new_v4().to_string();
         let result = sqlx::query(
             "INSERT INTO entity_type (id, name, description) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING"
         )
-        .bind(&id)
+        .bind(uuid::Uuid::new_v4())
         .bind(et)
         .bind(format!("{} entity type", et))
         .execute(&pool)

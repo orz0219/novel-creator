@@ -28,6 +28,7 @@ export interface NarrativeNode extends Timestamps {
   parent_id?: string
   title: string
   description?: string
+  content?: string
   attributes: Record<string, unknown>
   sort_order: number
   status: NarrativeNodeStatus

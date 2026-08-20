@@ -2,26 +2,30 @@
   <div class="settings-page">
     <div class="page-header">
       <h1 class="page-title">设置</h1>
+      <button class="save-btn" :disabled="saving" @click="save">
+        {{ saving ? '保存中…' : '保存' }}
+      </button>
     </div>
+    <div v-if="savedAt" class="saved-hint">已保存 · {{ savedAt }}</div>
     <div class="settings-content">
       <div class="settings-section">
         <h3 class="section-title">项目设置</h3>
         <div class="setting-item">
           <span class="setting-label">项目名称</span>
-          <input class="setting-input" value="天玄大陆" />
+          <input class="setting-input" v-model="form.projectName" />
         </div>
         <div class="setting-item">
           <span class="setting-label">语言</span>
-          <select class="setting-select">
-            <option>zh-CN</option>
-            <option>en</option>
+          <select class="setting-select" v-model="form.language">
+            <option value="zh-CN">zh-CN</option>
+            <option value="en">en</option>
           </select>
         </div>
         <div class="setting-item">
           <span class="setting-label">默认模型</span>
-          <select class="setting-select">
-            <option>mimo-v2.5</option>
-            <option>mimo-v2</option>
+          <select class="setting-select" v-model="form.defaultModel">
+            <option value="mimo-v2.5">mimo-v2.5</option>
+            <option value="mimo-v2">mimo-v2</option>
           </select>
         </div>
       </div>
@@ -29,32 +33,78 @@
         <h3 class="section-title">编辑器设置</h3>
         <div class="setting-item">
           <span class="setting-label">字体大小</span>
-          <input class="setting-input" type="number" value="14" />
+          <input class="setting-input" type="number" v-model.number="form.fontSize" />
         </div>
         <div class="setting-item">
           <span class="setting-label">自动保存</span>
-          <label class="toggle"><input type="checkbox" checked /><span class="toggle-slider"></span></label>
+          <label class="toggle">
+            <input type="checkbox" v-model="form.autoSave" />
+            <span class="toggle-slider"></span>
+          </label>
         </div>
       </div>
       <div class="settings-section">
         <h3 class="section-title">AI 设置</h3>
         <div class="setting-item">
           <span class="setting-label">默认写作风格</span>
-          <input class="setting-input" value="紧凑紧张" />
+          <input class="setting-input" v-model="form.writingStyle" />
         </div>
         <div class="setting-item">
           <span class="setting-label">自动验证</span>
-          <label class="toggle"><input type="checkbox" checked /><span class="toggle-slider"></span></label>
+          <label class="toggle">
+            <input type="checkbox" v-model="form.autoValidate" />
+            <span class="toggle-slider"></span>
+          </label>
         </div>
       </div>
     </div>
   </div>
 </template>
 
+<script setup lang="ts">
+import { reactive, ref, onMounted } from 'vue'
+import { settingsApi, type AppSettings } from '@/api'
+
+const form = reactive<AppSettings>({
+  projectName: '',
+  language: 'zh-CN',
+  defaultModel: 'mimo-v2.5',
+  fontSize: 14,
+  autoSave: true,
+  writingStyle: '',
+  autoValidate: true,
+})
+
+const saving = ref(false)
+const savedAt = ref('')
+
+onMounted(async () => {
+  try {
+    const s = await settingsApi.get()
+    Object.assign(form, s)
+  } catch {
+    // 载入失败保留默认值。
+  }
+})
+
+async function save() {
+  saving.value = true
+  try {
+    await settingsApi.update({ ...form })
+    savedAt.value = new Date().toLocaleTimeString()
+  } finally {
+    saving.value = false
+  }
+}
+</script>
+
 <style scoped>
 .settings-page { height: 100%; overflow-y: auto; padding: var(--space-6) var(--space-8); }
-.page-header { margin-bottom: var(--space-6); }
+.page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-6); }
 .page-title { font-size: var(--text-2xl); font-weight: 700; font-family: var(--font-serif); }
+.save-btn { padding: var(--space-2) var(--space-4); background: var(--color-primary); color: #fff; border: none; border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); }
+.save-btn:disabled { opacity: 0.6; cursor: default; }
+.saved-hint { margin-bottom: var(--space-4); font-size: var(--text-xs); color: var(--text-secondary); }
 .settings-content { max-width: 600px; }
 .settings-section { margin-bottom: var(--space-8); }
 .section-title { font-size: var(--text-md); font-weight: 600; margin-bottom: var(--space-4); padding-bottom: var(--space-2); border-bottom: 1px solid var(--border-muted); }

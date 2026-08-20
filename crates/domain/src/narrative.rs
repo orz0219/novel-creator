@@ -43,6 +43,8 @@ pub struct NarrativeNode {
     pub parent_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
+    /// 场景/章节正文（编辑器草稿内容）。Volume/Arc 等也可承载概述。
+    pub content: Option<String>,
     /// 节点特有的属性（JSON），不同类型有不同结构
     pub attributes: serde_json::Value,
     pub sort_order: i32,

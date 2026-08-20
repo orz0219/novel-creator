@@ -37,7 +37,7 @@ impl IntoResponse for AppError {
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
         let message = self.0.to_string();
-        tracing::error!("API error ({}): {}", status.as_u16(), message);
+        tracing::error!("API error ({}): {}", status.as_u16(), self.0);
         (status, Json(json!({ "error": message }))).into_response()
     }
 }

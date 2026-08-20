@@ -280,6 +280,11 @@ import { useStoryStore } from '@/stores/story'
 import { useEditorStore } from '@/stores/editor'
 import { useContextStore } from '@/stores/context'
 import { useGenerationStore } from '@/stores/generation'
+import StructuredEditor from '@/components/editor/StructuredEditor.vue'
+import SelectionActions from '@/components/editor/SelectionActions.vue'
+import KnowledgePanel from '@/components/knowledge/KnowledgePanel.vue'
+import ConstraintPanel from '@/components/constraint/ConstraintPanel.vue'
+import EventLog from '@/components/event/EventLog.vue'
 
 const route = useRoute()
 const storyStore = useStoryStore()
@@ -321,6 +326,18 @@ const currentSceneTitle = computed(() =>
 
 contextStore.loadMockContext()
 generationStore.loadMockData()
+
+const projectId = route.params.id as string
+onMounted(async () => {
+  if (projectId) {
+    // 真因修复：原本从不拉取叙事节点，导致左侧「故事结构」树为空。
+    await Promise.all([
+      storyStore.fetchNodes(projectId),
+      storyStore.fetchStorylines(projectId),
+      storyStore.fetchForeshadows(projectId),
+    ])
+  }
+})
 
 const sceneId = route.params.sceneId as string
 if (sceneId) {

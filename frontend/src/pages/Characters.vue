@@ -12,6 +12,7 @@
         :entity="char"
         type="Character"
         @click="openEdit(char)"
+        @delete="handleDelete(char)"
       />
     </div>
     <div v-else class="empty-state">
@@ -62,6 +63,11 @@ async function handleSubmit(data: { name: string; summary?: string; description?
     await worldStore.createCharacter(worldId, data)
   }
   editingEntity.value = null
+}
+
+async function handleDelete(entity: Entity) {
+  if (!confirm(`确认删除「${entity.name}」？此操作不可撤销。`)) return
+  await worldStore.deleteCharacter(entity.id)
 }
 
 // Watch for create dialog opening

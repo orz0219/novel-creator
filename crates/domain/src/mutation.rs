@@ -101,6 +101,7 @@ pub enum MutationPayload {
         title: Option<String>,
         description: Option<String>,
         attributes: Option<serde_json::Value>,
+        content: Option<String>,
         status: Option<String>,
     },
     UpdateStoryline {
@@ -477,6 +478,7 @@ impl MutationCommand {
         title: Option<String>,
         description: Option<String>,
         attributes: Option<serde_json::Value>,
+        content: Option<String>,
         status: Option<String>,
     ) -> Self {
         MutationCommand::new(
@@ -489,6 +491,7 @@ impl MutationCommand {
                 title,
                 description,
                 attributes,
+                content,
                 status,
             },
         )
