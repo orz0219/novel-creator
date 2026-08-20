@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use domain::ports::*;
 use domain::*;
+use crate::repos::world_version_repo::WorldVersionRepo;
 use crate::ser;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -287,6 +288,15 @@ impl StateCommitterPort for DbStateCommitterPort {
 /// Transactional commit of approved ProposedChanges. All changes are committed
 /// in a single BEGIN/COMMIT transaction; any failure rolls back. This is the
 /// ONLY place that mutates canonical world state.
+///
+/// NOTE (架构边界，来自 P2 评审，见 docs/contracts/world-version.md):
+/// 本路径与 `DbMutationCommitter` **共享 `WorldVersionRepo` 作为唯一的版本分配器
+/// (canonical version allocator)**，但本路径**不是** `MutationCommitter` 的 adapter。
+/// 原因是本路径拥有 `proposed_change` 的生命周期语义（Approved→Applied 的 CAS 流转）
+/// 与 `CommitResponse` 返回模型，而 `MutationCommitter` 是 mutation pipeline 的
+/// 事务执行器，两者承担不同的 domain contract。因此"共享版本拥有者" ≠ "必须共享
+/// mutation 执行器"——不要把二者混为一谈。直接写 `world_version` 绕过 canonical
+/// commit 是被契约测试禁止的。
 async fn commit_changes(pool: &PgPool, project_id: Uuid, change_ids: &[Uuid]) -> Result<CommitResponse> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
     let mut results = Vec::new();
@@ -381,6 +391,42 @@ async fn commit_changes(pool: &PgPool, project_id: Uuid, change_ids: &[Uuid]) ->
                 return Err(anyhow::anyhow!("Unsupported change payload type for ProposedChange {}", change.id));
             }
         }
+    }
+
+    // Invariant C (commit contract): a successful commit advances the world
+    // version. Version advancement is owned by `WorldVersionRepo` — the single
+    // canonical owner used by EVERY commit path (including DbMutationCommitter),
+    // so there is exactly ONE place that computes "next version = prev + 1" and
+    // writes the row. This eliminates the duplicated version logic that used to
+    // live in this function. It is the mechanical "world moves forward one
+    // version per commit" invariant; the *semantic* meaning of world_version
+    // (optimistic lock vs history vs narrative timeline) is decided in the P2
+    // review (see docs/contracts/world-version.md). Direct writes to
+    // `world_version` outside the canonical commit are forbidden by contract.
+    if !results.is_empty() {
+        let world_id: Uuid = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM world WHERE project_id = $1 AND is_main = TRUE LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to resolve main world for version bump")?
+        .ok_or_else(|| anyhow::anyhow!("No main world found for project {}", project_id))?;
+
+        let repo = WorldVersionRepo::new(pool.clone());
+        let parent = repo.latest_tx(&mut *tx, world_id).await?;
+        let new_version = parent.as_ref().map(|p| p.version).unwrap_or(0) + 1;
+        let v = WorldVersion {
+            id: Uuid::new_v4(),
+            world_id,
+            version: new_version,
+            kind: WorldVersionKind::AiProposal,
+            trigger_id: change_ids.first().copied(),
+            summary: Some(format!("commit {} change(s)", results.len())),
+            parent_version_id: parent.as_ref().map(|p| p.id),
+            created_at: Utc::now(),
+        };
+        repo.create_tx(&mut *tx, &v).await?;
     }
 
     tx.commit().await.context("Failed to commit transaction")?;

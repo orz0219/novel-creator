@@ -51,8 +51,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "db",
  "domain",
  "serde_json",
+ "sqlx",
+ "tokio",
  "tracing",
  "uuid",
 ]
