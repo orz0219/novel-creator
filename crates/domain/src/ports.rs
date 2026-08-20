@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::approval::{ApprovalRecord, ApprovalTargetType};
 use crate::canon::CanonRule;
 use crate::entity::{Entity, Event, Fact, Relation, StateChange};
-use crate::generation::ContextPackage;
+use crate::generation::{ContextPackage, GenerationTask, Skill};
 use crate::knowledge::CharacterKnowledgeItem;
 use crate::narrative::NarrativeNode;
 use crate::state::{CurrentState, ResourceState};
@@ -170,6 +170,43 @@ pub trait GenerationRepositoryPort: Send + Sync {
         parameters: serde_json::Value,
     ) -> Result<serde_json::Value>;
     async fn cancel_task(&self, id: Uuid) -> Result<()>;
+
+    /// 取结构化 GenerationTask（供 GenerationExecutor 编排）。
+    async fn get_task_struct(&self, id: Uuid) -> Result<Option<GenerationTask>>;
+    /// 取 Skill（含 prompt 模板）。
+    async fn get_skill_by_id(&self, id: Uuid) -> Result<Option<Skill>>;
+    /// 写回任务产出。
+    async fn update_task_output(&self, id: Uuid, output: serde_json::Value) -> Result<()>;
+    /// 记录一次 GenerationRun（提案 十 / 十一）。context_snapshot_id 关联 ContextSnapshot（提案 十二）。
+    async fn create_run(
+        &self,
+        project_id: Uuid,
+        task_id: Uuid,
+        context_snapshot_id: Option<Uuid>,
+        llm_model: &str,
+        provider: Option<&str>,
+        prompt_sent: &str,
+        response_received: &str,
+        token_usage: Option<serde_json::Value>,
+        latency_ms: Option<i64>,
+    ) -> Result<()>;
+}
+
+/// LLM 调用端口（提案 十 / 十一）。
+///
+/// GenerationExecutor 只依赖此抽象，具体实现在 infrastructure 中包裹 LlmClient。
+#[async_trait]
+pub trait LlmPort: Send + Sync {
+    async fn complete(&self, system_prompt: &str, user_prompt: &str, model: &str) -> Result<String>;
+}
+
+/// 上下文快照仓储端口（提案 十二）。
+///
+/// GenerationExecutor 在每次执行时保存一份 ContextSnapshot，
+/// 并将其 id 关联到 generation_run.context_snapshot_id。
+#[async_trait]
+pub trait ContextSnapshotRepositoryPort: Send + Sync {
+    async fn save(&self, package: &ContextPackage) -> Result<Uuid>;
 }
 
 /// Narrative（叙事节点）仓储端口。
@@ -533,4 +570,16 @@ pub trait EntityRepositoryPort: Send + Sync {
     async fn get_character_state(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
     async fn get_character_knowledge(&self, id: Uuid) -> Result<Vec<serde_json::Value>>;
     async fn get_character_relationships(&self, id: Uuid) -> Result<Vec<serde_json::Value>>;
+}
+
+/// 解析对象 -> project_id 的低层读端口（仅查询，不修改）。
+///
+/// 用于把 world-scoped / entity-scoped 的调用收敛到 project-scoped 的
+/// MutationCommand（提案要求 Command 必须携带 project_id）。
+#[async_trait]
+pub trait ProjectResolverPort: Send + Sync {
+    async fn project_id_for_entity(&self, entity_id: Uuid) -> Result<Option<Uuid>>;
+    async fn project_id_for_world(&self, world_id: Uuid) -> Result<Option<Uuid>>;
+    async fn project_id_for_relation(&self, relation_id: Uuid) -> Result<Option<Uuid>>;
+    async fn project_id_for_narrative_node(&self, node_id: Uuid) -> Result<Option<Uuid>>;
 }

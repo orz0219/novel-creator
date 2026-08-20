@@ -73,6 +73,49 @@ impl EventRepo {
         Ok(row.map(|r| r.into()))
     }
 
+    /// 事务内创建世界事件（不可变：只 INSERT，不 UPDATE/DELETE）。
+    pub async fn create_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        name: &str,
+        description: &str,
+        event_type: Option<&str>,
+        timestamp: Option<&str>,
+    ) -> Result<Event> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO event (id, project_id, name, description, event_type, timestamp, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(name)
+        .bind(description)
+        .bind(event_type.unwrap_or(""))
+        .bind(timestamp.unwrap_or(""))
+        .bind(now)
+        .bind(now)
+        .execute(executor)
+        .await
+        .context("Failed to create event")?;
+
+        Ok(Event {
+            id,
+            project_id,
+            name: name.to_string(),
+            description: description.to_string(),
+            event_type: event_type.map(|s| s.to_string()),
+            timestamp: timestamp.map(|s| s.to_string()),
+            event_time: None,
+            duration: None,
+            involved_entity_ids: Vec::new(),
+            state_changes: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
     /// 列出项目中的所有事件
     pub async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Event>> {
         let rows = sqlx::query_as::<_, EventRow>(

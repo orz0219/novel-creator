@@ -428,6 +428,34 @@ impl EntityRepo {
     }
 }
 
+// ============================================================
+// Relation (defined in this module alongside Entity)
+// ============================================================
+
+impl RelationRepo {
+    /// 结束一段关系：仅设置 valid_until，绝不物理 DELETE（提案 五）。
+    /// 只影响尚未结束（valid_until IS NULL）的关系；返回是否生效。
+    pub async fn end_relation_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        id: Uuid,
+        valid_until: Option<String>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE relation SET valid_until = $3, updated_at = NOW() \
+             WHERE id = $1 AND project_id = $2 AND valid_until IS NULL",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(valid_until)
+        .execute(executor)
+        .await
+        .context("Failed to end relation")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct EntityRow {
     id: Uuid,
@@ -761,8 +789,8 @@ impl FactRepo {
     }
 
     /// Transactional create fact with all fact_entity associations atomically.
-    pub async fn create_tx<'c>(
-        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres> + Copy,
+    pub async fn create_tx(
+        executor: &mut sqlx::PgConnection,
         project_id: Uuid,
         content: &str,
         category: Option<&str>,
@@ -780,7 +808,7 @@ impl FactRepo {
         .bind(content)
         .bind(category.unwrap_or(""))
         .bind(certainty)
-        .execute(executor)
+        .execute(&mut *executor)
         .await
         .context("Failed to create fact")?;
 
@@ -788,7 +816,7 @@ impl FactRepo {
             sqlx::query("INSERT INTO fact_entity (id, fact_id, entity_id) VALUES (gen_random_uuid(), $1, $2)")
                 .bind(id)
                 .bind(entity_id)
-                .execute(executor)
+                .execute(&mut *executor)
                 .await
                 .context("Failed to create fact_entity")?;
         }
@@ -802,6 +830,45 @@ impl FactRepo {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
+    }
+
+    pub async fn get_by_id_with_project_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres> + Copy,
+        project_id: Uuid,
+        id: Uuid,
+    ) -> Result<Option<Fact>> {
+        let row = sqlx::query_as::<_, FactRow>(
+            "SELECT id, project_id, content, category, COALESCE(certainty, 'CANON') as certainty, created_at, updated_at \
+             FROM fact WHERE id = $1 AND project_id = $2",
+        )
+        .bind(id)
+        .bind(project_id)
+        .fetch_optional(executor)
+        .await
+        .context("Failed to query fact")?;
+        Ok(row.map(|r| r.into()))
+    }
+
+    /// 事实生命周期：设置状态（Active / Superseded / Invalid），绝不物理 DELETE（提案 六）。
+    pub async fn set_status_tx(
+        executor: &mut sqlx::PgConnection,
+        project_id: Uuid,
+        id: Uuid,
+        status: &str,
+        superseded_by: Option<Uuid>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE fact SET status = $3, superseded_by = $4, updated_at = NOW() \
+             WHERE id = $1 AND project_id = $2",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(status)
+        .bind(superseded_by)
+        .execute(&mut *executor)
+        .await
+        .context("Failed to update fact status")?;
+        Ok(result.rows_affected() > 0)
     }
 }
 

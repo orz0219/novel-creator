@@ -8,13 +8,26 @@ use axum::Json;
 use crate::state::AppState;
 use super::error::AppError;
 use application::proposal_service::ProposalService;
+use application::mutation::MutationCommitter;
 use db::application_ports::DbProposalRepositoryPort;
+use db::mutation_committer::DbMutationCommitter;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// 构建 ProposalService：repo + MutationCommitter（批准即提交，提案 九）。
+fn proposal_service(state: &AppState) -> ProposalService {
+    let committer = Arc::new(MutationCommitter::new(Arc::new(DbMutationCommitter::new(
+        state.pool.clone(),
+    ))));
+    ProposalService::new(
+        Arc::new(DbProposalRepositoryPort::new(state.pool.clone())),
+        committer,
+    )
+}
+
 pub async fn list_proposals(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
-    let service = ProposalService::new(Arc::new(DbProposalRepositoryPort::new(state.pool.clone())));
+    let service = proposal_service(&state);
     let proposals = service.list_proposals(project_id).await?;
 
     Ok(Json(serde_json::json!(proposals.into_iter().map(|p| {
@@ -24,7 +37,7 @@ pub async fn list_proposals(State(state): State<AppState>, Path(project_id): Pat
 
 pub async fn get_proposal(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid proposal ID")))?;
-    let service = ProposalService::new(Arc::new(DbProposalRepositoryPort::new(state.pool.clone())));
+    let service = proposal_service(&state);
     let proposal = service.get_proposal(id).await?
         .ok_or_else(|| AppError(anyhow::anyhow!("Proposal not found")))?;
 
@@ -34,7 +47,7 @@ pub async fn get_proposal(State(state): State<AppState>, Path(id): Path<String>)
 /// 批准提案 - 通过 ProposalService，验证状态转换
 pub async fn accept_proposal(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid proposal ID")))?;
-    let service = ProposalService::new(Arc::new(DbProposalRepositoryPort::new(state.pool.clone())));
+    let service = proposal_service(&state);
     let proposal = service.approve_proposal(id).await?;
 
     Ok(Json(serde_json::json!({"id": proposal.id, "status": proposal.status.description()})))
@@ -43,7 +56,7 @@ pub async fn accept_proposal(State(state): State<AppState>, Path(id): Path<Strin
 /// 拒绝提案 - 通过 ProposalService，验证状态转换
 pub async fn reject_proposal(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid proposal ID")))?;
-    let service = ProposalService::new(Arc::new(DbProposalRepositoryPort::new(state.pool.clone())));
+    let service = proposal_service(&state);
     let proposal = service.reject_proposal(id).await?;
 
     Ok(Json(serde_json::json!({"id": proposal.id, "status": proposal.status.description()})))

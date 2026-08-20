@@ -24,6 +24,7 @@ pub mod quality;
 pub mod branch;
 pub mod repository;
 pub mod events;
+pub mod mutation;
 pub mod story_contract;
 pub mod narrative_budget;
 pub mod narrative_thread;

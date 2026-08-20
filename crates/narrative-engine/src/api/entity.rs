@@ -11,11 +11,22 @@ use uuid::Uuid;
 use crate::state::AppState;
 use super::error::AppError;
 use application::entity_service::EntityService;
+use application::mutation::MutationCommitter;
 use db::application_ports::DbEntityRepositoryPort;
+use db::mutation_committer::DbMutationCommitter;
+use db::project_resolver::DbProjectResolverPort;
 use std::sync::Arc;
 
 fn service(state: &AppState) -> EntityService {
-    EntityService::new(Arc::new(DbEntityRepositoryPort::new(state.pool.clone())))
+    let committer = Arc::new(MutationCommitter::new(Arc::new(
+        DbMutationCommitter::new(state.pool.clone()),
+    )));
+    let resolver = Arc::new(DbProjectResolverPort::new(state.pool.clone()));
+    EntityService::new(
+        Arc::new(DbEntityRepositoryPort::new(state.pool.clone())),
+        committer,
+        resolver,
+    )
 }
 
 #[derive(Deserialize)]

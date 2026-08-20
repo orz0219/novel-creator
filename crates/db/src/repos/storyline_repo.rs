@@ -120,6 +120,28 @@ impl StorylineRepo {
             created_at: now,
         })
     }
+
+    /// 剧情线更新（提案 六）：COALESCE 实现部分更新。storyline 表无 version 列，暂不做 CAS。
+    pub async fn update_tx(
+        executor: &mut sqlx::PgConnection,
+        id: Uuid,
+        project_id: Uuid,
+        name: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE storyline SET name = COALESCE($1, name), description = COALESCE($2, description), updated_at = NOW() \
+             WHERE id = $3 AND project_id = $4",
+        )
+        .bind(name)
+        .bind(description)
+        .bind(id)
+        .bind(project_id)
+        .execute(executor)
+        .await
+        .context("Failed to update storyline")?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[derive(sqlx::FromRow)]

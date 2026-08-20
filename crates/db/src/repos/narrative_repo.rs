@@ -158,6 +158,67 @@ impl NarrativeRepo {
             .context("Failed to delete narrative node")?;
         Ok(())
     }
+
+    pub async fn get_node_by_id_with_project_tx(
+        executor: &mut sqlx::PgConnection,
+        project_id: Uuid,
+        id: Uuid,
+    ) -> Result<Option<NarrativeNode>> {
+        let row = sqlx::query_as::<_, NarrativeNodeRow>(
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status, created_at, updated_at \
+             FROM narrative_node WHERE id = $1 AND project_id = $2",
+        )
+        .bind(id)
+        .bind(project_id)
+        .fetch_optional(executor)
+        .await
+        .context("Failed to query narrative node")?;
+        Ok(row.map(|r| r.into()))
+    }
+
+    /// CAS 更新叙事节点（提案 四 / 六）：乐观锁 version + 软更新，不物理 DELETE。
+    pub async fn update_node_tx(
+        executor: &mut sqlx::PgConnection,
+        node: &NarrativeNode,
+        expected_version: i32,
+    ) -> Result<bool> {
+        let status_str = ser::narrative_node_status_str(&node.status);
+        let result = sqlx::query(
+            "UPDATE narrative_node SET title=$1, description=$2, attributes=$3, sort_order=$4, status=$5, version=version+1, updated_at=NOW() \
+             WHERE id=$6 AND project_id=$7 AND version=$8",
+        )
+        .bind(&node.title)
+        .bind(&node.description)
+        .bind(&node.attributes)
+        .bind(node.sort_order)
+        .bind(&status_str)
+        .bind(node.id)
+        .bind(node.project_id)
+        .bind(expected_version)
+        .execute(executor)
+        .await
+        .context("Failed to update narrative node (CAS)")?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// 软删除叙事节点（含递归子节点），绝不物理 DELETE（提案 二十二）。
+    pub async fn soft_delete_node_tx(
+        executor: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "WITH RECURSIVE sub(id) AS ( \
+                SELECT id FROM narrative_node WHERE id = $1 \
+                UNION ALL \
+                SELECT n.id FROM narrative_node n JOIN sub s ON n.parent_id = s.id \
+             ) UPDATE narrative_node SET status = 'Deleted', updated_at = NOW() WHERE id IN (SELECT id FROM sub)",
+        )
+        .bind(id)
+        .execute(executor)
+        .await
+        .context("Failed to soft-delete narrative node")?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[derive(sqlx::FromRow)]

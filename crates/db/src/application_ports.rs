@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use domain::ports::{
-    ApprovalRepositoryPort, EntityRepositoryPort, ForeshadowRepositoryPort,
-    GenerationRepositoryPort, HistoryRepositoryPort, NarrativeRepositoryPort,
-    ProjectRepositoryPort, ProposalRepositoryPort, RuleRepositoryPort, SnapshotRepositoryPort,
-    StorylineRepositoryPort, TimelineRepositoryPort, WorldRepositoryPort,
+    ApprovalRepositoryPort, ContextSnapshotRepositoryPort, EntityRepositoryPort,
+    ForeshadowRepositoryPort, GenerationRepositoryPort, HistoryRepositoryPort,
+    NarrativeRepositoryPort, ProjectRepositoryPort, ProposalRepositoryPort, RuleRepositoryPort,
+    SnapshotRepositoryPort, StorylineRepositoryPort, TimelineRepositoryPort, WorldRepositoryPort,
 };
 use domain::*;
 use serde_json::Value;
@@ -113,6 +113,51 @@ impl GenerationRepositoryPort for DbGenerationRepositoryPort {
         }
 
         Ok(())
+    }
+
+    async fn get_task_struct(&self, id: Uuid) -> Result<Option<domain::generation::GenerationTask>> {
+        crate::repos::generation_repo::TaskRepo::new(self.pool.clone())
+            .get_by_id(id)
+            .await
+    }
+
+    async fn get_skill_by_id(&self, id: Uuid) -> Result<Option<domain::generation::Skill>> {
+        crate::repos::generation_repo::SkillRepo::new(self.pool.clone())
+            .get_by_id(id)
+            .await
+    }
+
+    async fn update_task_output(&self, id: Uuid, output: serde_json::Value) -> Result<()> {
+        crate::repos::generation_repo::TaskRepo::new(self.pool.clone())
+            .update_output(id, output)
+            .await
+    }
+
+    async fn create_run(
+        &self,
+        project_id: Uuid,
+        task_id: Uuid,
+        context_snapshot_id: Option<Uuid>,
+        llm_model: &str,
+        provider: Option<&str>,
+        prompt_sent: &str,
+        response_received: &str,
+        token_usage: Option<serde_json::Value>,
+        latency_ms: Option<i64>,
+    ) -> Result<()> {
+        crate::repos::generation_repo::RunRepo::new(self.pool.clone())
+            .create(
+                project_id,
+                task_id,
+                context_snapshot_id,
+                llm_model,
+                provider,
+                prompt_sent,
+                response_received,
+                token_usage,
+                latency_ms,
+            )
+            .await
     }
 }
 
@@ -1981,5 +2026,29 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
                 })
             })
             .collect())
+    }
+}
+
+/// ContextSnapshot 仓储端口的数据库实现（提案 十二）。
+pub struct DbContextSnapshotRepositoryPort {
+    pool: PgPool,
+}
+
+impl DbContextSnapshotRepositoryPort {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl ContextSnapshotRepositoryPort for DbContextSnapshotRepositoryPort {
+    async fn save(&self, package: &domain::generation::ContextPackage) -> Result<Uuid> {
+        let id = Uuid::new_v4();
+        let mut pkg = package.clone();
+        pkg.id = id;
+        crate::repos::context_snapshot_repo::ContextSnapshotRepo::new(self.pool.clone())
+            .save(&pkg)
+            .await?;
+        Ok(id)
     }
 }

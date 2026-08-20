@@ -104,6 +104,30 @@ impl ForeshadowingRepo {
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
+
+    /// 伏笔更新（提案 六）：COALESCE 部分更新；status 直接存 VARCHAR。
+    pub async fn update_tx(
+        executor: &mut sqlx::PgConnection,
+        id: Uuid,
+        project_id: Uuid,
+        name: Option<&str>,
+        description: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE foreshadowing SET name = COALESCE($1, name), description = COALESCE($2, description), status = COALESCE($3, status), updated_at = NOW() \
+             WHERE id = $4 AND project_id = $5",
+        )
+        .bind(name)
+        .bind(description)
+        .bind(status)
+        .bind(id)
+        .bind(project_id)
+        .execute(executor)
+        .await
+        .context("Failed to update foreshadowing")?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[derive(sqlx::FromRow)]

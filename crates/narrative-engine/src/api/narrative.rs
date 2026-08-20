@@ -12,7 +12,10 @@ use super::error::AppError;
 use application::narrative_service::NarrativeService;
 use application::storyline_service::StorylineService;
 use application::foreshadow_service::ForeshadowService;
+use application::mutation::MutationCommitter;
 use db::application_ports::{DbStorylineRepositoryPort, DbForeshadowRepositoryPort};
+use db::mutation_committer::DbMutationCommitter;
+use db::project_resolver::DbProjectResolverPort;
 use std::sync::Arc;
 
 #[derive(Deserialize)]
@@ -24,16 +27,30 @@ pub struct CreateStorylineInput { pub name: String, pub description: Option<Stri
 #[derive(Deserialize)]
 pub struct CreateForeshadowInput { pub name: String, pub description: Option<String>, pub importance: Option<String>, pub hint_level: Option<String> }
 
+/// 构建 NarrativeService：repo + MutationCommitter（统一写入口）+ ProjectResolver。
+fn narrative_service(state: &AppState) -> NarrativeService {
+    let pool = state.pool.clone();
+    let committer = Arc::new(MutationCommitter::new(Arc::new(DbMutationCommitter::new(
+        pool.clone(),
+    ))));
+    let resolver = Arc::new(DbProjectResolverPort::new(pool.clone()));
+    NarrativeService::new(
+        Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(pool)),
+        committer,
+        resolver,
+    )
+}
+
 pub async fn list_nodes(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
-    let service = NarrativeService::new(std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(state.pool.clone())));
+    let service = narrative_service(&state);
     let nodes = service.list_nodes(project_id).await?;
     Ok(Json(serde_json::json!(nodes)))
 }
 
 pub async fn get_node(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid node ID")))?;
-    let service = NarrativeService::new(std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(state.pool.clone())));
+    let service = narrative_service(&state);
     let node = service.get_node(id).await?
         .ok_or_else(|| AppError(anyhow::anyhow!("Narrative node not found")))?;
     Ok(Json(node))
@@ -44,7 +61,7 @@ pub async fn create_node(State(state): State<AppState>, Path(project_id): Path<S
     let parent_id = input.parent_id.map(|p| Uuid::parse_str(&p)).transpose()
         .map_err(|_| AppError(anyhow::anyhow!("Invalid parent ID")))?;
 
-    let service = NarrativeService::new(std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(state.pool.clone())));
+    let service = narrative_service(&state);
     let node = service.create_node(
         project_id,
         &input.node_type,
@@ -59,7 +76,7 @@ pub async fn create_node(State(state): State<AppState>, Path(project_id): Path<S
 
 pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<UpdateNodeInput>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid node ID")))?;
-    let service = NarrativeService::new(std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(state.pool.clone())));
+    let service = narrative_service(&state);
     let node = service.update_node(
         id,
         input.title.as_deref(),
@@ -72,7 +89,7 @@ pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, 
 
 pub async fn delete_node(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid node ID")))?;
-    let service = NarrativeService::new(std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(state.pool.clone())));
+    let service = narrative_service(&state);
     service.delete_node(id).await?;
     Ok(Json(serde_json::json!({"deleted": true, "id": id})))
 }

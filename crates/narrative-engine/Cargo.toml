@@ -19,6 +19,7 @@ ai = { workspace = true }
 db = { workspace = true }
 application = { workspace = true }
 runtime = { workspace = true }
+infrastructure = { workspace = true }
 tokio = { workspace = true }
 sqlx = { workspace = true }
 axum = { workspace = true }

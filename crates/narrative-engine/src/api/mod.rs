@@ -74,6 +74,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects/{id}/generations", get(generation::list_tasks).post(generation::create_task))
         .route("/api/v1/generations/{id}", get(generation::get_task))
         .route("/api/v1/generations/{id}/cancel", post(generation::cancel_task))
+        .route("/api/v1/generations/{id}/execute", post(generation::execute_task))
         // Proposals
         .route("/api/v1/projects/{id}/proposals", get(proposal::list_proposals))
         .route("/api/v1/proposals/{id}", get(proposal::get_proposal))

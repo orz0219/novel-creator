@@ -1,5 +1,7 @@
 pub mod connection;
 pub mod migration;
+pub mod mutation_committer;
+pub mod project_resolver;
 pub mod schema;
 pub mod repos;
 pub mod runtime_ports;

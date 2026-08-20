@@ -91,6 +91,18 @@ impl SkillRepo {
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
+
+    pub async fn get_by_id(&self, id: Uuid) -> Result<Option<Skill>> {
+        let row = sqlx::query_as::<_, SkillRow>(
+            "SELECT id, name, description, skill_type, version, prompt_template, input_schema, output_schema, default_params, status, created_at, updated_at \
+             FROM skill WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query skill")?;
+        Ok(row.map(|r| r.into()))
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -212,6 +224,63 @@ impl TaskRepo {
         .context("Failed to query task")?;
 
         Ok(row.map(|r| r.into()))
+    }
+
+    pub async fn update_output(&self, task_id: Uuid, output: serde_json::Value) -> Result<()> {
+        sqlx::query(
+            "UPDATE generation_task SET output = $1, status = 'Completed', completed_at = NOW() WHERE id = $2",
+        )
+        .bind(&output)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update task output")?;
+        Ok(())
+    }
+}
+
+// ============= RunRepo =============
+
+pub struct RunRepo {
+    pool: PgPool,
+}
+
+impl RunRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// 记录一次 GenerationRun（提案 十 / 十一）。token_usage 以 JSONB 存储。
+    pub async fn create(
+        &self,
+        project_id: Uuid,
+        task_id: Uuid,
+        context_snapshot_id: Option<Uuid>,
+        llm_model: &str,
+        provider: Option<&str>,
+        prompt_sent: &str,
+        response_received: &str,
+        token_usage: Option<serde_json::Value>,
+        latency_ms: Option<i64>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO generation_run (id, project_id, task_id, context_snapshot_id, llm_model, provider, prompt_sent, response_received, token_usage, latency_ms, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(project_id)
+        .bind(task_id)
+        .bind(context_snapshot_id)
+        .bind(llm_model)
+        .bind(provider)
+        .bind(prompt_sent)
+        .bind(response_received)
+        .bind(token_usage.as_ref())
+        .bind(latency_ms)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create generation run")?;
+        Ok(())
     }
 }
 

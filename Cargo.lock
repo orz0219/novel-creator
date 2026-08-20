@@ -990,6 +990,7 @@ dependencies = [
  "chrono",
  "db",
  "domain",
+ "infrastructure",
  "runtime",
  "serde",
  "serde_json",

@@ -6,12 +6,18 @@ use crate::state::AppState;
 use super::error::AppError;
 
 pub async fn get_context(State(_state): State<AppState>, Path(scene_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    // Return mock context structure - will be connected to runtime context engine later
-    Ok(Json(serde_json::json!({"id": format!("ctx-{}", scene_id), "scene_id": scene_id, "entities": [], "items": [], "total_tokens": 0, "created_at": chrono::Utc::now().to_rfc3339()})))
+    // 真实上下文由 runtime ContextEngine 组装；此处显式暴露未接线，避免假成功误导前端。
+    Err(AppError::with_status(
+        StatusCode::NOT_IMPLEMENTED,
+        anyhow::anyhow!("get_context not implemented for scene {}", scene_id),
+    ))
 }
 
 pub async fn build_context(State(_state): State<AppState>, Path(scene_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    Ok(Json(serde_json::json!({"id": format!("ctx-{}", scene_id), "scene_id": scene_id, "entities": [], "items": [], "total_tokens": 0, "created_at": chrono::Utc::now().to_rfc3339()})))
+    Err(AppError::with_status(
+        StatusCode::NOT_IMPLEMENTED,
+        anyhow::anyhow!("build_context not implemented for scene {}", scene_id),
+    ))
 }
 
 // 以下 pin/unpin/exclude/unexclude 在持久层尚无实现（context 引擎未接线）。
