@@ -16,7 +16,7 @@ use application::generation_executor::GenerationExecutor;
 use application::mutation::MutationCommitter;
 use application::proposal_service::ProposalService;
 use db::mutation_committer::DbMutationCommitter;
-use infrastructure::llm::{InfraLlmPort, LlmClient};
+use infrastructure::llm::{InfraLlmPort, LlmClient, OpenAiCompatibleProvider};
 
 #[derive(Deserialize)]
 pub struct CreateGenerationInput { pub r#type: String, pub target_id: Option<String>, pub model: Option<String>, pub parameters: Option<serde_json::Value> }
@@ -34,7 +34,16 @@ fn generation_executor(state: &AppState) -> GenerationExecutor {
     let snapshots = Arc::new(db::application_ports::DbContextSnapshotRepositoryPort::new(
         pool.clone(),
     ));
-    let llm = Arc::new(InfraLlmPort::new(LlmClient::new("openai".to_string())));
+    // 注册真实 OpenAI 兼容 Provider（opencode.ai / mimo-v2.5），通过环境变量配置。
+    let base_url = std::env::var("OPENCODE_BASE_URL")
+        .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string());
+    let api_key = std::env::var("OPENCODE_API_KEY").ok();
+    let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "mimo-v2.5".to_string());
+    let mut llm_client = LlmClient::new("opencode".to_string());
+    llm_client.add_provider(Arc::new(OpenAiCompatibleProvider::new(
+        base_url, api_key, model,
+    )));
+    let llm = Arc::new(InfraLlmPort::new(llm_client));
     GenerationExecutor::new(
         Arc::new(DbGenerationRepositoryPort::new(pool.clone())),
         snapshots,

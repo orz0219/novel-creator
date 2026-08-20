@@ -13,6 +13,9 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 加载 .env（若存在），便于本地配置 OPENCODE_* 等环境变量
+    let _ = dotenvy::dotenv();
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
