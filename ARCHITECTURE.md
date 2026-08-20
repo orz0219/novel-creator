@@ -644,21 +644,21 @@ COMMIT
 
 # 12. Database Architecture
 
-The current persistence implementation is:
+The current persistence implementation is split into two infrastructure-layer
+crates following Hexagonal Architecture:
 
-```text
-PostgreSQL
-+
-SQLx
-```
-
-The database layer is an infrastructure implementation.
+- `db` crate —— **Persistence Adapter** for PostgreSQL. It owns the ~40
+  `*_repo.rs` modules, `mutation_committer`, and the migration runner. It
+  depends ONLY on `domain` (and `sqlx`). It MUST NOT depend on `ai` /
+  `runtime` / `application`.
+- `infrastructure` crate —— **External System Adapter** for LLM providers,
+  artifact storage, and observability. It depends on `domain` (and `sqlx`).
 
 ```text
 Domain Repository Trait
           ↑
           │
-PostgreSQL Repository
+   db (PostgreSQL Repository)
           │
         SQLx
           │
@@ -904,12 +904,16 @@ Infrastructure/database implementations are wired at the composition root.
 Infrastructure contains implementations of external concerns:
 
 ```text
-PostgreSQL
 LLM Providers
 Artifact Storage
 Observability
 External Services
 ```
+
+PostgreSQL persistence lives in the separate `db` crate (see §12). Keeping
+`db` (Persistence Adapter) and `infrastructure` (External System Adapter)
+separate prevents the infrastructure layer from becoming a catch-all and keeps
+the repository boundary swappable (postgres / sqlite / eventstore).
 
 Infrastructure should implement interfaces required by Domain/Application/Runtime.
 
@@ -956,6 +960,14 @@ And:
 Runtime
     ↓
 must not directly depend on PostgreSQL.
+```
+
+And:
+
+```text
+db
+    ↓
+must depend only on domain (never on ai / runtime / application).
 ```
 
 ---
@@ -1055,8 +1067,41 @@ Not every generation operation needs every step.
 The implementation should converge toward this order:
 
 ```text
-P0
-Remove architecture/documentation contradictions.
+P0 (DONE — see Iron Triad review "novel-arch-review")
+- Persistence-layer contradiction resolved: it lives in the dedicated `db`
+  crate, not `infrastructure` (see §12 / §19 / §20).
+- `db → ai` inverted dependency removed: domain-semantic types
+  (`character_mind` / `state_mgmt` / `repair`) now live in `domain`; `db`
+  depends only on `domain`. `ai` keeps only the AI *process* modules
+  (extractor / retrieval / job).
+
+P1
+- Enforce a single canonical write path via `MutationPlan`:
+  `Generation → Proposal → Validator → MutationPlan → Committer → Repository`.
+  `MutationPlan` (domain::mutation) wraps the derived `MutationCommand`s and
+  is the only carrier that may become a Canon write. `MutationCommitterPort`
+  exposes `commit_plan` as the recommended entry point.
+- Make Context Snapshot reproducible: `ContextPackage` and `GenerationRun`
+  carry a `ReproducibilityMeta` (world_version / context_policy_version /
+  model / temperature / retrieval_strategy / retrieved_documents(hash) /
+  prompt_hash), persisted as `reproducibility_meta` jsonb on
+  `context_snapshot` and `generation_run`.
+- Keep `runtime` split into `execution/` (context engine + retrieval),
+  `validation/` (validator + contract_validator), `commit/`
+  (state_committer) so Context Engine cannot become a second `application`.
+- Record a `World Version` (domain::world_version) on every Canon advance
+  (class git commit) to support multi-agent collaboration and rollback.
+
+P2
+- Domain Event Log: persist domain events (not just final state). `DomainEvent`
+  / `DomainEventType` already exist; add canon/world-state variants
+  (CanonCommitted, WorldStateChanged, PlotRepairApplied, …).
+- AI Trace: keep `GenerationRun` (request / context / model / response /
+  validator / commit) as the standalone generation trace — do NOT fold it
+  into history.
+- Review the ~40 repos by Aggregate boundary (a repo should map to an
+  aggregate, not a table). Keep `Proposal` as the interface and extend via
+  `ProposedChangeType` (the existing "ProposalKind").
 
 P1
 Remove direct PostgreSQL dependencies from Runtime.

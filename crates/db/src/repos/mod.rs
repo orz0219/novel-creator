@@ -32,3 +32,4 @@ pub mod character_repo;
 pub mod faction_repo;
 pub mod narrative_budget_repo;
 pub mod outbox_repo;
+pub mod world_version_repo;

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use ai::{PlotRepair, RepairStatus, RepairType};
+use domain::repair::{PlotRepair, RepairStatus, RepairType};
 use sqlx::PgPool;
 use uuid::Uuid;
 

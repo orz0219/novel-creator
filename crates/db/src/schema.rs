@@ -112,6 +112,7 @@ pub async fn validate_schema(pool: &PgPool) -> Result<Vec<String>> {
         "system_events",
         "narrative_thread",
         "narrative_thread_participant",
+        "world_version",
     ];
 
     let existing = list_tables(pool).await?;

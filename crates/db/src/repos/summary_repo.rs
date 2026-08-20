@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use ai::state_mgmt::*;
+use domain::state_mgmt::*;
 use sqlx::PgPool;
 use uuid::Uuid;
 

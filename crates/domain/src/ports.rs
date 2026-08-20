@@ -178,6 +178,8 @@ pub trait GenerationRepositoryPort: Send + Sync {
     /// 写回任务产出。
     async fn update_task_output(&self, id: Uuid, output: serde_json::Value) -> Result<()>;
     /// 记录一次 GenerationRun（提案 十 / 十一）。context_snapshot_id 关联 ContextSnapshot（提案 十二）。
+    ///
+    /// `reproducibility` 携带模型 / 温度 / 检索策略 / prompt hash 等可复现元数据（ChatGPT 评审 P1）。
     async fn create_run(
         &self,
         project_id: Uuid,
@@ -189,6 +191,7 @@ pub trait GenerationRepositoryPort: Send + Sync {
         response_received: &str,
         token_usage: Option<serde_json::Value>,
         latency_ms: Option<i64>,
+        reproducibility: crate::generation::ReproducibilityMeta,
     ) -> Result<()>;
 }
 

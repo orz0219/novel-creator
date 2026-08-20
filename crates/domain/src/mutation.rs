@@ -182,6 +182,51 @@ impl MutationCommitResult {
     }
 }
 
+/// Mutation Plan —— 提交前的"计划层"（ChatGPT 评审 P0：强制唯一写路径的一环）。
+///
+/// Proposal 不一定直接等于一次修改。例如「杀死角色 A」会派生出多条
+/// [`MutationCommand`]（移除角色 / 更新关系 / 更新时间线 / 写历史事件）。
+/// 这一层把"意图(Proposal)"与"具体修改步骤集合"解耦：
+///
+/// ```text
+/// Generation → Proposal → Validator → MutationPlan → Committer → Repository
+/// ```
+///
+/// `MutationPlan` 是经 Validator 之后、落入 Committer 之前的显式步骤集合，
+/// 也是系统唯一允许变成 Canon 写操作的载体。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MutationPlan {
+    pub plan_id: Uuid,
+    /// 关联的提案 id（若有）
+    pub proposal_id: Option<Uuid>,
+    pub source: MutationSource,
+    pub commands: Vec<MutationCommand>,
+}
+
+impl MutationPlan {
+    pub fn new(source: MutationSource, commands: Vec<MutationCommand>) -> Self {
+        Self {
+            plan_id: Uuid::new_v4(),
+            proposal_id: None,
+            source,
+            commands,
+        }
+    }
+
+    pub fn from_proposal(
+        proposal_id: Uuid,
+        source: MutationSource,
+        commands: Vec<MutationCommand>,
+    ) -> Self {
+        Self {
+            plan_id: Uuid::new_v4(),
+            proposal_id: Some(proposal_id),
+            source,
+            commands,
+        }
+    }
+}
+
 /// Mutation 错误类型
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MutationError {
@@ -223,6 +268,17 @@ pub trait MutationCommitterPort: Send + Sync {
         &self,
         cmds: Vec<MutationCommand>,
     ) -> Result<Vec<MutationCommitResult>, MutationError>;
+
+    /// 提交一个 [`MutationPlan`]（推荐的规范写入口）。
+    ///
+    /// 默认实现直接批量提交其 `commands`；实现方可用它统一注入
+    /// 来源 / 提案追踪 / 领域事件，确保"任何 Canon 写操作都经过此边界"。
+    async fn commit_plan(
+        &self,
+        plan: MutationPlan,
+    ) -> Result<Vec<MutationCommitResult>, MutationError> {
+        self.commit_batch(plan.commands).await
+    }
 }
 
 impl MutationCommand {

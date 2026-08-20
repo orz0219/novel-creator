@@ -95,6 +95,8 @@ pub struct ContextPackage {
     pub l6_optional_supplement: ContextLayer,
     /// 实际使用的总 token 数
     pub actual_tokens: i32,
+    /// 可复现性元数据（见 [`ReproducibilityMeta`]）
+    pub reproducibility: ReproducibilityMeta,
     pub created_at: DateTime<Utc>,
 }
 
@@ -104,6 +106,36 @@ pub struct ContextLayer {
     pub content: String,
     pub token_estimate: i32,
     pub included: bool,
+}
+
+/// 检索到的文档引用（用于精确复现）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetrievedDocRef {
+    pub id: Uuid,
+    /// 文档内容 hash（如 sha256 hex），用于校验"这次生成看到的就是这份"
+    pub hash: String,
+}
+
+/// 可复现性元数据 —— Context Snapshot / GenerationRun 可复现性的核心（ChatGPT 评审 P1）。
+///
+/// 记录"这次生成上下文是怎么构成的"，使得同一结果可被审计 / 重放 / 解释
+/// "为什么昨天生成 A、今天生成 B"。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReproducibilityMeta {
+    /// 快照时的世界（Canon）版本
+    pub world_version: Option<i32>,
+    /// 上下文策略版本
+    pub context_policy_version: Option<i32>,
+    /// 使用的 LLM 模型
+    pub model: Option<String>,
+    /// 采样温度
+    pub temperature: Option<f64>,
+    /// 检索策略（如 "hybrid" / "semantic" / "structured"）
+    pub retrieval_strategy: Option<String>,
+    /// 实际检索到的文档（id + 内容 hash）
+    pub retrieved_documents: Vec<RetrievedDocRef>,
+    /// 最终拼装 prompt 的 hash
+    pub prompt_hash: Option<String>,
 }
 
 /// 生成运行记录 - 完整的生成历史
@@ -136,5 +168,16 @@ pub struct GenerationRun {
     pub error: Option<String>,
     /// 输出 Artifact ID
     pub output_artifact_id: Option<Uuid>,
+    // ===== 可复现性字段（ChatGPT 评审 P1：AI Trace 必须可复现）=====
+    /// 快照时的世界版本
+    pub world_version: Option<i32>,
+    /// 采样温度
+    pub temperature: Option<f64>,
+    /// 检索策略
+    pub retrieval_strategy: Option<String>,
+    /// 最终 prompt 的 hash
+    pub prompt_hash: Option<String>,
+    /// 检索到的文档引用（id + hash）
+    pub retrieved_documents: Vec<RetrievedDocRef>,
     pub created_at: DateTime<Utc>,
 }

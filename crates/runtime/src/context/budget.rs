@@ -159,6 +159,7 @@ pub fn allocate(
             .unwrap_or_else(|| empty_layer.clone()),
         l6_optional_supplement: empty_layer,
         actual_tokens: used_tokens,
+        reproducibility: ReproducibilityMeta::default(),
         created_at: now,
     }
 }

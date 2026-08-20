@@ -65,6 +65,13 @@ pub enum DomainEventType {
     // Context events
     ContextSnapshotCreated,
 
+    // Canon / World-state events（ChatGPT 评审 P2：领域事件日志边界）
+    CanonCommitted,
+    WorldStateChanged,
+    PlotRepairApplied,
+    KnowledgeGapOpened,
+    CharacterMindChanged,
+
     // Custom events
     Custom(String),
 }

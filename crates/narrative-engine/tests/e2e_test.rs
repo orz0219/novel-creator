@@ -79,7 +79,13 @@ mod e2e_tests {
         world.create_fact(project.id, "The Wang family controls the black iron mines", Some("public"), "CANON", &[city.id, wang_head.id]).await.unwrap();
 
         // 3. Create narrative structure (unified create_node API)
-        let narrative = NarrativeService::new(std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(pool.clone())));
+        let narrative = NarrativeService::new(
+            std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(pool.clone())),
+            std::sync::Arc::new(application::mutation::MutationCommitter::new(std::sync::Arc::new(
+                db::mutation_committer::DbMutationCommitter::new(pool.clone()),
+            ))),
+            std::sync::Arc::new(db::project_resolver::DbProjectResolverPort::new(pool.clone())),
+        );
         let vol = narrative.create_node(project.id, "Volume", None, "Volume 1", Some("Lin Fan's journey begins"), serde_json::json!({"mission": "Lin Fan enters the cultivation world"})).await.unwrap();
         let vol_id: uuid::Uuid = serde_json::from_value(vol["id"].clone()).unwrap();
         let arc = narrative.create_node(project.id, "Arc", Some(vol_id), "Black Market Arc", Some("Lin Fan discovers the underground market"), serde_json::json!({})).await.unwrap();
@@ -157,7 +163,13 @@ mod e2e_tests {
         let main_world = world.ensure_main_world(project.id, "Test").await.unwrap();
         let char = world.create_entity(project.id, main_world.id, "Character", "Test Character", None, None, serde_json::json!({})).await.unwrap();
 
-        let narrative = NarrativeService::new(std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(pool.clone())));
+        let narrative = NarrativeService::new(
+            std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(pool.clone())),
+            std::sync::Arc::new(application::mutation::MutationCommitter::new(std::sync::Arc::new(
+                db::mutation_committer::DbMutationCommitter::new(pool.clone()),
+            ))),
+            std::sync::Arc::new(db::project_resolver::DbProjectResolverPort::new(pool.clone())),
+        );
         let vol = narrative.create_node(project.id, "Volume", None, "Vol 1", None, serde_json::json!({})).await.unwrap();
         let vol_id: uuid::Uuid = serde_json::from_value(vol["id"].clone()).unwrap();
         let arc = narrative.create_node(project.id, "Arc", Some(vol_id), "Arc 1", None, serde_json::json!({})).await.unwrap();
@@ -238,7 +250,13 @@ mod e2e_tests {
         let main_world = world.ensure_main_world(project.id, "Test").await.unwrap();
         let char = world.create_entity(project.id, main_world.id, "Character", "Test", None, None, serde_json::json!({})).await.unwrap();
 
-        let narrative = NarrativeService::new(std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(pool.clone())));
+        let narrative = NarrativeService::new(
+            std::sync::Arc::new(db::application_ports::DbNarrativeRepositoryPort::new(pool.clone())),
+            std::sync::Arc::new(application::mutation::MutationCommitter::new(std::sync::Arc::new(
+                db::mutation_committer::DbMutationCommitter::new(pool.clone()),
+            ))),
+            std::sync::Arc::new(db::project_resolver::DbProjectResolverPort::new(pool.clone())),
+        );
         let vol = narrative.create_node(project.id, "Volume", None, "Vol 1", None, serde_json::json!({})).await.unwrap();
         let vol_id: uuid::Uuid = serde_json::from_value(vol["id"].clone()).unwrap();
         let arc = narrative.create_node(project.id, "Arc", Some(vol_id), "Arc 1", None, serde_json::json!({})).await.unwrap();

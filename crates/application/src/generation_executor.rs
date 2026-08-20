@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use domain::generation::{ContextLayer, ContextPackage};
+use domain::generation::{ContextLayer, ContextPackage, ReproducibilityMeta};
 use domain::ports::{ContextSnapshotRepositoryPort, GenerationRepositoryPort, LlmPort};
 use domain::validation::ProposedChangeType;
 use std::sync::Arc;
@@ -95,6 +95,7 @@ impl GenerationExecutor {
                 l5_world_background: Self::empty_layer(),
                 l6_optional_supplement: Self::empty_layer(),
                 actual_tokens: 0,
+                reproducibility: ReproducibilityMeta::default(),
                 created_at: Utc::now(),
             };
             Some(self.snapshots.save(&pkg).await?)
@@ -106,6 +107,10 @@ impl GenerationExecutor {
             .await?;
 
         // 记录 GenerationRun（提案 十 / 十一，关联 ContextSnapshot 提案 十二）
+        let reproducibility = ReproducibilityMeta {
+            model: Some(model.to_string()),
+            ..Default::default()
+        };
         self.repo
             .create_run(
                 task.project_id,
@@ -117,6 +122,7 @@ impl GenerationExecutor {
                 &output,
                 None,
                 Some(latency_ms),
+                reproducibility,
             )
             .await?;
 

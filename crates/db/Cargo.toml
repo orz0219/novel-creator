@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 domain = { workspace = true }
-ai = { workspace = true }
 sqlx = { workspace = true }
 dotenvy = { workspace = true }
 serde = { workspace = true }

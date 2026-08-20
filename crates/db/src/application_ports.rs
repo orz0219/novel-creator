@@ -144,6 +144,7 @@ impl GenerationRepositoryPort for DbGenerationRepositoryPort {
         response_received: &str,
         token_usage: Option<serde_json::Value>,
         latency_ms: Option<i64>,
+        reproducibility: domain::generation::ReproducibilityMeta,
     ) -> Result<()> {
         crate::repos::generation_repo::RunRepo::new(self.pool.clone())
             .create(
@@ -156,6 +157,7 @@ impl GenerationRepositoryPort for DbGenerationRepositoryPort {
                 response_received,
                 token_usage,
                 latency_ms,
+                &reproducibility,
             )
             .await
     }

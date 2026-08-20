@@ -21,8 +21,8 @@ impl ContextSnapshotRepo {
             "INSERT INTO context_snapshot (id, project_id, scene_id, token_budget, \
              l0_essential, l1_scene_relevant, l2_recent_history, l3_narrative_context, \
              l4_character_knowledge, l5_world_background, l6_optional_supplement, \
-             actual_tokens, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             actual_tokens, reproducibility_meta, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(package.id)
         .bind(package.project_id)
@@ -36,6 +36,7 @@ impl ContextSnapshotRepo {
         .bind(serde_json::to_value(&package.l5_world_background).unwrap_or_default())
         .bind(serde_json::to_value(&package.l6_optional_supplement).unwrap_or_default())
         .bind(package.actual_tokens)
+        .bind(serde_json::to_value(&package.reproducibility).unwrap_or_default())
         .bind(package.created_at)
         .execute(&self.pool)
         .await
@@ -49,7 +50,7 @@ impl ContextSnapshotRepo {
             "SELECT id, project_id, scene_id, token_budget, \
              l0_essential, l1_scene_relevant, l2_recent_history, l3_narrative_context, \
              l4_character_knowledge, l5_world_background, l6_optional_supplement, \
-             actual_tokens, created_at \
+             actual_tokens, reproducibility_meta, created_at \
              FROM context_snapshot WHERE id = $1",
         )
         .bind(id)
@@ -66,7 +67,7 @@ impl ContextSnapshotRepo {
             "SELECT id, project_id, scene_id, token_budget, \
              l0_essential, l1_scene_relevant, l2_recent_history, l3_narrative_context, \
              l4_character_knowledge, l5_world_background, l6_optional_supplement, \
-             actual_tokens, created_at \
+             actual_tokens, reproducibility_meta, created_at \
              FROM context_snapshot WHERE scene_id = $1 ORDER BY created_at DESC",
         )
         .bind(scene_id)
@@ -92,6 +93,7 @@ struct ContextSnapshotRow {
     l5_world_background: Option<serde_json::Value>,
     l6_optional_supplement: Option<serde_json::Value>,
     actual_tokens: Option<i32>,
+    reproducibility_meta: serde_json::Value,
     created_at: DateTime<Utc>,
 }
 
@@ -119,6 +121,7 @@ impl From<ContextSnapshotRow> for ContextPackage {
             l5_world_background: parse_layer(r.l5_world_background),
             l6_optional_supplement: parse_layer(r.l6_optional_supplement),
             actual_tokens: r.actual_tokens.unwrap_or(0),
+            reproducibility: serde_json::from_value(r.reproducibility_meta.clone()).unwrap_or_default(),
             created_at: r.created_at,
         }
     }

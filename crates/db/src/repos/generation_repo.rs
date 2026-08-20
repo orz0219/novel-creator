@@ -250,7 +250,7 @@ impl RunRepo {
         Self { pool }
     }
 
-    /// 记录一次 GenerationRun（提案 十 / 十一）。token_usage 以 JSONB 存储。
+    /// 记录一次 GenerationRun（提案 十 / 十一）。token_usage 与 reproducibility_meta 以 JSONB 存储。
     pub async fn create(
         &self,
         project_id: Uuid,
@@ -262,10 +262,11 @@ impl RunRepo {
         response_received: &str,
         token_usage: Option<serde_json::Value>,
         latency_ms: Option<i64>,
+        reproducibility: &domain::generation::ReproducibilityMeta,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO generation_run (id, project_id, task_id, context_snapshot_id, llm_model, provider, prompt_sent, response_received, token_usage, latency_ms, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())",
+            "INSERT INTO generation_run (id, project_id, task_id, context_snapshot_id, llm_model, provider, prompt_sent, response_received, token_usage, latency_ms, reproducibility_meta, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(project_id)
@@ -277,6 +278,7 @@ impl RunRepo {
         .bind(response_received)
         .bind(token_usage.as_ref())
         .bind(latency_ms)
+        .bind(serde_json::to_value(reproducibility).unwrap_or_default())
         .execute(&self.pool)
         .await
         .context("Failed to create generation run")?;

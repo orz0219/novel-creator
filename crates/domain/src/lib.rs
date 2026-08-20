@@ -29,9 +29,17 @@ pub mod story_contract;
 pub mod narrative_budget;
 pub mod narrative_thread;
 pub mod novel_snapshot;
+pub mod character_mind;
+pub mod state_mgmt;
+pub mod repair;
+pub mod world_version;
 
 // Re-export commonly used types
 pub use entity::*;
+pub use character_mind::*;
+pub use state_mgmt::*;
+pub use repair::*;
+pub use world_version::*;
 pub use world::*;
 pub use character::*;
 pub use faction::*;

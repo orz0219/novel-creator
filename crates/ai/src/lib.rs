@@ -1,28 +1,31 @@
 //! AI 执行与上下文模型层。
 //!
-//! 这一层承载原本位于 domain 的"AI 执行 / 上下文建模"模块：
+//! 这一层承载 AI 执行 / 上下文建模的"过程"模块：
 //! skill（技能与上下文策略）、extractor（LLM 输出结构化提取）、
-//! retrieval（检索体系）、repair（剧情修复）、job（异步任务状态机）、
-//! character_mind（角色认知模型）、state_mgmt（状态管理 / 知识缺口 / 多级记忆）。
+//! retrieval（检索体系）、job（异步任务状态机）。
 //!
-//! 依赖倒置：ai 依赖 domain（读取领域类型），但 domain 不依赖 ai，
-//! 因此不会出现 domain -> ai 的循环依赖。runtime / application / db
-//! 等上层在需要这些 AI 概念时依赖 ai，而非把它们塞回 domain。
+//! 原位于本 crate 的"领域数据"模块（character_mind / state_mgmt / repair）
+//! 已被下沉到 `domain`（它们描述的是"世界事实"，不是 AI 推理过程）。
+//! 本 crate 仅保留向后兼容的 re-export 垫片，规范归属是 `domain`。
+//!
+//! 依赖方向（修正后，对应 ARCHITECTURE 评审 P0）：
+//!   db  → domain        （不再依赖 ai）
+//!   ai  → domain        （ai 读取/产生领域类型）
+//!   application / runtime / narrative-engine → domain (+ ai)
 //!
 //! 注意：generation（含 ContextPackage / ContextLayer）仍留在 domain，
 //! 因为 domain::ports 直接引用 ContextPackage，domain 不能反过来依赖 ai。
 
 pub mod extractor;
 pub mod retrieval;
-pub mod repair;
 pub mod job;
-pub mod character_mind;
-pub mod state_mgmt;
+
+// 领域数据已下沉到 domain；保留 re-export 垫片以兼容旧引用。
+pub use domain::character_mind;
+pub use domain::state_mgmt;
+pub use domain::repair;
 
 // Re-export commonly used AI-layer types (mirrors domain's glob re-exports).
 pub use extractor::*;
 pub use retrieval::*;
-pub use repair::*;
 pub use job::*;
-pub use character_mind::*;
-pub use state_mgmt::*;
