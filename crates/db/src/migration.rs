@@ -3,13 +3,53 @@
 //! 按顺序执行 SQL migration 文件，确保幂等性。
 
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
-/// 运行所有 migration
+/// 迁移 advisory lock 的固定键（任意常量，仅用于互斥）。
+const MIGRATION_LOCK_KEY: i64 = 0x6E6F_7665_6C5F_6D67; // 'novel_mg'
+
+/// 运行所有 migration。
+///
+/// 并发安全：cargo 会并行运行多个测试二进制，启动时各自调用本函数；
+/// 对全新数据库，无锁并发会导致 "relation already exists" /
+/// `_migrations.name` 唯一键冲突等随机失败。这里用 PostgreSQL 会话级
+/// advisory lock 保证同一时刻只有一个 runner 执行迁移。
+///
+/// 注意：advisory lock 是**连接级**的，因此锁与全部迁移语句必须在
+/// 同一条专用连接上执行；连接关闭时锁自动释放（进程崩溃也安全）。
 pub async fn run_migrations(pool: &PgPool, migrations_dir: &str) -> Result<Vec<String>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("Failed to acquire database connection")?;
+
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATION_LOCK_KEY)
+        .execute(&mut *conn)
+        .await
+        .context("Failed to acquire migration advisory lock")?;
+
+    let result = run_migrations_on_conn(&mut *conn, migrations_dir).await;
+
+    // 无论成功失败都要释放锁；即使此处失败/panic，连接归还池或被关闭时也会释放
+    if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(MIGRATION_LOCK_KEY)
+        .execute(&mut *conn)
+        .await
+    {
+        tracing::warn!("Failed to release migration advisory lock: {}", e);
+    }
+
+    result
+}
+
+async fn run_migrations_on_conn(
+    conn: &mut PgConnection,
+    migrations_dir: &str,
+) -> Result<Vec<String>> {
     let mut executed = Vec::new();
 
-    // 创建 migration 追踪表
+    // 创建 migration 追踪表（此时已持有 advisory lock）
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS _migrations (
             id SERIAL PRIMARY KEY,
@@ -17,13 +57,13 @@ pub async fn run_migrations(pool: &PgPool, migrations_dir: &str) -> Result<Vec<S
             applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .context("Failed to create migrations table")?;
 
-    // 获取已执行的 migration
+    // 获取已执行的 migration（必须在拿到锁之后再读，避免读到并发 runner 的中间态）
     let applied: Vec<String> = sqlx::query_scalar("SELECT name FROM _migrations ORDER BY id")
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .context("Failed to query migrations")?;
 
@@ -61,7 +101,7 @@ pub async fn run_migrations(pool: &PgPool, migrations_dir: &str) -> Result<Vec<S
         tracing::info!("Applying migration: {}", file);
 
         // Apply schema + record migration in a single transaction
-        let mut tx = pool.begin().await.context("Failed to begin migration transaction")?;
+        let mut tx = conn.begin().await.context("Failed to begin migration transaction")?;
 
         sqlx::raw_sql(&sql)
             .execute(&mut *tx)
