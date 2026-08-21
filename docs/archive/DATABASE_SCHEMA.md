@@ -1,3 +1,7 @@
+> ⚠️ **本文档已归档（2026-08-21）**：内容与真实数据库 schema 严重漂移（真实库 92 张表，见 `crates/db/migrations/001–017`）。
+> 请勿以本文档为对照基准。Schema 的唯一事实来源是 `crates/db/migrations/` 与 `crates/db/src/schema.rs`。
+> 背景见 `FRONTEND_AUDIT_REPORT.md` 第一节。
+
 # Database Schema Specification
 
 ## Tables
