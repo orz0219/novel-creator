@@ -10,8 +10,9 @@ use chrono::Utc;
 use domain::ports::{
     ApprovalRepositoryPort, ContextSnapshotRepositoryPort, EntityRepositoryPort,
     ForeshadowRepositoryPort, GenerationRepositoryPort, HistoryRepositoryPort,
-    NarrativeRepositoryPort, ProjectRepositoryPort, ProposalRepositoryPort, RuleRepositoryPort,
-    SnapshotRepositoryPort, StorylineRepositoryPort, TimelineRepositoryPort, WorldRepositoryPort,
+    NarrativeRepositoryPort, NarrativeStateWritePort, ProjectRepositoryPort, ProposalRepositoryPort,
+    RuleRepositoryPort, SnapshotRepositoryPort, StorylineRepositoryPort, TimelineRepositoryPort,
+    WorldRepositoryPort,
 };
 use domain::*;
 use serde_json::Value;
@@ -1676,6 +1677,70 @@ impl SnapshotRepositoryPort for DbSnapshotRepositoryPort {
             return Err(anyhow::anyhow!("Snapshot not found"));
         }
         Ok(())
+    }
+
+    async fn find_snapshot(&self, id: Uuid) -> Result<Option<Value>> {
+        let row: Option<(Uuid, Uuid, Option<String>, String, String, Option<String>, Option<String>, i32, i32, i32, i32, Option<String>)> =
+            sqlx::query_as(
+                "SELECT id, project_id, scene_id::text, story_time, world_summary, main_character_state, current_location, \
+                        COALESCE(active_threads_count,0), COALESCE(unresolved_foreshadows_count,0), \
+                        COALESCE(known_characters_count,0), COALESCE(known_locations_count,0), \
+                        state_data::text \
+                 FROM novel_state_snapshot WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("Failed to find snapshot")?;
+
+        Ok(row.map(
+            |(id, project_id, scene_id, story_time, world_summary, main_character_state, current_location, threads, foreshadows, chars, locs, state_data)| {
+                serde_json::json!({
+                    "id": id.to_string(),
+                    "project_id": project_id.to_string(),
+                    "scene_id": scene_id,
+                    "story_time": story_time,
+                    "world_summary": world_summary,
+                    "main_character_state": main_character_state,
+                    "current_location": current_location,
+                    "active_threads_count": threads,
+                    "unresolved_foreshadows_count": foreshadows,
+                    "known_characters_count": chars,
+                    "known_locations_count": locs,
+                    "state_data": state_data.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+                })
+            },
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NarrativeStateWritePort（快照恢复等状态回写）
+// ---------------------------------------------------------------------------
+
+/// narrative_state 幂等写入的数据库实现。
+pub struct DbNarrativeStateWritePort {
+    pool: PgPool,
+}
+
+impl DbNarrativeStateWritePort {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl NarrativeStateWritePort for DbNarrativeStateWritePort {
+    async fn upsert_state(
+        &self,
+        project_id: Uuid,
+        dimension: domain::narrative::StateDimension,
+        state_key: &str,
+        state_value: Value,
+    ) -> Result<()> {
+        crate::repos::narrative_state_repo::NarrativeStateRepo::new(self.pool.clone())
+            .upsert(project_id, dimension, state_key, state_value)
+            .await
     }
 }
 

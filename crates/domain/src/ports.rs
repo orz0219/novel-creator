@@ -531,6 +531,21 @@ pub trait SnapshotRepositoryPort: Send + Sync {
         world_summary: Option<&str>,
     ) -> Result<serde_json::Value>;
     async fn delete_snapshot(&self, id: Uuid) -> Result<()>;
+    /// 按 id 读取单个快照（含全部列），不存在返回 None。
+    async fn find_snapshot(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
+}
+
+/// 叙事状态（narrative_state）写入端口 —— 快照恢复等状态回写的唯一通道。
+#[async_trait]
+pub trait NarrativeStateWritePort: Send + Sync {
+    /// 幂等写入：同 (project_id, dimension, key) 已存在则更新，否则插入。
+    async fn upsert_state(
+        &self,
+        project_id: Uuid,
+        dimension: crate::narrative::StateDimension,
+        state_key: &str,
+        state_value: serde_json::Value,
+    ) -> Result<()>;
 }
 
 /// Entity（实体 + 关系 + 角色子数据）仓储端口。

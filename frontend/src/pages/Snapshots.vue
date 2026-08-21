@@ -42,6 +42,9 @@
         </div>
 
         <div class="snap-actions">
+          <button class="action-btn" :disabled="restoringId === snap.id" @click="handleRestore(snap)">
+            {{ restoringId === snap.id ? '恢复中…' : '恢复' }}
+          </button>
           <button class="action-btn danger" @click="handleDelete(snap.id)">删除</button>
         </div>
       </div>
@@ -66,6 +69,7 @@ const projectId = (route.params.id as string) || projectStore.currentProject?.id
 
 const snapshots = ref<Snapshot[]>([])
 const loading = ref(false)
+const restoringId = ref<string | null>(null)
 
 onMounted(async () => {
   loading.value = true
@@ -91,8 +95,22 @@ async function handleCreate() {
 }
 
 async function handleDelete(id: string) {
+  if (!confirm('确定删除该快照？此操作不可撤销。')) return
   await snapshotsApi.delete(id)
   snapshots.value = await snapshotsApi.list(projectId).catch(() => [])
+}
+
+async function handleRestore(snap: Snapshot) {
+  if (!confirm(`将世界状态恢复到快照「${snap.name}」时点？当前叙事状态将被覆盖。`)) return
+  restoringId.value = snap.id
+  try {
+    await snapshotsApi.restore(snap.id)
+    alert('快照已恢复：宏观状态已写回叙事状态（时间线/世界摘要/主角状态/当前位置）。')
+  } catch (e: any) {
+    alert(`恢复失败：${e?.message ?? e}`)
+  } finally {
+    restoringId.value = null
+  }
 }
 </script>
 

@@ -103,6 +103,7 @@ pub fn router(state: AppState) -> Router {
         // Snapshots
         .route("/api/v1/projects/{id}/snapshots", get(snapshots::list_snapshots).post(snapshots::create_snapshot))
         .route("/api/v1/snapshots/{id}", delete(snapshots::delete_snapshot))
+        .route("/api/v1/snapshots/{id}/restore", post(snapshots::restore_snapshot))
         // Settings (global)
         .route("/api/v1/settings", get(settings::get_settings).put(settings::update_settings))
         // Health

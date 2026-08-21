@@ -92,6 +92,41 @@ impl NarrativeStateRepo {
 
         Ok(row.map(|r| r.into()))
     }
+
+    /// 更新已存在状态行的值与 updated_at。
+    pub async fn update_value(
+        &self,
+        id: Uuid,
+        state_value: serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE narrative_state SET state_value = $1, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(&state_value)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update narrative state")?;
+        Ok(())
+    }
+
+    /// 幂等写入：同 (project_id, dimension, key) 已存在则更新，否则插入。
+    pub async fn upsert(
+        &self,
+        project_id: Uuid,
+        dimension: StateDimension,
+        state_key: &str,
+        state_value: serde_json::Value,
+    ) -> Result<()> {
+        match self.get_by_key(project_id, dimension.clone(), state_key).await? {
+            Some(existing) => self.update_value(existing.id, state_value).await,
+            None => {
+                self.create(project_id, dimension, state_key, state_value, None)
+                    .await
+                    .map(|_| ())
+            }
+        }
+    }
 }
 
 #[derive(sqlx::FromRow)]

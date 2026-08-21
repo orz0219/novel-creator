@@ -15,9 +15,17 @@ export interface Snapshot {
   created_at: string
 }
 
+export interface RestoreResult {
+  restored: boolean
+  snapshot_id: string
+  project_id: string
+  restored_keys: string[]
+}
+
 export const snapshotsApi = {
   list: (projectId: string) => api.get<Snapshot[]>(`/projects/${projectId}/snapshots`),
   create: (projectId: string, data: { name?: string; story_time?: string; world_summary?: string }) =>
     api.post<Snapshot>(`/projects/${projectId}/snapshots`, data),
   delete: (id: string) => api.delete<void>(`/snapshots/${id}`),
+  restore: (id: string) => api.post<RestoreResult>(`/snapshots/${id}/restore`),
 }
