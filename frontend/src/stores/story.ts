@@ -95,6 +95,11 @@ export const useStoryStore = defineStore("story", () => {
     return result
   }
 
+  async function deleteStoryline(id: string) {
+    await storylineApi.delete(id)
+    storylines.value = storylines.value.filter(s => s.id !== id)
+  }
+
   // CRUD: Foreshadows
   async function createForeshadow(projectId: string, data: Partial<Foreshadowing>) {
     const result = await foreshadowApi.create(projectId, data)
@@ -109,6 +114,11 @@ export const useStoryStore = defineStore("story", () => {
     return result
   }
 
+  async function deleteForeshadow(id: string) {
+    await foreshadowApi.delete(id)
+    foreshadows.value = foreshadows.value.filter(f => f.id !== id)
+  }
+
   function selectNode(id: string | null) {
     selectedNodeId.value = id
   }
@@ -121,8 +131,8 @@ export const useStoryStore = defineStore("story", () => {
     nodes, storylines, foreshadows, loading, error, selectedNodeId, selectedNode, tree,
     fetchNodes, fetchStorylines, fetchForeshadows,
     createNode, updateNode, deleteNode,
-    createStoryline, updateStoryline,
-    createForeshadow, updateForeshadow,
+    createStoryline, updateStoryline, deleteStoryline,
+    createForeshadow, updateForeshadow, deleteForeshadow,
     selectNode,
   }
 })

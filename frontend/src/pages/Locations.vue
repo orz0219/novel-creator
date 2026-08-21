@@ -2,7 +2,7 @@
   <div class="locations-page">
     <div class="page-header">
       <h1 class="page-title">地点</h1>
-      <button class="btn-primary" @click="showCreateDialog = true">+ 新建地点</button>
+      <button class="btn-primary" @click="openCreate()">+ 新建地点</button>
     </div>
     <div v-if="worldStore.error" class="error-banner">{{ worldStore.error }}</div>
     <div v-if="worldStore.locations.length" class="entity-grid">
@@ -11,7 +11,7 @@
         :key="loc.id"
         :entity="loc"
         type="Location"
-        @click="openEdit(loc)"
+        @click="openDetail(loc)"
         @delete="handleDelete(loc)"
       />
     </div>
@@ -20,31 +20,107 @@
       <span class="empty-text">暂无地点，点击上方按钮创建</span>
     </div>
 
+    <!-- Base info (name/summary/description) dialog -->
     <EntityDialog
       v-model="showDialog"
       :entity-type="'地点'"
       :edit-data="editingEntity"
       @submit="handleSubmit"
     />
+
+    <!-- Location design detail panel -->
+    <div v-if="showDetail && viewingEntity" class="detail-panel">
+      <div class="detail-header">
+        <span class="detail-title">地点设计档案</span>
+        <span class="detail-subtitle">{{ viewingEntity.name }}</span>
+        <button class="btn-ghost" @click="openBaseEdit()">编辑基础信息</button>
+        <button class="btn-ghost" @click="showDetail = false">收起</button>
+      </div>
+
+      <div class="detail-section-head">
+        <h3 class="detail-section-title">设计字段</h3>
+        <button class="btn-save" :disabled="saving" @click="saveProfile()">
+          {{ saving ? '保存中…' : '保存档案' }}
+        </button>
+      </div>
+
+      <div class="profile-grid">
+        <div class="form-group" v-for="f in profileFields" :key="f.key">
+          <label class="form-label">{{ f.label }}</label>
+          <textarea
+            v-if="f.textarea"
+            v-model="profileForm[f.key]"
+            class="form-textarea"
+            rows="2"
+          ></textarea>
+          <input v-else v-model="profileForm[f.key]" class="form-input" type="text" />
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref } from 'vue'
 import { useWorldStore } from '@/stores/world'
 import EntityCard from '@/components/ui/EntityCard.vue'
 import EntityDialog from '@/components/ui/EntityDialog.vue'
-import type { Entity } from '@/types'
+import { locationProfileApi } from '@/api/character'
+import type { Entity, LocationProfile } from '@/types'
 
 const worldStore = useWorldStore()
 
-const showCreateDialog = ref(false)
 const showDialog = ref(false)
 const editingEntity = ref<Entity | null>(null)
+const showDetail = ref(false)
+const viewingEntity = ref<Entity | null>(null)
+const profileForm = ref<Partial<LocationProfile>>({})
+const saving = ref(false)
 
-function openEdit(entity: Entity) {
-  editingEntity.value = entity
+type LocField = { key: keyof LocationProfile; label: string; textarea?: boolean }
+const profileFields: LocField[] = [
+  { key: 'location_type', label: '地点类型' },
+  { key: 'size', label: '规模' },
+  { key: 'climate', label: '气候' },
+  { key: 'era', label: '纪元' },
+  { key: 'accessibility', label: '可达性' },
+  { key: 'population', label: '人口' },
+  { key: 'geography', label: '地理', textarea: true },
+  { key: 'appearance', label: '外貌', textarea: true },
+  { key: 'economy', label: '经济', textarea: true },
+  { key: 'rules', label: '规则', textarea: true },
+  { key: 'history', label: '历史', textarea: true },
+  { key: 'narrative_usage', label: '叙事用途', textarea: true },
+]
+
+async function openDetail(entity: Entity) {
+  viewingEntity.value = entity
+  showDetail.value = true
+  profileForm.value =
+    (await locationProfileApi.get(entity.id).catch(() => null)) ?? ({} as Partial<LocationProfile>)
+}
+
+function openCreate() {
+  editingEntity.value = null
   showDialog.value = true
+}
+
+function openBaseEdit() {
+  if (!viewingEntity.value) return
+  editingEntity.value = viewingEntity.value
+  showDialog.value = true
+}
+
+async function saveProfile() {
+  if (!viewingEntity.value) return
+  saving.value = true
+  try {
+    await locationProfileApi.upsert(viewingEntity.value.id, profileForm.value)
+  } catch (e: any) {
+    worldStore.error = e?.message || '保存地点档案失败'
+  } finally {
+    saving.value = false
+  }
 }
 
 async function handleSubmit(data: { name: string; summary?: string; description?: string }) {
@@ -53,9 +129,11 @@ async function handleSubmit(data: { name: string; summary?: string; description?
     worldStore.error = '未找到世界数据'
     return
   }
-
   if (editingEntity.value) {
     await worldStore.updateLocation(editingEntity.value.id, data)
+    if (viewingEntity.value?.id === editingEntity.value.id) {
+      viewingEntity.value = { ...viewingEntity.value, ...data }
+    }
   } else {
     await worldStore.createLocation(worldId, data)
   }
@@ -65,15 +143,11 @@ async function handleSubmit(data: { name: string; summary?: string; description?
 async function handleDelete(entity: Entity) {
   if (!confirm(`确认删除「${entity.name}」？此操作不可撤销。`)) return
   await worldStore.deleteLocation(entity.id)
-}
-
-watch(showCreateDialog, (v) => {
-  if (v) {
-    editingEntity.value = null
-    showDialog.value = true
-    showCreateDialog.value = false
+  if (viewingEntity.value?.id === entity.id) {
+    showDetail.value = false
+    viewingEntity.value = null
   }
-})
+}
 </script>
 
 <style scoped>
@@ -87,4 +161,33 @@ watch(showCreateDialog, (v) => {
 .empty-icon { font-size: 48px; margin-bottom: var(--space-4); }
 .empty-text { font-size: var(--text-sm); }
 .error-banner { padding: var(--space-3) var(--space-4); background: var(--color-error-subtle); color: var(--color-error); border-radius: var(--radius-sm); margin-bottom: var(--space-4); font-size: var(--text-sm); }
+
+.detail-panel { margin-top: var(--space-6); padding: var(--space-6); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.detail-header { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-4); }
+.detail-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-primary); font-family: var(--font-serif); }
+.detail-subtitle { font-size: var(--text-sm); color: var(--text-tertiary); }
+.btn-ghost { margin-left: auto; padding: var(--space-1) var(--space-3); background: transparent; border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; color: var(--text-secondary); }
+.btn-ghost:last-child { margin-left: var(--space-2); }
+.btn-ghost:hover { background: var(--color-surface-hover); }
+
+.detail-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-3); }
+.detail-section-title { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
+.btn-save { padding: var(--space-1) var(--space-3); background: var(--color-primary); border: none; color: white; border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; }
+.btn-save:disabled { opacity: 0.6; cursor: default; }
+
+.profile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-4); }
+.form-group { display: flex; flex-direction: column; gap: var(--space-1); }
+.form-label { font-size: var(--text-sm); font-weight: 500; color: var(--text-secondary); }
+.form-input, .form-textarea {
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  outline: none;
+  font-family: inherit;
+}
+.form-textarea { resize: vertical; }
+.form-input:focus, .form-textarea:focus { border-color: var(--color-primary); }
 </style>

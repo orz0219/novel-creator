@@ -2,25 +2,37 @@
   <div class="storylines-page">
     <div class="page-header">
       <h1 class="page-title">剧情线</h1>
-      <button class="btn-primary" @click="showCreateDialog = true">+ 新建剧情线</button>
+      <button class="btn-primary" @click="openCreate">+ 新建剧情线</button>
     </div>
+    <div v-if="storyStore.error" class="error-banner">{{ storyStore.error }}</div>
     <div v-if="storyStore.storylines.length" class="storyline-list">
-      <div v-for="sl in storyStore.storylines" :key="sl.id" class="storyline-card">
+      <div v-for="sl in storyStore.storylines" :key="sl.id" class="storyline-card" @click="openEdit(sl)">
         <div class="sl-header">
           <span class="sl-dot" :class="(sl.status || '').toLowerCase()"></span>
           <span class="sl-name">{{ sl.name }}</span>
-          <span class="sl-importance" :class="(sl.importance || '').toLowerCase()">{{ sl.importance }}</span>
-          <StatusBadge :status="(sl.status || '').toLowerCase()" :label="sl.status || ''" />
+          <StatusBadge v-if="sl.status" :status="(sl.status || '').toLowerCase()" :label="statusLabel(sl.status)" />
+          <span v-if="sl.importance" class="sl-importance" :class="(sl.importance || '').toLowerCase()">{{ importanceLabel(sl.importance) }}</span>
+          <button class="btn-danger" @click.stop="handleDelete(sl)">删除</button>
         </div>
         <div class="sl-desc">{{ sl.description }}</div>
+        <div class="sl-meta">
+          <div v-if="sl.created_volume_id" class="sl-meta-row">
+            <span class="sl-meta-label">起始卷</span>
+            <span class="sl-meta-value">{{ sl.created_volume_id }}</span>
+          </div>
+          <div v-if="sl.resolved_volume_id" class="sl-meta-row">
+            <span class="sl-meta-label">终结卷</span>
+            <span class="sl-meta-value">{{ sl.resolved_volume_id }}</span>
+          </div>
+        </div>
       </div>
     </div>
     <div v-else class="empty-state">
       <p>暂无剧情线</p>
     </div>
 
-    <!-- Create Dialog -->
-    <NeDialog v-model="showCreateDialog" title="新建剧情线" size="md">
+    <!-- Create/Edit Dialog -->
+    <NeDialog v-model="showDialog" :title="editingId ? '编辑剧情线' : '新建剧情线'" size="md">
       <form @submit.prevent="handleSubmit" class="entity-form">
         <div class="form-group">
           <label class="form-label">名称 *</label>
@@ -31,46 +43,141 @@
           <textarea v-model="form.description" class="form-textarea" placeholder="剧情线描述" rows="3"></textarea>
         </div>
         <div class="form-group">
+          <label class="form-label">状态</label>
+          <select v-model="form.status" class="form-select">
+            <option value="Planned">计划中</option>
+            <option value="Active">进行中</option>
+            <option value="Resolved">已解决</option>
+            <option value="Abandoned">已放弃</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label class="form-label">重要性</label>
           <select v-model="form.importance" class="form-select">
             <option value="Main">主线</option>
             <option value="Important">重要</option>
-            <option value="Normal">一般</option>
+            <option value="Normal">普通</option>
+            <option value="Minor">次要</option>
           </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">起始卷 (created_volume_id)</label>
+          <input v-model="form.created_volume_id" class="form-input" placeholder="卷 UUID" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">终结卷 (resolved_volume_id)</label>
+          <input v-model="form.resolved_volume_id" class="form-input" placeholder="卷 UUID" />
         </div>
       </form>
       <template #footer>
-        <button class="btn-secondary" @click="showCreateDialog = false">取消</button>
-        <button class="btn-primary" @click="handleSubmit">创建</button>
+        <button class="btn-secondary" @click="showDialog = false">取消</button>
+        <button class="btn-primary" @click="handleSubmit">保存</button>
       </template>
     </NeDialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useStoryStore } from '@/stores/story'
+import type { Storyline, StorylineStatus, StorylineImportance } from '@/types/narrative'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import NeDialog from '@/components/ui/NeDialog.vue'
 
 const route = useRoute()
 const storyStore = useStoryStore()
+const projectId = route.params.id as string
 
-const showCreateDialog = ref(false)
-const form = ref({ name: '', description: '', importance: 'Normal' })
+const statusMap: Record<StorylineStatus, string> = {
+  Planned: '计划中',
+  Active: '进行中',
+  Resolved: '已解决',
+  Abandoned: '已放弃',
+}
+const importanceMap: Record<StorylineImportance, string> = {
+  Main: '主线',
+  Important: '重要',
+  Normal: '普通',
+  Minor: '次要',
+}
+
+function statusLabel(s: StorylineStatus) {
+  return statusMap[s] ?? s
+}
+function importanceLabel(i: StorylineImportance) {
+  return importanceMap[i] ?? i
+}
+
+const showDialog = ref(false)
+const editingId = ref<string | null>(null)
+const form = ref({
+  name: '',
+  description: '',
+  status: 'Planned' as StorylineStatus,
+  importance: 'Normal' as StorylineImportance,
+  created_volume_id: '',
+  resolved_volume_id: '',
+})
+
+function resetForm() {
+  form.value = {
+    name: '',
+    description: '',
+    status: 'Planned',
+    importance: 'Normal',
+    created_volume_id: '',
+    resolved_volume_id: '',
+  }
+}
+
+function openCreate() {
+  editingId.value = null
+  resetForm()
+  showDialog.value = true
+}
+
+function openEdit(sl: Storyline) {
+  editingId.value = sl.id
+  form.value = {
+    name: sl.name,
+    description: sl.description ?? '',
+    status: sl.status,
+    importance: sl.importance,
+    created_volume_id: sl.created_volume_id ?? '',
+    resolved_volume_id: sl.resolved_volume_id ?? '',
+  }
+  showDialog.value = true
+}
+
+async function handleDelete(sl: Storyline) {
+  if (!confirm(`确认删除剧情线「${sl.name}」？此操作不可撤销。`)) return
+  await storyStore.deleteStoryline(sl.id)
+}
 
 async function handleSubmit() {
   if (!form.value.name.trim()) return
-  const projectId = route.params.id as string
-  await storyStore.createStoryline(projectId, {
+  const payload = {
     name: form.value.name.trim(),
     description: form.value.description.trim() || undefined,
-    importance: form.value.importance as any,
-  })
-  showCreateDialog.value = false
-  form.value = { name: '', description: '', importance: 'Normal' }
+    status: form.value.status,
+    importance: form.value.importance,
+    created_volume_id: form.value.created_volume_id.trim() || undefined,
+    resolved_volume_id: form.value.resolved_volume_id.trim() || undefined,
+  }
+  if (editingId.value) {
+    await storyStore.updateStoryline(editingId.value, payload)
+  } else {
+    await storyStore.createStoryline(projectId, payload)
+  }
+  showDialog.value = false
+  editingId.value = null
+  resetForm()
 }
+
+onMounted(async () => {
+  await storyStore.fetchStorylines(projectId)
+})
 </script>
 
 <style scoped>
@@ -79,18 +186,28 @@ async function handleSubmit() {
 .page-title { font-size: var(--text-2xl); font-weight: 700; font-family: var(--font-serif); }
 .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); border: none; color: white; border-radius: var(--radius-sm); font-size: var(--text-sm); cursor: pointer; }
 .btn-primary:hover { background: var(--color-primary-hover); }
+.error-banner { padding: var(--space-3) var(--space-4); background: var(--color-error-subtle); color: var(--color-error); border-radius: var(--radius-sm); margin-bottom: var(--space-4); font-size: var(--text-sm); }
 .storyline-list { display: flex; flex-direction: column; gap: var(--space-3); }
-.storyline-card { padding: var(--space-4) var(--space-5); border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-panel); }
-.sl-header { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-2); }
+.storyline-card { padding: var(--space-4) var(--space-5); border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-panel); cursor: pointer; }
+.storyline-card:hover { border-color: var(--border-emphasis); }
+.sl-header { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-2); flex-wrap: wrap; }
+.btn-danger { margin-left: auto; padding: var(--space-1) var(--space-3); background: transparent; border: 1px solid var(--border-default); color: var(--color-error); border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; }
+.btn-danger:hover { border-color: var(--color-error); background: var(--color-error-subtle); }
 .sl-dot { width: 8px; height: 8px; border-radius: 50%; }
-.sl-dot.active { background: var(--color-success); }
+.sl-dot.active, .sl-dot.resolved { background: var(--color-success); }
 .sl-dot.planned { background: var(--text-tertiary); }
+.sl-dot.abandoned { background: var(--color-error); }
 .sl-name { font-size: var(--text-md); font-weight: 600; }
 .sl-importance { font-size: var(--text-xs); padding: 2px 8px; border-radius: 10px; }
 .sl-importance.main { background: var(--color-primary-subtle); color: var(--color-primary-text); }
 .sl-importance.important { background: var(--color-accent-subtle); color: var(--color-accent); }
 .sl-importance.normal { background: var(--bg-panel-secondary); color: var(--text-tertiary); }
+.sl-importance.minor { background: var(--bg-panel-secondary); color: var(--text-tertiary); }
 .sl-desc { font-size: var(--text-sm); color: var(--text-secondary); }
+.sl-meta { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-2); }
+.sl-meta-row { display: flex; gap: var(--space-3); font-size: var(--text-xs); }
+.sl-meta-label { flex: 0 0 48px; color: var(--text-tertiary); }
+.sl-meta-value { color: var(--text-secondary); font-family: var(--font-mono, monospace); word-break: break-all; }
 .empty-state { padding: var(--space-12); text-align: center; color: var(--text-tertiary); }
 .entity-form { display: flex; flex-direction: column; gap: var(--space-4); }
 .form-group { display: flex; flex-direction: column; gap: var(--space-1); }

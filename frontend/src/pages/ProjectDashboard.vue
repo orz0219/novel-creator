@@ -1,127 +1,160 @@
 <template>
   <div class="dashboard-page">
-    <div class="page-header">
-      <h1 class="page-title">天玄大陆</h1>
-      <p class="page-subtitle">一部修仙题材长篇小说 · 创作中</p>
+    <div v-if="projectStore.loading && !projectStore.currentProject" class="loading-state">
+      <span class="loading-text">加载中…</span>
     </div>
 
-    <div class="dashboard-grid">
-      <!-- Stats Cards -->
-      <div class="stats-row">
-        <div class="stat-card">
-          <span class="stat-value">{{ worldStore.characters.length }}</span>
-          <span class="stat-label">人物</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-value">{{ worldStore.locations.length }}</span>
-          <span class="stat-label">地点</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-value">{{ worldStore.factions.length }}</span>
-          <span class="stat-label">势力</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-value">{{ worldStore.events.length }}</span>
-          <span class="stat-label">事件</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-value">{{ storyStore.storylines.length }}</span>
-          <span class="stat-label">剧情线</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-value">{{ storyStore.foreshadows.length }}</span>
-          <span class="stat-label">伏笔</span>
+    <template v-else>
+      <div v-if="projectStore.error" class="error-banner">{{ projectStore.error }}</div>
+
+      <div class="page-header">
+        <h1 class="page-title">{{ projectStore.currentProject?.name || '未命名项目' }}</h1>
+        <div class="page-subhead">
+          <p v-if="projectStore.currentProject?.description" class="page-subtitle">
+            {{ projectStore.currentProject.description }}
+          </p>
+          <StatusBadge
+            v-if="projectStore.currentProject?.status"
+            :status="(projectStore.currentProject.status || '').toLowerCase()"
+            :label="projectStatusLabel[projectStore.currentProject.status] || projectStore.currentProject.status"
+          />
         </div>
       </div>
 
-      <!-- Current Progress -->
-      <div class="panel">
-        <div class="panel-header">
-          <h3 class="panel-title">当前进度</h3>
-          <router-link :to="`/project/${route.params.id}/story`" class="panel-link">查看全部 →</router-link>
+      <div class="dashboard-grid">
+        <!-- Stats Cards -->
+        <div class="stats-row">
+          <router-link class="stat-card" :to="`/project/${projectId}/world/characters`">
+            <span class="stat-value">{{ worldStore.characters.length }}</span>
+            <span class="stat-label">人物</span>
+          </router-link>
+          <router-link class="stat-card" :to="`/project/${projectId}/world/locations`">
+            <span class="stat-value">{{ worldStore.locations.length }}</span>
+            <span class="stat-label">地点</span>
+          </router-link>
+          <router-link class="stat-card" :to="`/project/${projectId}/world/factions`">
+            <span class="stat-value">{{ worldStore.factions.length }}</span>
+            <span class="stat-label">势力</span>
+          </router-link>
+          <router-link class="stat-card" :to="`/project/${projectId}/world/timeline`">
+            <span class="stat-value">{{ worldStore.events.length }}</span>
+            <span class="stat-label">事件</span>
+          </router-link>
+          <router-link class="stat-card" :to="`/project/${projectId}/story/storylines`">
+            <span class="stat-value">{{ storyStore.storylines.length }}</span>
+            <span class="stat-label">剧情线</span>
+          </router-link>
+          <router-link class="stat-card" :to="`/project/${projectId}/story/foreshadows`">
+            <span class="stat-value">{{ storyStore.foreshadows.length }}</span>
+            <span class="stat-label">伏笔</span>
+          </router-link>
         </div>
-        <div class="progress-list">
-          <div v-for="vol in storyStore.tree" :key="vol.id" class="progress-volume">
-            <div class="volume-header">
-              <span class="volume-name">{{ vol.title }}</span>
-              <span class="volume-status" :class="(vol.status || '').toLowerCase()">{{ vol.status }}</span>
+
+        <!-- Characters -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">人物</h3>
+            <router-link :to="`/project/${projectId}/world/characters`" class="panel-link">查看全部 →</router-link>
+          </div>
+          <div v-if="worldStore.characters.length" class="entity-list">
+            <div v-for="char in worldStore.characters.slice(0, 5)" :key="char.id" class="entity-item">
+              <span class="entity-name">{{ char.name }}</span>
+              <span v-if="char.summary" class="entity-desc">{{ char.summary }}</span>
             </div>
-            <div v-for="arc in vol.children" :key="arc.id" class="progress-arc">
-              <span class="arc-name">{{ arc.title }}</span>
-              <div class="arc-chapters">
-                <div
-                  v-for="ch in arc.children"
-                  :key="ch.id"
-                  class="chapter-dot"
-                  :class="(ch.status || '').toLowerCase()"
-                  :title="ch.title"
-                >
-                  {{ ch.title.replace(/第.*章[：:]\s*/, '').slice(0, 2) }}
-                </div>
-              </div>
+          </div>
+          <div v-else class="panel-empty">暂无人物</div>
+        </div>
+
+        <!-- Locations -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">地点</h3>
+            <router-link :to="`/project/${projectId}/world/locations`" class="panel-link">查看全部 →</router-link>
+          </div>
+          <div v-if="worldStore.locations.length" class="entity-list">
+            <div v-for="loc in worldStore.locations.slice(0, 5)" :key="loc.id" class="entity-item">
+              <span class="entity-name">{{ loc.name }}</span>
+              <span v-if="loc.summary" class="entity-desc">{{ loc.summary }}</span>
             </div>
           </div>
+          <div v-else class="panel-empty">暂无地点</div>
         </div>
-      </div>
 
-      <!-- Recent Events -->
-      <div class="panel">
-        <div class="panel-header">
-          <h3 class="panel-title">世界事件</h3>
-          <router-link :to="`/project/${route.params.id}/world/timeline`" class="panel-link">查看全部 →</router-link>
-        </div>
-        <div class="event-list">
-          <div v-for="event in worldStore.events" :key="event.id" class="event-item">
-            <span class="event-time">{{ event.timestamp }}</span>
-            <span class="event-name">{{ event.name }}</span>
-            <span class="event-desc">{{ event.description }}</span>
+        <!-- Storylines -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">剧情线</h3>
+            <router-link :to="`/project/${projectId}/story/storylines`" class="panel-link">查看全部 →</router-link>
           </div>
+          <div v-if="storyStore.storylines.length" class="storyline-list">
+            <div v-for="sl in storyStore.storylines.slice(0, 5)" :key="sl.id" class="storyline-item">
+              <span class="sl-dot" :class="(sl.status || '').toLowerCase()"></span>
+              <span class="sl-name">{{ sl.name }}</span>
+              <span class="sl-importance">{{ sl.importance }}</span>
+              <StatusBadge :status="(sl.status || '').toLowerCase()" :label="sl.status || ''" />
+            </div>
+          </div>
+          <div v-else class="panel-empty">暂无剧情线</div>
         </div>
-      </div>
 
-      <!-- Storylines -->
-      <div class="panel">
-        <div class="panel-header">
-          <h3 class="panel-title">剧情线</h3>
-          <router-link :to="`/project/${route.params.id}/story/storylines`" class="panel-link">查看全部 →</router-link>
-        </div>
-        <div class="storyline-list">
-          <div v-for="sl in storyStore.storylines" :key="sl.id" class="storyline-item">
-            <span class="sl-dot" :class="(sl.status || '').toLowerCase()"></span>
-            <span class="sl-name">{{ sl.name }}</span>
-            <span class="sl-importance">{{ sl.importance }}</span>
-            <span class="sl-status">{{ sl.status }}</span>
+        <!-- Foreshadows -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">活跃伏笔</h3>
+            <router-link :to="`/project/${projectId}/story/foreshadows`" class="panel-link">查看全部 →</router-link>
           </div>
+          <div v-if="storyStore.foreshadows.length" class="foreshadow-list">
+            <div v-for="fs in storyStore.foreshadows.slice(0, 5)" :key="fs.id" class="foreshadow-item">
+              <StatusBadge :status="(fs.status || '').toLowerCase()" :label="fs.status || ''" />
+              <span class="fs-name">{{ fs.name }}</span>
+              <span class="fs-desc">{{ fs.description }}</span>
+            </div>
+          </div>
+          <div v-else class="panel-empty">暂无伏笔</div>
         </div>
       </div>
-
-      <!-- Foreshadows -->
-      <div class="panel">
-        <div class="panel-header">
-          <h3 class="panel-title">活跃伏笔</h3>
-          <router-link :to="`/project/${route.params.id}/story/foreshadows`" class="panel-link">查看全部 →</router-link>
-        </div>
-        <div class="foreshadow-list">
-          <div v-for="fs in storyStore.foreshadows" :key="fs.id" class="foreshadow-item">
-            <span class="fs-badge" :class="(fs.status || '').toLowerCase()">{{ fs.status }}</span>
-            <span class="fs-name">{{ fs.name }}</span>
-            <span class="fs-desc">{{ fs.description }}</span>
-          </div>
-        </div>
-      </div>
-    </div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { useRoute } from "vue-router"
-const route = useRoute()
+import { computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
+import { useProjectStore } from '@/stores/project'
 import { useWorldStore } from '@/stores/world'
 import { useStoryStore } from '@/stores/story'
+import StatusBadge from '@/components/ui/StatusBadge.vue'
+import type { ProjectStatus } from '@/types/project'
 
+const route = useRoute()
+const projectStore = useProjectStore()
 const worldStore = useWorldStore()
 const storyStore = useStoryStore()
 
+const projectId = route.params.id as string
+const worldId = computed(() => worldStore.currentWorld?.id ?? '')
+
+const projectStatusLabel: Record<ProjectStatus, string> = {
+  Concept: '构思中',
+  Planning: '规划中',
+  Writing: '创作中',
+  Paused: '已暂停',
+  Completed: '已完成',
+  Archived: '已归档',
+}
+
+onMounted(async () => {
+  await projectStore.fetchProject(projectId)
+  await worldStore.fetchWorld(projectId)
+  if (worldId.value) {
+    await worldStore.fetchCharacters(worldId.value)
+    await worldStore.fetchLocations(worldId.value)
+    await worldStore.fetchFactions(worldId.value)
+    await worldStore.fetchEvents(projectId)
+  }
+  await storyStore.fetchStorylines(projectId)
+  await storyStore.fetchForeshadows(projectId)
+})
 </script>
 
 <style scoped>
@@ -131,8 +164,34 @@ const storyStore = useStoryStore()
   padding: var(--space-6) var(--space-8);
 }
 
+.loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-tertiary);
+}
+.loading-text { font-size: var(--text-sm); }
+
+.error-banner {
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-error-subtle);
+  color: var(--color-error);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-4);
+  font-size: var(--text-sm);
+}
+
 .page-header {
   margin-bottom: var(--space-8);
+}
+
+.page-subhead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  flex-wrap: wrap;
 }
 
 .page-title {
@@ -144,7 +203,6 @@ const storyStore = useStoryStore()
 .page-subtitle {
   font-size: var(--text-sm);
   color: var(--text-secondary);
-  margin-top: var(--space-1);
 }
 
 .dashboard-grid {
@@ -167,12 +225,18 @@ const storyStore = useStoryStore()
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-panel);
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.stat-card:hover {
+  border-color: var(--color-primary);
+  background: var(--bg-panel-secondary);
 }
 
 .stat-value {
   font-size: var(--text-2xl);
   font-weight: 700;
-  color: var(--color-primary-text);
+  color: var(--color-primary);
 }
 
 .stat-label {
@@ -203,99 +267,33 @@ const storyStore = useStoryStore()
 
 .panel-link {
   font-size: var(--text-xs);
-  color: var(--color-primary-text);
+  color: var(--color-primary);
   text-decoration: none;
 }
 .panel-link:hover { color: var(--color-primary-hover); }
 
-.progress-list {
-  padding: var(--space-4) var(--space-5);
-}
-
-.progress-volume {
-  margin-bottom: var(--space-4);
-}
-
-.volume-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-2);
-}
-
-.volume-name {
+.panel-empty {
+  padding: var(--space-5);
+  color: var(--text-tertiary);
   font-size: var(--text-sm);
-  font-weight: 600;
 }
 
-.volume-status {
-  font-size: var(--text-xs);
-  padding: 2px 8px;
-  border-radius: 10px;
-}
-.volume-status.inprogress { background: var(--color-accent-subtle); color: var(--color-accent); }
-
-.progress-arc {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-1) 0 var(--space-1) var(--space-4);
-}
-
-.arc-name {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  min-width: 100px;
-}
-
-.arc-chapters {
-  display: flex;
-  gap: var(--space-2);
-}
-
-.chapter-dot {
-  width: 32px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  font-size: 10px;
-  font-weight: 500;
-  cursor: default;
-}
-
-.chapter-dot.completed { background: var(--color-success-subtle); color: var(--color-success); }
-.chapter-dot.inprogress { background: var(--color-accent-subtle); color: var(--color-accent); }
-.chapter-dot.planned { background: var(--bg-panel-secondary); color: var(--text-tertiary); }
-.chapter-dot.draft { background: var(--color-warning-subtle); color: var(--color-warning); }
-
-.event-list {
+.entity-list {
   padding: var(--space-3) var(--space-5);
 }
 
-.event-item {
+.entity-item {
   display: flex;
-  gap: var(--space-4);
+  align-items: baseline;
+  gap: var(--space-3);
   padding: var(--space-2) 0;
   border-bottom: 1px solid var(--border-muted);
   font-size: var(--text-sm);
 }
+.entity-item:last-child { border-bottom: none; }
 
-.event-time {
-  color: var(--text-tertiary);
-  min-width: 120px;
-  font-size: var(--text-xs);
-}
-
-.event-name {
-  font-weight: 500;
-  min-width: 100px;
-}
-
-.event-desc {
-  color: var(--text-secondary);
-}
+.entity-name { font-weight: 500; min-width: 80px; }
+.entity-desc { color: var(--text-secondary); }
 
 .storyline-list {
   padding: var(--space-3) var(--space-5);
@@ -313,13 +311,13 @@ const storyStore = useStoryStore()
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  flex-shrink: 0;
 }
 .sl-dot.active { background: var(--color-success); }
 .sl-dot.planned { background: var(--text-tertiary); }
 
 .sl-name { font-weight: 500; }
 .sl-importance { color: var(--text-tertiary); font-size: var(--text-xs); }
-.sl-status { margin-left: auto; color: var(--text-tertiary); font-size: var(--text-xs); }
 
 .foreshadow-list {
   padding: var(--space-3) var(--space-5);
@@ -332,15 +330,6 @@ const storyStore = useStoryStore()
   padding: var(--space-2) 0;
   font-size: var(--text-sm);
 }
-
-.fs-badge {
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 3px;
-  flex-shrink: 0;
-}
-.fs-badge.introduced { background: var(--color-info-subtle); color: var(--color-info); }
-.fs-badge.active { background: var(--color-warning-subtle); color: var(--color-warning); }
 
 .fs-name { font-weight: 500; min-width: 80px; }
 .fs-desc { color: var(--text-secondary); }

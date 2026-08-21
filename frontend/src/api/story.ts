@@ -14,10 +14,12 @@ export const storylineApi = {
   list: (projectId: string) => api.get<Storyline[]>(`/projects/${projectId}/storylines`),
   create: (projectId: string, data: Partial<Storyline>) => api.post<Storyline>(`/projects/${projectId}/storylines`, data),
   update: (id: string, data: Partial<Storyline>) => api.put<Storyline>(`/storylines/${id}`, data),
+  delete: (id: string) => api.delete<void>(`/storylines/${id}`),
 }
 
 export const foreshadowApi = {
   list: (projectId: string) => api.get<Foreshadowing[]>(`/projects/${projectId}/foreshadows`),
   create: (projectId: string, data: Partial<Foreshadowing>) => api.post<Foreshadowing>(`/projects/${projectId}/foreshadows`, data),
   update: (id: string, data: Partial<Foreshadowing>) => api.put<Foreshadowing>(`/foreshadows/${id}`, data),
+  delete: (id: string) => api.delete<void>(`/foreshadows/${id}`),
 }

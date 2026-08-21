@@ -2,44 +2,80 @@
   <div class="graph-page">
     <div class="page-header">
       <h1 class="page-title">关系图谱</h1>
-      <div class="graph-controls">
-        <button v-for="filter in filters" :key="filter.id" class="filter-btn" :class="{ active: activeFilter === filter.id }" @click="activeFilter = filter.id">
-          {{ filter.label }}
-        </button>
+      <div class="legend">
+        <span v-for="l in legend" :key="l.type" class="legend-item">
+          <span class="legend-dot" :style="{ background: l.color }"></span>
+          {{ l.label }}
+        </span>
       </div>
     </div>
 
+    <div v-if="!loading && nodes.length === 0" class="empty-state">
+      <span class="empty-icon">🕸️</span>
+      <span class="empty-text">暂无实体或可关系，请先在「人物 / 地点 / 势力」中添加数据</span>
+    </div>
+
     <div class="graph-container">
-      <svg class="graph-svg" viewBox="0 0 800 600">
-        <!-- Edges -->
-        <line v-for="edge in edges" :key="edge.id"
-          :x1="getNodePos(edge.from).x" :y1="getNodePos(edge.from).y"
-          :x2="getNodePos(edge.to).x" :y2="getNodePos(edge.to).y"
-          stroke="rgba(255,255,255,0.15)" stroke-width="1.5"
-        />
-        <!-- Edge labels -->
-        <text v-for="edge in edges" :key="edge.id + '-label'"
-          :x="(getNodePos(edge.from).x + getNodePos(edge.to).x) / 2"
-          :y="(getNodePos(edge.from).y + getNodePos(edge.to).y) / 2 - 6"
-          fill="rgba(255,255,255,0.4)" font-size="10" text-anchor="middle"
-        >{{ edge.label }}</text>
-        <!-- Nodes -->
-        <g v-for="node in nodes" :key="node.id" class="graph-node" @click="selectNode(node)">
-          <circle
-            :cx="node.x" :cy="node.y" :r="node.type === 'Character' ? 28 : 24"
-            :fill="nodeColors[node.type] || '#333'"
-            :stroke="selectedNode?.id === node.id ? '#C84B31' : 'rgba(255,255,255,0.2)'"
-            :stroke-width="selectedNode?.id === node.id ? 2 : 1"
-            opacity="0.9"
+      <div
+        class="graph-canvas"
+        :style="{ transform: `scale(${scale})`, transformOrigin: 'center center' }"
+      >
+        <svg class="graph-svg" :viewBox="`0 0 ${CANVAS_SIZE} ${CANVAS_SIZE}`" :width="CANVAS_SIZE" :height="CANVAS_SIZE">
+          <!-- Edges -->
+          <line
+            v-for="edge in visibleEdges"
+            :key="edge.id"
+            :x1="nodePos[edge.from]?.x ?? 0"
+            :y1="nodePos[edge.from]?.y ?? 0"
+            :x2="nodePos[edge.to]?.x ?? 0"
+            :y2="nodePos[edge.to]?.y ?? 0"
+            stroke="rgba(255,255,255,0.15)"
+            stroke-width="1.5"
           />
-          <text :x="node.x" :y="node.y + 4" fill="white" font-size="12" text-anchor="middle" font-weight="500">
-            {{ node.name.slice(0, 3) }}
-          </text>
-          <text :x="node.x" :y="node.y + 40" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">
-            {{ node.name }}
-          </text>
-        </g>
-      </svg>
+          <!-- Edge labels -->
+          <text
+            v-for="edge in visibleEdges"
+            :key="edge.id + '-label'"
+            :x="((nodePos[edge.from]?.x ?? 0) + (nodePos[edge.to]?.x ?? 0)) / 2"
+            :y="((nodePos[edge.from]?.y ?? 0) + (nodePos[edge.to]?.y ?? 0)) / 2 - 6"
+            fill="rgba(255,255,255,0.4)"
+            font-size="10"
+            text-anchor="middle"
+          >{{ edge.label }}</text>
+          <!-- Nodes -->
+          <g
+            v-for="node in visibleNodes"
+            :key="node.id"
+            class="graph-node"
+            @click="selectNode(node)"
+          >
+            <circle
+              :cx="node.x"
+              :cy="node.y"
+              :r="node.type === 'Character' ? 28 : 24"
+              :fill="nodeColors[node.type] || '#333'"
+              :stroke="selectedNode?.id === node.id ? '#C84B31' : 'rgba(255,255,255,0.2)'"
+              :stroke-width="selectedNode?.id === node.id ? 2 : 1"
+              opacity="0.9"
+            />
+            <text
+              :x="node.x"
+              :y="node.y + 4"
+              fill="white"
+              font-size="12"
+              text-anchor="middle"
+              font-weight="500"
+            >{{ node.name.slice(0, 3) }}</text>
+            <text
+              :x="node.x"
+              :y="node.y + 40"
+              fill="rgba(255,255,255,0.6)"
+              font-size="11"
+              text-anchor="middle"
+            >{{ node.name }}</text>
+          </g>
+        </svg>
+      </div>
 
       <!-- Node Inspector -->
       <div class="graph-inspector" v-if="selectedNode">
@@ -66,33 +102,49 @@
         </div>
       </div>
     </div>
-    <GraphControls :zoom="1" active-filter="all" @zoom-in="zoomIn" @zoom-out="zoomOut" @zoom-reset="zoomReset" @fit="fitGraph" @center="centerGraph" />
+
+    <GraphControls
+      :zoom="scale"
+      :active-filter="activeFilter"
+      @zoom-in="zoomIn"
+      @zoom-out="zoomOut"
+      @zoom-reset="zoomReset"
+      @fit="fitGraph"
+      @center="centerGraph"
+      @filter="activeFilter = $event"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { useWorldStore } from '@/stores/world'
+import GraphControls from '@/components/graph/GraphControls.vue'
+import type { Entity, Relation } from '@/types/world'
 
+const route = useRoute()
 const worldStore = useWorldStore()
+const projectId = route.params.id as string
+const worldId = computed(() => worldStore.currentWorld?.id ?? '')
 
-import GraphControls from "@/components/graph/GraphControls.vue"
-
+const CANVAS_SIZE = 900
+const loading = ref(false)
 const activeFilter = ref('all')
-const selectedNode = ref<any>(null)
-
-const filters = [
-  { id: 'all', label: '全部' },
-  { id: 'Character', label: '人物' },
-  { id: 'Location', label: '地点' },
-  { id: 'Faction', label: '势力' },
-]
+const selectedNode = ref<GraphNode | null>(null)
+const scale = ref(1)
 
 const nodeColors: Record<string, string> = {
   Character: '#2D5A8E',
   Location: '#4A7C59',
   Faction: '#8B4513',
 }
+
+const legend = [
+  { type: 'Character', label: '人物', color: nodeColors.Character },
+  { type: 'Location', label: '地点', color: nodeColors.Location },
+  { type: 'Faction', label: '势力', color: nodeColors.Faction },
+]
 
 interface GraphNode {
   id: string
@@ -110,79 +162,135 @@ interface GraphEdge {
   label: string
 }
 
-const nodes = computed<GraphNode[]>(() => {
-  const allNodes: GraphNode[] = [
-    // Characters
-    { id: 'char-1', name: '林凡', type: 'Character', summary: '主角，边境散修', x: 300, y: 200 },
-    { id: 'char-2', name: '苏晚晴', type: 'Character', summary: '女主，神秘女子', x: 500, y: 200 },
-    { id: 'char-3', name: '王天德', type: 'Character', summary: '王家家主', x: 200, y: 350 },
-    // Locations
-    { id: 'loc-1', name: '黑石城', type: 'Location', summary: '北境重镇', x: 400, y: 400 },
-    { id: 'loc-2', name: '地下遗迹', type: 'Location', summary: '远古遗迹', x: 600, y: 350 },
-    { id: 'loc-3', name: '古井', type: 'Location', summary: '神秘古井', x: 550, y: 450 },
-    // Factions
-    { id: 'fac-1', name: '王家', type: 'Faction', summary: '四大家族之首', x: 150, y: 250 },
-    { id: 'fac-2', name: '黑市', type: 'Faction', summary: '地下势力', x: 650, y: 250 },
+// Combine the three entity collections into one node array, tagging the type
+// by which store slice each entity belongs to (entities expose entity_type_id,
+// but the slice determines the graph type unambiguously).
+const allNodes = computed<GraphNode[]>(() => {
+  const circle = (entities: Entity[], type: string): GraphNode[] =>
+    entities.map((e) => ({ ...toNode(e), type }))
+  return [
+    ...circle(worldStore.characters, 'Character'),
+    ...circle(worldStore.locations, 'Location'),
+    ...circle(worldStore.factions, 'Faction'),
   ]
+})
 
-  if (activeFilter.value !== 'all') {
-    return allNodes.filter(n => n.type === activeFilter.value)
+const allEdges = computed<GraphEdge[]>(() =>
+  worldStore.relations.map((r: Relation) => ({
+    id: r.id,
+    from: r.source_entity_id,
+    to: r.target_entity_id,
+    label: r.relation_type,
+  })),
+)
+
+// Deterministic layout: arrange every node on a circle by index. The API
+// provides no x/y, so this gives stable, evenly-spaced positions.
+const nodePos = computed<Record<string, { x: number; y: number }>>(() => {
+  const list = allNodes.value
+  const cx = CANVAS_SIZE / 2
+  const cy = CANVAS_SIZE / 2
+  const radius = CANVAS_SIZE / 2 - 80
+  const pos: Record<string, { x: number; y: number }> = {}
+  list.forEach((n, i) => {
+    const angle = (2 * Math.PI * i) / Math.max(list.length, 1)
+    pos[n.id] = {
+      x: cx + radius * Math.cos(angle),
+      y: cy + radius * Math.sin(angle),
+    }
+  })
+  return pos
+})
+
+const nodes = computed<GraphNode[]>(() =>
+  allNodes.value.map((n) => ({ ...n, ...nodePos.value[n.id] })),
+)
+
+const visibleNodes = computed<GraphNode[]>(() =>
+  activeFilter.value === 'all'
+    ? nodes.value
+    : nodes.value.filter((n) => n.type === activeFilter.value),
+)
+
+const visibleEdges = computed<GraphEdge[]>(() => {
+  const ids = new Set(visibleNodes.value.map((n) => n.id))
+  return allEdges.value.filter((e) => ids.has(e.from) && ids.has(e.to))
+})
+
+function toNode(e: Entity): GraphNode {
+  return {
+    id: e.id,
+    name: e.name,
+    type: e.entity_type_id,
+    summary: e.summary,
+    x: 0,
+    y: 0,
   }
-  return allNodes
-})
-
-const edges = computed<GraphEdge[]>(() => {
-  const allEdges: GraphEdge[] = [
-    { id: 'e1', from: 'char-1', to: 'char-2', label: '同伴' },
-    { id: 'e2', from: 'char-3', to: 'char-1', label: '追杀' },
-    { id: 'e3', from: 'char-1', to: 'loc-1', label: '位于' },
-    { id: 'e4', from: 'char-1', to: 'loc-2', label: '探索' },
-    { id: 'e5', from: 'char-2', to: 'loc-2', label: '同行' },
-    { id: 'e6', from: 'char-3', to: 'fac-1', label: '领导' },
-    { id: 'e7', from: 'fac-1', to: 'loc-1', label: '控制' },
-    { id: 'e8', from: 'char-1', to: 'loc-3', label: '发现' },
-    { id: 'e9', from: 'fac-2', to: 'loc-1', label: '隐藏于' },
-  ]
-
-  const nodeIds = new Set(nodes.value.map(n => n.id))
-  return allEdges.filter(e => nodeIds.has(e.from) && nodeIds.has(e.to))
-})
-
-function getNodePos(id: string) {
-  const node = nodes.value.find(n => n.id === id)
-  return node ? { x: node.x, y: node.y } : { x: 0, y: 0 }
 }
 
-function selectNode(node: any) {
-  selectedNode.value = selectedNode.value?.id === node.id ? null : node
+function getNodeById(id: string) {
+  return nodes.value.find((n) => n.id === id)
 }
 
 function getNodeRelations(id: string) {
-  return edges.value.filter(e => e.from === id || e.to === id)
+  return visibleEdges.value.filter((e) => e.from === id || e.to === id)
 }
 
-function zoomIn() { console.log('zoom in') }
-function zoomOut() { console.log('zoom out') }
-function zoomReset() { console.log('zoom reset') }
-function fitGraph() { console.log('fit') }
-function centerGraph() { console.log('center') }
-
-function getNodeById(id: string) {
-  return nodes.value.find(n => n.id === id)
+function selectNode(node: GraphNode) {
+  selectedNode.value = selectedNode.value?.id === node.id ? null : node
 }
+
+const MIN_SCALE = 0.3
+const MAX_SCALE = 3
+function zoomIn() {
+  scale.value = Math.min(MAX_SCALE, scale.value + 0.1)
+}
+function zoomOut() {
+  scale.value = Math.max(MIN_SCALE, scale.value - 0.1)
+}
+function zoomReset() {
+  scale.value = 1
+}
+function fitGraph() {
+  scale.value = 1
+}
+function centerGraph() {
+  scale.value = 1
+}
+
+onMounted(async () => {
+  loading.value = true
+  try {
+    if (!worldStore.currentWorld) await worldStore.fetchWorld(projectId)
+    if (worldId.value) {
+      await worldStore.fetchCharacters(worldId.value)
+      await worldStore.fetchLocations(worldId.value)
+      await worldStore.fetchFactions(worldId.value)
+      await worldStore.fetchRelations(worldId.value)
+    }
+  } finally {
+    loading.value = false
+  }
+})
 </script>
 
 <style scoped>
 .graph-page { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
 .page-header { display: flex; justify-content: space-between; align-items: center; padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--border-default); flex-shrink: 0; }
 .page-title { font-size: var(--text-xl); font-weight: 700; font-family: var(--font-serif); }
-.graph-controls { display: flex; gap: var(--space-2); }
-.filter-btn { padding: var(--space-1) var(--space-3); border: 1px solid var(--border-default); background: transparent; color: var(--text-secondary); border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; transition: all var(--transition-fast); }
-.filter-btn.active { background: var(--color-primary-subtle); border-color: var(--color-primary); color: var(--color-primary-text); }
+
+.legend { display: flex; gap: var(--space-4); }
+.legend-item { display: flex; align-items: center; gap: var(--space-1); font-size: var(--text-xs); color: var(--text-secondary); }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 
 .graph-container { flex: 1; position: relative; overflow: hidden; }
-.graph-svg { width: 100%; height: 100%; }
+.graph-canvas { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; transition: transform var(--transition-fast); }
+.graph-svg { max-width: 100%; max-height: 100%; }
 .graph-node { cursor: pointer; }
+
+.empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-tertiary); }
+.empty-icon { font-size: 48px; margin-bottom: var(--space-4); }
+.empty-text { font-size: var(--text-sm); }
 
 .graph-inspector {
   position: absolute;

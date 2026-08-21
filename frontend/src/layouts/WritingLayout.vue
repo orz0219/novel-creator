@@ -69,7 +69,19 @@
       <div class="editor-empty" v-else>
         <div class="empty-icon">✍️</div>
         <div class="empty-title">选择一个场景开始写作</div>
-        <div class="empty-desc">从左侧故事结构中选择一个场景</div>
+        <div class="empty-desc">选择下方任一场景后，即可用「AI 生成」撰写本章正文</div>
+        <div v-if="flatScenes.length" class="scene-quicklist">
+          <button
+            v-for="s in flatScenes"
+            :key="s.id"
+            class="scene-quickitem"
+            @click="loadScene(s.id)"
+          >
+            <span class="status-dot" :class="(s.status || '').toLowerCase()"></span>
+            <span class="scene-quicktitle">{{ s.title || '未命名场景' }}</span>
+          </button>
+        </div>
+        <button class="action-btn primary" @click="createAndOpenScene">＋ 新建场景</button>
       </div>
       <div class="editor-footer" v-if="editorStore.currentSceneId">
         <span class="footer-item">字数：{{ editorStore.wordCount }}</span>
@@ -152,28 +164,27 @@
           </div>
         </div>
 
-        <!-- Story State -->
+        <!-- Story State (real, derived from narrative nodes) -->
         <div class="context-subtitle">故事状态 (Story State)</div>
         <div class="context-meta-list">
-          <div class="meta-item"><span class="meta-label">当前卷</span><span class="meta-value">第一卷：黑石城</span></div>
-          <div class="meta-item"><span class="meta-label">当前弧线</span><span class="meta-value">王家追杀</span></div>
-          <div class="meta-item"><span class="meta-label">当前章节</span><span class="meta-value">第四章：地下遗迹</span></div>
-          <div class="meta-item"><span class="meta-label">进度</span><span class="meta-value">场景2/5</span></div>
+          <div class="meta-item"><span class="meta-label">场景总数</span><span class="meta-value">{{ sceneCount }}</span></div>
+          <div class="meta-item"><span class="meta-label">已完成场景</span><span class="meta-value">{{ completedSceneCount }}</span></div>
+          <div class="meta-item"><span class="meta-label">叙事节点</span><span class="meta-value">{{ storyStore.nodes.length }}</span></div>
         </div>
 
-        <!-- Selection Reasons -->
+        <!-- Selection Reasons (real, from loaded context entities) -->
         <div class="context-subtitle">选择原因 (Selection Reasons)</div>
-        <div class="reason-list">
-          <div class="reason-item">林凡：当前Scene主角，最近3个Scene出现</div>
-          <div class="reason-item">苏晚晴：当前Scene参与者，与主角关系密切</div>
-          <div class="reason-item">地下遗迹：当前Scene地点，核心剧情地点</div>
-          <div class="reason-item">王家：当前剧情线相关势力，追杀主角</div>
+        <div class="reason-list" v-if="contextStore.entities.length">
+          <div class="reason-item" v-for="e in contextStore.entities" :key="e.entity_id">
+            {{ e.entity_name }}：{{ e.reasons.join('，') }}
+          </div>
         </div>
+        <div class="reason-empty" v-else>暂无选择原因</div>
       </div>
 
       <!-- Knowledge Tab -->
       <div class="context-content" v-if="activeContextTab === 'knowledge'">
-        <KnowledgePanel character-name="林凡" />
+        <KnowledgePanel />
       </div>
 
       <!-- Constraint Tab -->
@@ -274,7 +285,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useStoryStore } from '@/stores/story'
 import { useEditorStore } from '@/stores/editor'
@@ -312,21 +323,47 @@ const statusLabels: Record<string, string> = {
   Validating: '验证中',
   Completed: '已完成',
   Failed: '失败',
+  Cancelled: '已取消',
 }
 
 const currentScene = computed(() =>
   storyStore.nodes.find(n => n.id === editorStore.currentSceneId)
 )
 
+const sceneCount = computed(
+  () => storyStore.nodes.filter((n) => n.node_type === "Scene").length,
+)
+const completedSceneCount = computed(
+  () =>
+    storyStore.nodes.filter(
+      (n) => n.node_type === "Scene" && n.status === "Completed",
+    ).length,
+)
+
 const currentSceneTitle = computed(() =>
   currentScene.value?.title || '未选择场景'
 )
 
+// 扁平列出项目中所有「场景」节点，让用户在写作页空状态也能直接挑选场景，
+// 不必受左侧树（仅展示 卷→幕→章→场景 层级）限制——顶层场景在左树不可见，
+// 但在此处始终可选，AI 入口因而不再“找不到”。
+const flatScenes = computed(() =>
+  storyStore.nodes
+    .filter((n) => n.node_type === 'Scene')
+    .map((n) => ({ id: n.id, title: n.title, status: n.status })),
+)
+
 // Load data and scene
 
-contextStore.loadMockContext()
-generationStore.loadMockData()
-
+// Load real scene context when a scene is selected (no more mock data).
+watch(
+  () => editorStore.currentSceneId,
+  (id) => {
+    if (id) contextStore.loadContext(id)
+    else contextStore.reset()
+  },
+  { immediate: true },
+)
 const projectId = route.params.id as string
 onMounted(async () => {
   if (projectId) {
@@ -336,6 +373,7 @@ onMounted(async () => {
       storyStore.fetchStorylines(projectId),
       storyStore.fetchForeshadows(projectId),
     ])
+    generationStore.loadTasks(projectId)
   }
 })
 
@@ -348,13 +386,21 @@ function loadScene(id: string) {
   editorStore.loadScene(id)
 }
 
+async function createAndOpenScene() {
+  const node = await storyStore.createNode(projectId, {
+    node_type: 'Scene',
+    title: `新场景 ${flatScenes.value.length + 1}`,
+  })
+  if (node?.id) loadScene(node.id)
+}
+
 function handleAiAction(payload: any) {
-  generationStore.startGeneration(payload.action === "rewrite" ? "RewriteSelection" : "GenerateScene")
+  generationStore.startGeneration(projectId, payload.action === "rewrite" ? "RewriteSelection" : "GenerateScene")
   activeContextTab.value = "generation"
 }
 
 function startGeneration() {
-  generationStore.startGeneration('GenerateScene', editorStore.currentSceneId || undefined)
+  generationStore.startGeneration(projectId, 'GenerateScene', editorStore.currentSceneId || undefined)
   activeContextTab.value = 'generation'
 }
 
@@ -578,7 +624,61 @@ function startResizeRight(e: MouseEvent) {
 }
 .empty-icon { font-size: 48px; }
 .empty-title { font-size: var(--text-lg); }
-.empty-desc { font-size: var(--text-sm); }
+.empty-desc { font-size: var(--text-sm); margin-bottom: var(--space-2); }
+
+.scene-quicklist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(420px, 80%);
+  max-height: 220px;
+  overflow-y: auto;
+  margin: var(--space-1) 0;
+}
+.scene-quickitem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-elevated, rgba(255,255,255,0.04));
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+.scene-quickitem:hover {
+  border-color: var(--accent, #6aa9ff);
+  background: rgba(255,255,255,0.08);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.status-dot.completed { background: #4caf7d; }
+.status-dot.draft { background: #d9a23b; }
+.scene-quicktitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.action-btn {
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated, rgba(255,255,255,0.04));
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.action-btn.primary {
+  background: var(--accent, #6aa9ff);
+  border-color: var(--accent, #6aa9ff);
+  color: #fff;
+}
+.action-btn.primary:hover { filter: brightness(1.08); }
 
 .editor-footer {
   display: flex;
@@ -666,6 +766,11 @@ function startResizeRight(e: MouseEvent) {
   font-size: var(--text-xs);
   color: var(--text-secondary);
   padding: 1px 0;
+}
+.reason-empty {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  padding: var(--space-1) 0;
 }
 
 .entity-actions {

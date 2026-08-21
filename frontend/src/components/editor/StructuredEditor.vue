@@ -33,7 +33,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { useWorldStore } from '@/stores/world'
 
 interface EditorBlock {
   id: string
@@ -46,7 +48,24 @@ const props = defineProps<{
   modelValue: string
 }>()
 
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits<{
+  (e: 'update:modelValue', value: string): void
+  (e: 'entity-click', name: string): void
+}>()
+
+const route = useRoute()
+const worldStore = useWorldStore()
+const projectId = route.params.id as string
+const worldId = computed(() => worldStore.currentWorld?.id ?? '')
+
+// DB-driven entity list: collect names from characters / locations / factions.
+const entityNames = computed<string[]>(() => {
+  return [
+    ...worldStore.characters.map((c) => c.name),
+    ...worldStore.locations.map((l) => l.name),
+    ...worldStore.factions.map((f) => f.name),
+  ].filter((name) => !!name)
+})
 
 const editorRef = ref<HTMLElement>()
 const activeBlockId = ref<string | null>(null)
@@ -86,7 +105,13 @@ function rebuildBlocks(text: string) {
 }
 
 // Initialize blocks from modelValue
-onMounted(() => {
+onMounted(async () => {
+  if (!worldStore.currentWorld) await worldStore.fetchWorld(projectId)
+  if (worldId.value) {
+    await worldStore.fetchCharacters(worldId.value)
+    await worldStore.fetchLocations(worldId.value)
+    await worldStore.fetchFactions(worldId.value)
+  }
   rebuildBlocks(props.modelValue)
 })
 
@@ -105,25 +130,21 @@ function detectBlockType(text: string): EditorBlock['type'] {
 }
 
 function highlightEntities(text: string): string {
-  // Highlight known entity names
-  const entities = [
-    { name: '林凡', type: 'Character', id: 'char-1' },
-    { name: '苏晚晴', type: 'Character', id: 'char-2' },
-    { name: '王天德', type: 'Character', id: 'char-3' },
-    { name: '黑石城', type: 'Location', id: 'loc-1' },
-    { name: '地下遗迹', type: 'Location', id: 'loc-2' },
-    { name: '古井', type: 'Location', id: 'loc-3' },
-    { name: '王家', type: 'Faction', id: 'fac-1' },
-    { name: '黑市', type: 'Faction', id: 'fac-2' },
-  ]
+  // Highlight DB-driven entity names in insertion order (longer names first to avoid partial matches).
+  const names = [...entityNames.value].sort((a, b) => b.length - a.length)
   let result = text
-  for (const entity of entities) {
+  for (const name of names) {
+    if (!name) continue
     result = result.replace(
-      new RegExp(entity.name, 'g'),
-      '<span class="entity-ref" data-entity-id="' + entity.id + '" data-entity-type="' + entity.type + '">' + entity.name + '</span>'
+      new RegExp(escapeRegExp(name), 'g'),
+      '<span class="entity-ref" data-entity-name="' + name + '">' + name + '</span>'
     )
   }
   return result
+}
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function setActiveBlock(id: string) {
@@ -184,15 +205,13 @@ function emitContent() {
   emit('update:modelValue', serialize())
 }
 
-// Listen for entity clicks
+// Listen for entity clicks and emit entity-click with the entity name
 onMounted(() => {
   editorRef.value?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement
     if (target.classList.contains('entity-ref')) {
-      const entityId = target.dataset.entityId
-      const entityType = target.dataset.entityType
-      console.log('Entity clicked:', entityId, entityType)
-      // Emit event to open inspector
+      const name = target.dataset.entityName
+      if (name) emit('entity-click', name)
     }
   })
 })
@@ -241,18 +260,10 @@ onMounted(() => {
 
 /* Entity reference highlighting */
 .block-content :deep(.entity-ref) {
-  cursor: pointer; border-bottom: 1px dashed; transition: all var(--transition-fast);
+  cursor: pointer; border-bottom: 1px dashed var(--color-accent);
+  color: var(--color-accent); transition: all var(--transition-fast);
 }
 .block-content :deep(.entity-ref:hover) { opacity: 0.8; }
-.block-content :deep(.entity-ref[data-entity-type="Character"]) {
-  border-color: var(--color-accent); color: var(--color-accent);
-}
-.block-content :deep(.entity-ref[data-entity-type="Location"]) {
-  border-color: var(--color-success); color: var(--color-success);
-}
-.block-content :deep(.entity-ref[data-entity-type="Faction"]) {
-  border-color: var(--color-warning); color: var(--color-warning);
-}
 
 .editor-footer {
   display: flex; gap: var(--space-2); padding: var(--space-2) var(--space-4);

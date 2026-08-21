@@ -5,7 +5,18 @@
       <button class="btn-primary" @click="showCreateDialog = true">+ 新建卷/章节</button>
     </div>
 
-    <div class="story-tree">
+    <div v-if="storyStore.error" class="error-banner">{{ storyStore.error }}</div>
+
+    <div v-if="storyStore.loading" class="loading-state">
+      <span class="loading-text">加载中…</span>
+    </div>
+
+    <div v-else-if="!storyStore.tree.length" class="empty-state">
+      <span class="empty-icon">📖</span>
+      <span class="empty-text">暂无故事结构，点击上方按钮创建</span>
+    </div>
+
+    <div v-else class="story-tree">
       <template v-for="vol in storyStore.tree" :key="vol.id">
         <div class="tree-volume">
           <div class="volume-header" @click="toggleExpand(vol.id)">
@@ -13,6 +24,8 @@
             <span class="volume-title">{{ vol.title }}</span>
             <StatusBadge :status="(vol.status || '').toLowerCase()" :label="vol.status" />
             <span class="volume-meta">{{ vol.description }}</span>
+            <button class="action-btn" @click.stop="openEdit(vol)">编辑</button>
+            <button class="action-btn danger" @click.stop="handleDelete(vol)">删除</button>
           </div>
           <div class="volume-body" v-if="expanded[vol.id]">
             <template v-for="arc in vol.children" :key="arc.id">
@@ -22,6 +35,8 @@
                   <span class="arc-title">{{ arc.title }}</span>
                   <StatusBadge :status="(arc.status || '').toLowerCase()" :label="arc.status" />
                   <span class="arc-meta">{{ arc.description }}</span>
+                  <button class="action-btn" @click.stop="openEdit(arc)">编辑</button>
+                  <button class="action-btn danger" @click.stop="handleDelete(arc)">删除</button>
                 </div>
                 <div class="arc-body" v-if="expanded[arc.id]">
                   <template v-for="ch in arc.children" :key="ch.id">
@@ -32,6 +47,8 @@
                         <span class="chapter-title">{{ ch.title }}</span>
                         <StatusBadge :status="(ch.status || '').toLowerCase()" :label="ch.status" />
                         <span class="chapter-meta">{{ ch.description }}</span>
+                        <button class="action-btn" @click.stop="openEdit(ch)">编辑</button>
+                        <button class="action-btn danger" @click.stop="handleDelete(ch)">删除</button>
                         <button class="write-btn" @click.stop="goToWrite(ch)">写作</button>
                       </div>
                       <div class="chapter-body" v-if="expanded[ch.id] && ch.children?.length">
@@ -39,6 +56,8 @@
                           <span class="scene-dot" :class="(scene.status || '').toLowerCase()"></span>
                           <span class="scene-title">{{ scene.title }}</span>
                           <span class="scene-time">{{ scene.attributes?.time || '' }}</span>
+                          <button class="action-btn" @click.stop="openEdit(scene)">编辑</button>
+                          <button class="action-btn danger" @click.stop="handleDelete(scene)">删除</button>
                         </div>
                       </div>
                     </div>
@@ -81,27 +100,67 @@
         <button class="btn-primary" @click="handleCreate">创建</button>
       </template>
     </NeDialog>
+
+    <!-- Edit Dialog -->
+    <NeDialog v-model="showEditDialog" title="编辑节点" size="md">
+      <form @submit.prevent="handleEditSave" class="entity-form">
+        <div class="form-group">
+          <label class="form-label">标题 *</label>
+          <input v-model="editForm.title" class="form-input" placeholder="请输入标题" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label">描述</label>
+          <textarea v-model="editForm.description" class="form-textarea" placeholder="请输入描述" rows="3"></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label">内容</label>
+          <textarea v-model="editForm.content" class="form-textarea" placeholder="请输入内容" rows="4"></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label">状态</label>
+          <select v-model="editForm.status" class="form-select">
+            <option v-for="s in statusOptions" :key="s.value" :value="s.value">{{ s.label }}</option>
+          </select>
+        </div>
+      </form>
+      <template #footer>
+        <button class="btn-secondary" @click="showEditDialog = false">取消</button>
+        <button class="btn-primary" @click="handleEditSave">保存</button>
+      </template>
+    </NeDialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useStoryStore } from '@/stores/story'
+import type { NarrativeNode, NarrativeNodeStatus, TreeNode } from '@/types'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import NeDialog from '@/components/ui/NeDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
 const storyStore = useStoryStore()
+const projectId = route.params.id as string
+
+const statusOptions: { value: NarrativeNodeStatus; label: string }[] = [
+  { value: 'Draft', label: '草稿' },
+  { value: 'Planned', label: '已规划' },
+  { value: 'InProgress', label: '进行中' },
+  { value: 'Completed', label: '已完成' },
+  { value: 'Archived', label: '已归档' },
+]
 
 const expanded = ref<Record<string, boolean>>({ 'vol-1': true, 'arc-2': true, 'ch-4': true })
 const showCreateDialog = ref(false)
+const showEditDialog = ref(false)
+const editingNode = ref<NarrativeNode | null>(null)
 const form = ref({ node_type: 'Volume', title: '', description: '', parent_id: null as string | null })
+const editForm = ref({ title: '', description: '', content: '', status: 'Draft' as NarrativeNodeStatus })
 
 async function handleCreate() {
   if (!form.value.title.trim()) return
-  const projectId = route.params.id as string
   await storyStore.createNode(projectId, {
     node_type: form.value.node_type as any,
     title: form.value.title.trim(),
@@ -110,6 +169,35 @@ async function handleCreate() {
   } as any)
   showCreateDialog.value = false
   form.value = { node_type: 'Volume', title: '', description: '', parent_id: null }
+}
+
+function openEdit(node: TreeNode) {
+  editingNode.value = node as unknown as NarrativeNode
+  editForm.value = {
+    title: node.title,
+    description: node.description || '',
+    content: (node as any).content || '',
+    status: node.status as NarrativeNodeStatus,
+  }
+  showEditDialog.value = true
+}
+
+async function handleEditSave() {
+  if (!editingNode.value) return
+  if (!editForm.value.title.trim()) return
+  await storyStore.updateNode(editingNode.value.id, {
+    title: editForm.value.title.trim(),
+    description: editForm.value.description.trim() || undefined,
+    content: editForm.value.content.trim() || undefined,
+    status: editForm.value.status,
+  })
+  showEditDialog.value = false
+  editingNode.value = null
+}
+
+async function handleDelete(node: TreeNode) {
+  if (!confirm(`确认删除「${node.title}」？此操作不可撤销，其子节点也会被删除。`)) return
+  await storyStore.deleteNode(node.id)
 }
 
 function toggleExpand(id: string) {
@@ -133,6 +221,10 @@ function findFirstScene(node: any): any {
   }
   return null
 }
+
+onMounted(async () => {
+  await storyStore.fetchNodes(projectId)
+})
 </script>
 
 <style scoped>
@@ -141,6 +233,13 @@ function findFirstScene(node: any): any {
 .page-title { font-size: var(--text-2xl); font-weight: 700; font-family: var(--font-serif); }
 .btn-primary { padding: var(--space-2) var(--space-4); background: var(--color-primary); border: none; color: white; border-radius: var(--radius-sm); font-size: var(--text-sm); cursor: pointer; }
 .btn-primary:hover { background: var(--color-primary-hover); }
+
+.error-banner { padding: var(--space-3) var(--space-4); background: var(--color-error-subtle); color: var(--color-error); border-radius: var(--radius-sm); margin-bottom: var(--space-4); font-size: var(--text-sm); }
+.loading-state { display: flex; align-items: center; justify-content: center; padding: var(--space-16); color: var(--text-tertiary); }
+.loading-text { font-size: var(--text-sm); }
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: var(--space-16); color: var(--text-tertiary); }
+.empty-icon { font-size: 48px; margin-bottom: var(--space-4); }
+.empty-text { font-size: var(--text-sm); }
 
 .story-tree { display: flex; flex-direction: column; gap: var(--space-4); }
 
@@ -181,6 +280,20 @@ function findFirstScene(node: any): any {
   transition: all var(--transition-fast);
 }
 .write-btn:hover { background: var(--color-primary-subtle); }
+
+.action-btn {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.action-btn:hover { border-color: var(--border-emphasis); color: var(--text-primary); }
+.action-btn.danger { color: var(--color-error); border-color: var(--color-error-border); }
+.action-btn.danger:hover { background: var(--color-error-subtle); }
 
 .chapter-body { }
 

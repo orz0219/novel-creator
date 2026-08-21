@@ -1,73 +1,73 @@
 import { defineStore } from "pinia"
 import { ref } from "vue"
-import type { GenerationTask, GenerationTaskStatus } from "@/types"
+import type { GenerationTask } from "@/types"
+import { generationApi } from "@/api/generation"
 
 export const useGenerationStore = defineStore("generation", () => {
   const tasks = ref<GenerationTask[]>([])
   const currentTask = ref<GenerationTask | null>(null)
   const loading = ref(false)
   const sseConnected = ref(false)
+  let pollTimer: ReturnType<typeof setInterval> | null = null
 
-  function loadMockData() {
-    tasks.value = [
-      {
-        id: "gen-1", type: "GenerateLocation" as any, target_id: "loc-2",
-        model: "mimo-v2.5", parameters: { description: "为第三卷设计地下遗迹" },
-        status: "Completed" as any, context_tokens: 6200,
-        result: "已生成地下遗迹设定，包含3个区域和5个机关。",
-        created_at: "2024-02-01T12:00:00Z", updated_at: "2024-02-01T12:05:00Z"
-      },
-      {
-        id: "gen-2", type: "GenerateScene" as any, target_id: "scene-1",
-        model: "mimo-v2.5", parameters: { word_count: 2000, style: "紧凑紧张" },
-        status: "Completed" as any, context_tokens: 8421,
-        result: "场景已生成，约2100字。",
-        created_at: "2024-03-10T10:00:00Z", updated_at: "2024-03-10T10:08:00Z"
-      },
-      {
-        id: "gen-3", type: "GenerateScene" as any, target_id: "scene-2",
-        model: "mimo-v2.5", parameters: { word_count: 2500, style: "紧张刺激" },
-        status: "BuildingContext" as any, context_tokens: 0,
-        created_at: "2024-03-12T14:00:00Z", updated_at: "2024-03-12T14:00:00Z"
-      },
-    ]
+  // Load real generation tasks for a project (replaces the old mock loader).
+  async function loadTasks(projectId: string) {
+    loading.value = true
+    try {
+      tasks.value = await generationApi.list(projectId)
+    } catch {
+      tasks.value = []
+    } finally {
+      loading.value = false
+    }
   }
 
-  function startGeneration(type: string, targetId?: string) {
-    const task: GenerationTask = {
-      id: "gen-" + Date.now(),
-      type: type as any,
-      target_id: targetId,
-      model: "mimo-v2.5",
-      parameters: {},
-      status: "Pending" as any,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer)
+      pollTimer = null
     }
-    tasks.value.unshift(task)
+  }
+
+  // Start a real generation and poll its status until it reaches a terminal state.
+  async function startGeneration(projectId: string, type: string, targetId?: string) {
+    stopPolling()
+    const task = await generationApi.start(projectId, { type, target_id: targetId })
     currentTask.value = task
-    simulateProgress(task)
+    pollTimer = setInterval(async () => {
+      try {
+        const t = await generationApi.get(task.id)
+        currentTask.value = t
+        if (t.status === "Completed" || t.status === "Failed" || t.status === "Cancelled") {
+          stopPolling()
+          loadTasks(projectId)
+        }
+      } catch {
+        stopPolling()
+      }
+    }, 2500)
+    // 创建任务后必须触发后端真正执行，否则任务会永远卡在 Pending。
+    generationApi.execute(task.id).catch((e) => {
+      console.error("generation execute failed", e)
+      stopPolling()
+    })
     return task
   }
 
-  function simulateProgress(task: GenerationTask) {
-    const stages: GenerationTaskStatus[] = ["BuildingContext", "Generating", "Validating", "Completed"]
-    let stageIndex = 0
-    const interval = setInterval(() => {
-      if (stageIndex < stages.length) {
-        task.status = stages[stageIndex]
-        task.updated_at = new Date().toISOString()
-        if (stageIndex === 0) task.context_tokens = 8421
-        if (stageIndex === 3) task.result = "生成完成。"
-        stageIndex++
-      } else {
-        clearInterval(interval)
-      }
-    }, 2000)
+  async function cancelGeneration(id: string) {
+    await generationApi.cancel(id)
+    if (currentTask.value?.id === id) {
+      currentTask.value = { ...currentTask.value, status: "Cancelled" }
+    }
   }
 
   return {
-    tasks, currentTask, loading, sseConnected,
-    loadMockData, startGeneration,
+    tasks,
+    currentTask,
+    loading,
+    sseConnected,
+    loadTasks,
+    startGeneration,
+    cancelGeneration,
   }
 })

@@ -18,15 +18,27 @@ export interface CharacterProfile extends Timestamps {
 }
 
 export interface CharacterState extends Timestamps {
-  id: string
-  entity_id: string
+  id?: string
+  entity_id?: string
   location?: string
   health?: string
   cultivation?: string
-  resources?: string
-  current_status?: string
-  emotion?: string
-  short_term_goal?: string
-  long_term_goal?: string
-  immediate_intention?: string
+  money?: string
+  wanted?: boolean
+  extra?: unknown
+}
+
+export interface LocationProfile {
+  geography?: string
+  appearance?: string
+  population?: string
+  economy?: string
+  rules?: string
+  history?: string
+  narrative_usage?: string
+  location_type?: string
+  size?: string
+  climate?: string
+  era?: string
+  accessibility?: string
 }

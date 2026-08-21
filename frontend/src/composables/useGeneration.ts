@@ -1,9 +1,12 @@
 import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import { useGenerationStore } from '@/stores/generation'
 import type { GenerationTaskType } from '@/types'
 
 export function useGeneration() {
+  const route = useRoute()
   const genStore = useGenerationStore()
+  const projectId = computed(() => (route.params.id as string) || '')
 
   const tasks = computed(() => genStore.tasks)
   const currentTask = computed(() => genStore.currentTask)
@@ -14,7 +17,8 @@ export function useGeneration() {
   const isCompleted = computed(() => genStore.currentTask?.status === 'Completed')
 
   function startGeneration(type: GenerationTaskType, targetId?: string) {
-    return genStore.startGeneration(type, targetId)
+    if (!projectId.value) return
+    return genStore.startGeneration(projectId.value, type, targetId)
   }
 
   const progressStages = computed(() => {
