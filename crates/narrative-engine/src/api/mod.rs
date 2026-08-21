@@ -14,6 +14,7 @@ pub mod validation;
 pub mod history;
 pub mod rules;
 pub mod snapshots;
+pub mod trace;
 pub mod settings;
 pub mod error;
 
@@ -104,6 +105,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects/{id}/snapshots", get(snapshots::list_snapshots).post(snapshots::create_snapshot))
         .route("/api/v1/snapshots/{id}", delete(snapshots::delete_snapshot))
         .route("/api/v1/snapshots/{id}/restore", post(snapshots::restore_snapshot))
+        // AI 可追溯
+        .route("/api/v1/projects/{id}/generation-runs", get(trace::list_generation_runs))
+        .route("/api/v1/projects/{id}/validation-runs", get(trace::list_validation_runs))
         // Settings (global)
         .route("/api/v1/settings", get(settings::get_settings).put(settings::update_settings))
         // Health

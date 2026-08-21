@@ -20,4 +20,5 @@ pub mod project_service;
 pub mod rule_service;
 pub mod history_service;
 pub mod snapshot_service;
+pub mod trace_service;
 pub mod entity_service;

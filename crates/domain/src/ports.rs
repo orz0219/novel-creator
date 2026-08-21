@@ -548,6 +548,18 @@ pub trait NarrativeStateWritePort: Send + Sync {
     ) -> Result<()>;
 }
 
+/// AI 可追溯查询端口：generation_run / validation_run 的只读视图。
+///
+/// 返回值是 API 所需的 JSON 形状（id 等已字符串化），供前端追溯页直接渲染：
+/// prompt_sent / response_received / token_usage / latency_ms 等 AI 审计字段全量可见。
+#[async_trait]
+pub trait TraceQueryPort: Send + Sync {
+    /// 最近 generation_run 列表（按 created_at 倒序）。
+    async fn list_generation_runs(&self, project_id: Uuid, limit: i64) -> Result<Vec<serde_json::Value>>;
+    /// 最近 validation_run 列表（按 started_at 倒序），附带每轮的 validation_issue 明细。
+    async fn list_validation_runs(&self, project_id: Uuid, limit: i64) -> Result<Vec<serde_json::Value>>;
+}
+
 /// Entity（实体 + 关系 + 角色子数据）仓储端口。
 ///
 /// 覆盖 host 层 entity.rs 的全部真实 SQL 查询（实体 CRUD、关系 CRUD，以及

@@ -6,13 +6,13 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use domain::ports::{
     ApprovalRepositoryPort, ContextSnapshotRepositoryPort, EntityRepositoryPort,
     ForeshadowRepositoryPort, GenerationRepositoryPort, HistoryRepositoryPort,
     NarrativeRepositoryPort, NarrativeStateWritePort, ProjectRepositoryPort, ProposalRepositoryPort,
     RuleRepositoryPort, SnapshotRepositoryPort, StorylineRepositoryPort, TimelineRepositoryPort,
-    WorldRepositoryPort,
+    TraceQueryPort, WorldRepositoryPort,
 };
 use domain::*;
 use serde_json::Value;
@@ -1741,6 +1741,103 @@ impl NarrativeStateWritePort for DbNarrativeStateWritePort {
         crate::repos::narrative_state_repo::NarrativeStateRepo::new(self.pool.clone())
             .upsert(project_id, dimension, state_key, state_value)
             .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TraceQueryPort（AI 可追溯：generation_run / validation_run 只读视图）
+// ---------------------------------------------------------------------------
+
+/// AI 可追溯查询的数据库实现。
+pub struct DbTraceQueryPort {
+    pool: PgPool,
+}
+
+impl DbTraceQueryPort {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl TraceQueryPort for DbTraceQueryPort {
+    async fn list_generation_runs(&self, project_id: Uuid, limit: i64) -> Result<Vec<Value>> {
+        let rows: Vec<(Uuid, Uuid, Option<Uuid>, String, Option<String>, String, String, Option<Value>, Option<i64>, Option<Value>, DateTime<Utc>)> =
+            sqlx::query_as(
+                "SELECT id, task_id, context_snapshot_id, llm_model, provider, prompt_sent, response_received, \
+                        token_usage, latency_ms, reproducibility_meta, created_at \
+                 FROM generation_run WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2",
+            )
+            .bind(project_id)
+            .bind(limit.clamp(1, 200))
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to list generation runs")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, task_id, ctx_snapshot, model, provider, prompt, response, tokens, latency, repro, created)| {
+                serde_json::json!({
+                    "id": id.to_string(),
+                    "task_id": task_id.to_string(),
+                    "context_snapshot_id": ctx_snapshot.map(|u| u.to_string()),
+                    "llm_model": model,
+                    "provider": provider,
+                    "prompt_sent": prompt,
+                    "response_received": response,
+                    "token_usage": tokens,
+                    "latency_ms": latency,
+                    "reproducibility_meta": repro,
+                    "created_at": created.to_rfc3339(),
+                })
+            })
+            .collect())
+    }
+
+    async fn list_validation_runs(&self, project_id: Uuid, limit: i64) -> Result<Vec<Value>> {
+        let rows: Vec<(Uuid, Uuid, i32, i32, i32, String, DateTime<Utc>, Option<DateTime<Utc>>)> =
+            sqlx::query_as(
+                "SELECT id, task_id, changes_validated, changes_approved, changes_rejected, status, started_at, completed_at \
+                 FROM validation_run WHERE project_id = $1 ORDER BY started_at DESC LIMIT $2",
+            )
+            .bind(project_id)
+            .bind(limit.clamp(1, 200))
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to list validation runs")?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, task_id, validated, approved, rejected, status, started, completed) in rows {
+            let issues: Vec<(Uuid, String, String, String, Option<String>)> = sqlx::query_as(
+                "SELECT id, issue_type, severity, message, suggestion \
+                 FROM validation_issue WHERE validation_run_id = $1 ORDER BY created_at",
+            )
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to list validation issues")?;
+
+            out.push(serde_json::json!({
+                "id": id.to_string(),
+                "task_id": task_id.to_string(),
+                "changes_validated": validated,
+                "changes_approved": approved,
+                "changes_rejected": rejected,
+                "status": status,
+                "started_at": started.to_rfc3339(),
+                "completed_at": completed.map(|t| t.to_rfc3339()),
+                "issues": issues.into_iter().map(|(iid, itype, sev, msg, sugg)| {
+                    serde_json::json!({
+                        "id": iid.to_string(),
+                        "issue_type": itype,
+                        "severity": sev,
+                        "message": msg,
+                        "suggestion": sugg,
+                    })
+                }).collect::<Vec<_>>(),
+            }));
+        }
+        Ok(out)
     }
 }
 

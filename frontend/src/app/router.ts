@@ -32,6 +32,7 @@ const router = createRouter({
             { path: 'extract', name: 'Extract', component: () => import('@/pages/Extract.vue') },
             { path: 'history', name: 'History', component: () => import('@/pages/History.vue') },
             { path: 'snapshots', name: 'Snapshots', component: () => import('@/pages/Snapshots.vue') },
+            { path: 'trace', name: 'AITrace', component: () => import('@/pages/AITrace.vue') },
           ],
         },
         { path: 'project/:id/write/:sceneId?', name: 'Writing', component: () => import('@/layouts/WritingLayout.vue') },

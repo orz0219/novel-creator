@@ -88,6 +88,10 @@
             <span class="nav-icon">📸</span>
             <span>快照</span>
           </router-link>
+          <router-link :to="'/project/' + projectId + '/trace'" class="nav-item">
+            <span class="nav-icon">🔍</span>
+            <span>AI 追溯</span>
+          </router-link>
           <router-link :to="'/project/' + projectId + '/history'" class="nav-item">
             <span class="nav-icon">📜</span>
             <span>历史</span>
