@@ -2,6 +2,8 @@
 //!
 //! Character Mind Model = Knowledge + Belief + Memory + Goal + Fear + Emotion
 //! 三者（Knowledge/Belief/Memory）不要混，对人物行为影响完全不同。
+//!
+//! 注意：NarrativeState 已移出人物模块，归属叙事引擎（见 narrative.rs）。
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,39 @@ pub struct Belief {
     pub updated_at: DateTime<Utc>,
 }
 
+/// MemoryType - 记忆类型（R2 新增，区分记忆对行为的影响方式）
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MemoryType {
+    /// 创伤记忆（强驱动，常引发恐惧/回避）
+    Traumatic,
+    /// 重要记忆（影响决策与价值观）
+    Important,
+    /// 虚假记忆（角色以为真，实际为假 —— 制造信息差）
+    False,
+    /// 秘密记忆（角色刻意隐瞒）
+    Secret,
+}
+
+impl MemoryType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemoryType::Traumatic => "Traumatic",
+            MemoryType::Important => "Important",
+            MemoryType::False => "False",
+            MemoryType::Secret => "Secret",
+        }
+    }
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "Traumatic" => MemoryType::Traumatic,
+            "Important" => MemoryType::Important,
+            "False" => MemoryType::False,
+            "Secret" => MemoryType::Secret,
+            _ => MemoryType::Important,
+        }
+    }
+}
+
 /// Memory - 角色记忆（过去的经历，影响当前行为）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
@@ -35,6 +70,8 @@ pub struct Memory {
     pub character_id: Uuid,
     /// 记忆内容
     pub memory_content: String,
+    /// 记忆类型（R2 新增）
+    pub memory_type: Option<MemoryType>,
     /// 情感影响（如 "positive", "negative", "traumatic"）
     pub emotional_impact: Option<String>,
     /// 记忆发生的场景 ID
@@ -49,8 +86,8 @@ pub struct Memory {
 
 /// CharacterGoalMind - 角色目标（从 Mind Model 视角）
 ///
-/// 注意：与 character::CharacterGoal 不同，这里关注的是目标的认知维度。
-/// CharacterGoal 是结构化的长期/当前/即时目标。
+/// 注意：与 character::CharacterDrive 不同，这里关注的是目标的认知维度。
+/// CharacterDrive 是结构化的驱动力（目标+动机+紧迫度）。
 /// CharacterGoalMind 是目标的"心理"层面：为什么想要这个目标。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterGoalMind {
@@ -138,58 +175,4 @@ pub struct EmotionState {
     pub trigger_description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-/// NarrativeState - 叙事状态（四维状态之一）
-///
-/// 区分 World State（世界发生了什么）和 Narrative State（叙事已揭示什么）。
-/// 例如：World State = 王家已灭亡，Narrative State = 读者不知道王家已灭亡。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NarrativeState {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    /// 状态维度（World/Narrative/Character/Reader）
-    pub state_dimension: StateDimension,
-    /// 状态键
-    pub state_key: String,
-    /// 状态值
-    pub state_value: serde_json::Value,
-    /// 关联的场景 ID
-    pub scene_id: Option<Uuid>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// 状态维度
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum StateDimension {
-    /// 世界状态（客观事实）
-    World,
-    /// 叙事状态（已揭示给读者的）
-    Narrative,
-    /// 角色状态（角色当前状态）
-    Character,
-    /// 读者状态（读者当前知道的）
-    Reader,
-}
-
-impl StateDimension {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            StateDimension::World => "World",
-            StateDimension::Narrative => "Narrative",
-            StateDimension::Character => "Character",
-            StateDimension::Reader => "Reader",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "World" => StateDimension::World,
-            "Narrative" => StateDimension::Narrative,
-            "Character" => StateDimension::Character,
-            "Reader" => StateDimension::Reader,
-            _ => StateDimension::World,
-        }
-    }
 }

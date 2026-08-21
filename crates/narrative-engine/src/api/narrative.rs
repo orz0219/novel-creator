@@ -119,6 +119,15 @@ pub async fn update_storyline(State(state): State<AppState>, Path(id): Path<Stri
     Ok(Json(storyline))
 }
 
+pub async fn delete_storyline(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid storyline ID")))?;
+    StorylineService::new(Arc::new(DbStorylineRepositoryPort::new(state.pool.clone())))
+        .delete_storyline(id)
+        .await?;
+    Ok(Json(serde_json::json!({"deleted": true, "id": id}))
+    )
+}
+
 pub async fn list_foreshadows(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
     let foreshadows = ForeshadowService::new(Arc::new(DbForeshadowRepositoryPort::new(state.pool.clone())))
@@ -147,4 +156,12 @@ pub async fn update_foreshadow(State(state): State<AppState>, Path(id): Path<Str
         .update_foreshadow(id, &input.name, input.description.as_deref())
         .await?;
     Ok(Json(foreshadow))
+}
+
+pub async fn delete_foreshadow(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid foreshadow ID")))?;
+    ForeshadowService::new(Arc::new(DbForeshadowRepositoryPort::new(state.pool.clone())))
+        .delete_foreshadow(id)
+        .await?;
+    Ok(Json(serde_json::json!({"deleted": true, "id": id})))
 }

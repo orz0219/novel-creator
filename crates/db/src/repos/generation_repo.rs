@@ -215,7 +215,7 @@ impl TaskRepo {
 
     pub async fn get_by_id(&self, task_id: Uuid) -> Result<Option<GenerationTask>> {
         let row = sqlx::query_as::<_, GenerationTaskRow>(
-            "SELECT id, project_id, skill_id, scene_id, parameters AS input, result AS output, status, error, created_at, updated_at AS completed_at \
+            "SELECT id, project_id, skill_id, target_id AS scene_id, parameters AS input, result AS output, status, error, created_at, updated_at AS completed_at \
              FROM generation_task WHERE id = $1",
         )
         .bind(task_id)

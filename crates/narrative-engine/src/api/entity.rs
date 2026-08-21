@@ -66,7 +66,7 @@ pub async fn create_entity(State(state): State<AppState>, Path(world_id): Path<S
 pub async fn update_entity(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<CreateEntityInput>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
     let entity = service(&state)
-        .update_entity(id, Some(&input.name), input.summary.as_deref(), input.description.as_deref())
+        .update_entity(id, Some(&input.name), input.summary.as_deref(), input.description.as_deref(), input.attributes.as_ref())
         .await?;
     Ok(Json(entity))
 }
@@ -98,6 +98,42 @@ pub async fn get_character_state(State(state): State<AppState>, Path(id): Path<S
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
     let state_val = service(&state).get_character_state(id).await?;
     Ok(Json(state_val.unwrap_or(serde_json::Value::Null)))
+}
+
+pub async fn update_character_profile(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
+    let profile = service(&state).update_character_profile(id, body).await?;
+    Ok(Json(profile))
+}
+
+pub async fn update_character_state(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
+    let state_val = service(&state).update_character_state(id, body).await?;
+    Ok(Json(state_val))
+}
+
+pub async fn get_location_profile(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
+    let profile = service(&state).get_location_profile(id).await?;
+    Ok(Json(profile.unwrap_or(serde_json::Value::Null)))
+}
+
+pub async fn upsert_location_profile(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
+    let profile = service(&state).upsert_location_profile(id, body).await?;
+    Ok(Json(profile))
+}
+
+pub async fn get_faction_profile(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
+    let profile = service(&state).get_faction_profile(id).await?;
+    Ok(Json(profile.unwrap_or(serde_json::Value::Null)))
+}
+
+pub async fn upsert_faction_profile(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
+    let profile = service(&state).upsert_faction_profile(id, body).await?;
+    Ok(Json(profile))
 }
 
 pub async fn get_character_knowledge(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {

@@ -227,7 +227,7 @@ mod tests {
         {"name":"北境城","entity_type":"Location"}
       ],
       "relations": [
-        {"from":"林秋","to":"林寒","relation_type":"Sibling","description":"兄妹"}
+        {"from":"林秋","to":"北境城","relation_type":"Sibling","description":"兄妹"}
       ]
     }"#;
 

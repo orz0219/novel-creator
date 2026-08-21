@@ -43,4 +43,9 @@ impl ForeshadowService {
     ) -> Result<Value> {
         self.repo.update_foreshadow(id, name, description).await
     }
+
+    /// 删除伏笔（按 id）。
+    pub async fn delete_foreshadow(&self, id: Uuid) -> Result<()> {
+        self.repo.delete_foreshadow(id).await
+    }
 }

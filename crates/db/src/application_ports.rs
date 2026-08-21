@@ -668,6 +668,15 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
         .context("Failed to update storyline")?;
         Ok(serde_json::json!({ "id": id.to_string(), "updated": true }))
     }
+
+    async fn delete_storyline(&self, id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM storyline WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete storyline")?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +763,15 @@ impl ForeshadowRepositoryPort for DbForeshadowRepositoryPort {
         .await
         .context("Failed to update foreshadow")?;
         Ok(serde_json::json!({ "id": id.to_string(), "updated": true }))
+    }
+
+    async fn delete_foreshadow(&self, id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM foreshadowing WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete foreshadow")?;
+        Ok(())
     }
 }
 
@@ -1797,6 +1815,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         name: Option<&str>,
         summary: Option<&str>,
         description: Option<&str>,
+        attributes: Option<&Value>,
     ) -> Result<Value> {
         if let Some(name) = name {
             sqlx::query(
@@ -1823,6 +1842,16 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
                 "UPDATE entity SET description = $1, version = version + 1, updated_at = NOW() WHERE id = $2 AND status != 'Deleted' AND project_id = (SELECT project_id FROM entity WHERE id = $3)",
             )
             .bind(description)
+            .bind(id)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        }
+        if let Some(attributes) = attributes {
+            sqlx::query(
+                "UPDATE entity SET attributes = $1, version = version + 1, updated_at = NOW() WHERE id = $2 AND status != 'Deleted' AND project_id = (SELECT project_id FROM entity WHERE id = $3)",
+            )
+            .bind(attributes)
             .bind(id)
             .bind(id)
             .execute(&self.pool)
@@ -1946,57 +1975,362 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
     }
 
     async fn get_character_profile(&self, id: Uuid) -> Result<Option<Value>> {
-        let row: Option<(
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
-            "SELECT id::text, entity_id::text, real_name, nickname, age, gender, identity, appearance, background, social_status, core_personality FROM character_profile WHERE entity_id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("Failed to get character profile")?;
-        Ok(row.map(|r| {
+        let repo = crate::repos::character_repo::CharacterProfileRepo::new(self.pool.clone());
+        let profile = repo.get_by_entity(id).await?;
+        let drive = crate::repos::character_repo::CharacterDriveRepo::new(self.pool.clone())
+            .get_by_entity(id)
+            .await?;
+        let conflicts = crate::repos::character_repo::CharacterConflictRepo::new(self.pool.clone())
+            .list_by_entity(id)
+            .await?;
+        let relationships =
+            crate::repos::character_repo::CharacterRelationshipRepo::new(self.pool.clone())
+                .list_by_entity(id)
+                .await?;
+        let secrets = crate::repos::character_repo::CharacterSecretRepo::new(self.pool.clone())
+            .list_by_entity(id)
+            .await?;
+        let capabilities =
+            crate::repos::character_repo::CharacterCapabilityRepo::new(self.pool.clone())
+                .get_by_entity(id)
+                .await?;
+        let arc = crate::repos::character_repo::CharacterArcRepo::new(self.pool.clone())
+            .get_by_entity(id)
+            .await?;
+        let extension = crate::repos::character_repo::CharacterExtensionRepo::new(self.pool.clone())
+            .get_by_entity(id)
+            .await?;
+
+        Ok(profile.map(|p| {
             serde_json::json!({
-                "id": r.0, "entity_id": r.1, "real_name": r.2, "nickname": r.3,
-                "age": r.4, "gender": r.5, "identity": r.6, "appearance": r.7,
-                "background": r.8, "social_status": r.9, "core_personality": r.10
+                "id": p.id.to_string(),
+                "entity_id": p.entity_id.to_string(),
+                "name": p.name,
+                "aliases": p.aliases,
+                "age_range": p.age.map(|a| a.as_str()),
+                "gender": p.gender.map(|g| g.as_str()),
+                "identity": p.identity,
+                "appearance": p.appearance,
+                "background_origin": p.background_origin,
+                "social_position": p.social_position,
+                "core_personality": p.core_personality,
+                "values": p.values,
+                "role_in_story": p.role_in_story.map(|r| r.as_str()),
+                "narrative_necessity": p.narrative_necessity,
+                "drive": drive,
+                "conflicts": conflicts,
+                "relationships": relationships,
+                "secrets": secrets,
+                "capabilities": capabilities,
+                "arc_potential": arc,
+                "extension": extension,
+                "created_at": p.created_at.to_rfc3339(),
+                "updated_at": p.updated_at.to_rfc3339()
             })
         }))
     }
 
     async fn get_character_state(&self, id: Uuid) -> Result<Option<Value>> {
+        let repo = crate::repos::character_repo::CharacterStateRepo::new(self.pool.clone());
+        let state = repo.get_by_entity(id).await?;
+        Ok(state.map(|s| {
+            serde_json::json!({
+                "id": s.id.to_string(),
+                "entity_id": s.entity_id.to_string(),
+                "location": s.location,
+                "physical_state": s.physical_state,
+                "mental_state": s.mental_state,
+                "resource_state": s.resource_state,
+                "social_state": s.social_state,
+                "flags": s.flags,
+                "extra": s.extra,
+                "created_at": s.created_at.to_rfc3339(),
+                "updated_at": s.updated_at.to_rfc3339()
+            })
+        }))
+    }
+
+    async fn update_character_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+        use domain::character::*;
+        let now = Utc::now();
+        let s = |k: &str| profile.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+        let age_range: Option<AgeRange> =
+            profile.get("age_range").and_then(|v| v.as_str()).map(AgeRange::from_str);
+        let gender: Option<Gender> =
+            profile.get("gender").and_then(|v| v.as_str()).map(Gender::from_str);
+        let role: Option<StoryRole> = profile
+            .get("role_in_story")
+            .and_then(|v| v.as_str())
+            .map(StoryRole::from_str);
+        let aliases: Vec<String> = profile
+            .get("aliases")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let social_position: Option<SocialPosition> = profile
+            .get("social_position")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let narrative_necessity: Option<NarrativeNecessity> = profile
+            .get("narrative_necessity")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+        let existing: Option<(Uuid,)> =
+            sqlx::query_as("SELECT id::text FROM character_profile WHERE entity_id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("check character profile")?;
+        match existing {
+            Some((pid,)) => {
+                sqlx::query("UPDATE character_profile SET name=$1, aliases=$2, age_range=$3, gender=$4, identity=$5, appearance=$6, background_origin=$7, social_position=$8, core_personality=$9, \"values\"=$10, role_in_story=$11, narrative_necessity=$12, extra=$13, updated_at=$14 WHERE id=$15")
+                    .bind(s("name"))
+                    .bind(serde_json::to_value(&aliases).unwrap_or(serde_json::Value::Null))
+                    .bind(age_range.map(|a| a.as_str()))
+                    .bind(gender.map(|g| g.as_str()))
+                    .bind(s("identity"))
+                    .bind(s("appearance"))
+                    .bind(s("background_origin"))
+                    .bind(serde_json::to_value(&social_position).unwrap_or(serde_json::Value::Null))
+                    .bind(s("core_personality"))
+                    .bind(s("values"))
+                    .bind(role.map(|r| r.as_str()))
+                    .bind(serde_json::to_value(&narrative_necessity).unwrap_or(serde_json::Value::Null))
+                    .bind(profile.get("extra").cloned().unwrap_or(serde_json::Value::Null))
+                    .bind(now)
+                    .bind(pid)
+                    .execute(&self.pool).await.context("update character profile")?;
+            }
+            None => {
+                sqlx::query("INSERT INTO character_profile (id, entity_id, name, aliases, age_range, gender, identity, appearance, background_origin, social_position, core_personality, \"values\", role_in_story, narrative_necessity, extra, created_at, updated_at) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
+                    .bind(id)
+                    .bind(s("name"))
+                    .bind(serde_json::to_value(&aliases).unwrap_or(serde_json::Value::Null))
+                    .bind(age_range.map(|a| a.as_str()))
+                    .bind(gender.map(|g| g.as_str()))
+                    .bind(s("identity"))
+                    .bind(s("appearance"))
+                    .bind(s("background_origin"))
+                    .bind(serde_json::to_value(&social_position).unwrap_or(serde_json::Value::Null))
+                    .bind(s("core_personality"))
+                    .bind(s("values"))
+                    .bind(role.map(|r| r.as_str()))
+                    .bind(serde_json::to_value(&narrative_necessity).unwrap_or(serde_json::Value::Null))
+                    .bind(profile.get("extra").cloned().unwrap_or(serde_json::Value::Null))
+                    .bind(now)
+                    .bind(now)
+                    .execute(&self.pool).await.context("insert character profile")?;
+            }
+        }
+
+        // Sync drive / capabilities / arc / extension if present
+        if let Some(d) = profile.get("drive") {
+            if let Ok(drive) = serde_json::from_value::<CharacterDrive>(d.clone()) {
+                crate::repos::character_repo::CharacterDriveRepo::new(self.pool.clone())
+                    .upsert(id, &drive)
+                    .await?;
+            }
+        }
+        if let Some(c) = profile.get("capabilities") {
+            if let Ok(cap) = serde_json::from_value::<CharacterCapability>(c.clone()) {
+                crate::repos::character_repo::CharacterCapabilityRepo::new(self.pool.clone())
+                    .upsert(id, &cap)
+                    .await?;
+            }
+        }
+        if let Some(a) = profile.get("arc_potential") {
+            if let Ok(arc) = serde_json::from_value::<CharacterArcPotential>(a.clone()) {
+                crate::repos::character_repo::CharacterArcRepo::new(self.pool.clone())
+                    .upsert(id, &arc)
+                    .await?;
+            }
+        }
+        if let Some(e) = profile.get("extension") {
+            if let Ok(ext) = serde_json::from_value::<CharacterExtension>(e.clone()) {
+                crate::repos::character_repo::CharacterExtensionRepo::new(self.pool.clone())
+                    .upsert(id, &ext)
+                    .await?;
+            }
+        }
+
+        let mut out = profile.clone();
+        out["entity_id"] = serde_json::json!(id.to_string());
+        Ok(out)
+    }
+
+    async fn update_character_state(&self, id: Uuid, state: Value) -> Result<Value> {
+        let now = Utc::now();
+        let s = |k: &str| state.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+        let flags: Vec<String> = state
+            .get("flags")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let extra: Value = state
+            .get("extra")
+            .cloned()
+            .unwrap_or(serde_json::json!(null));
+
+        let existing: Option<(Uuid,)> =
+            sqlx::query_as("SELECT id::text FROM character_state WHERE entity_id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("check character state")?;
+        match existing {
+            Some((pid,)) => {
+                sqlx::query("UPDATE character_state SET location=$1, physical_state=$2, mental_state=$3, resource_state=$4, social_state=$5, flags=$6, extra=$7, updated_at=$8 WHERE id=$9")
+                    .bind(s("location"))
+                    .bind(s("physical_state"))
+                    .bind(s("mental_state"))
+                    .bind(s("resource_state"))
+                    .bind(s("social_state"))
+                    .bind(&flags)
+                    .bind(&extra)
+                    .bind(now)
+                    .bind(pid)
+                    .execute(&self.pool).await.context("update character state")?;
+            }
+            None => {
+                sqlx::query("INSERT INTO character_state (id, entity_id, location, physical_state, mental_state, resource_state, social_state, flags, extra, created_at, updated_at) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
+                    .bind(id)
+                    .bind(s("location"))
+                    .bind(s("physical_state"))
+                    .bind(s("mental_state"))
+                    .bind(s("resource_state"))
+                    .bind(s("social_state"))
+                    .bind(&flags)
+                    .bind(&extra)
+                    .bind(now)
+                    .bind(now)
+                    .execute(&self.pool).await.context("insert character state")?;
+            }
+        }
+        let mut out = state.clone();
+        out["entity_id"] = serde_json::json!(id.to_string());
+        Ok(out)
+    }
+
+    async fn get_location_profile(&self, id: Uuid) -> Result<Option<Value>> {
         let row: Option<(
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
+            Option<String>, Option<String>, Option<String>, Option<String>,
+            Option<String>, Option<String>, Option<String>,
+            Option<String>, Option<String>, Option<String>, Option<String>, Option<String>,
         )> = sqlx::query_as(
-            "SELECT id::text, entity_id::text, location, health, cultivation, resources, current_status, emotion FROM character_state WHERE entity_id = $1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT lp.geography, lp.appearance, lp.population, lp.economy, lp.rules, lp.history, lp.narrative_usage, \
+             li.location_type, li.size, li.climate, li.era, li.accessibility \
+             FROM location_profile lp FULL OUTER JOIN location_identity li ON li.entity_id = lp.entity_id \
+             WHERE COALESCE(lp.entity_id, li.entity_id) = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .context("Failed to get character state")?;
+        .context("Failed to get location profile")?;
         Ok(row.map(|r| {
             serde_json::json!({
-                "id": r.0, "entity_id": r.1, "location": r.2, "health": r.3,
-                "cultivation": r.4, "resources": r.5, "current_status": r.6, "emotion": r.7
+                "geography": r.0, "appearance": r.1, "population": r.2, "economy": r.3,
+                "rules": r.4, "history": r.5, "narrative_usage": r.6,
+                "location_type": r.7, "size": r.8, "climate": r.9, "era": r.10, "accessibility": r.11
             })
         }))
+    }
+
+    async fn upsert_location_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+        let s = |k: &str| profile.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+        let geography = s("geography");
+        let appearance = s("appearance");
+        let population = s("population");
+        let economy = s("economy");
+        let rules = s("rules");
+        let history = s("history");
+        let narrative_usage = s("narrative_usage");
+        let location_type = s("location_type");
+        let size = s("size");
+        let climate = s("climate");
+        let era = s("era");
+        let accessibility = s("accessibility");
+
+        let lp: Option<(String,)> = sqlx::query_as("SELECT id::text FROM location_profile WHERE entity_id = $1")
+            .bind(id).fetch_optional(&self.pool).await.context("chk loc profile")?;
+        match lp {
+            Some((pid,)) => {
+                sqlx::query("UPDATE location_profile SET geography=$1, appearance=$2, population=$3, economy=$4, rules=$5, history=$6, narrative_usage=$7 WHERE id=$8")
+                    .bind(&geography).bind(&appearance).bind(&population).bind(&economy).bind(&rules).bind(&history).bind(&narrative_usage).bind(pid)
+                    .execute(&self.pool).await.context("upd loc profile")?;
+            }
+            None => {
+                sqlx::query("INSERT INTO location_profile (id, entity_id, geography, appearance, population, economy, rules, history, narrative_usage) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8)")
+                    .bind(id).bind(&geography).bind(&appearance).bind(&population).bind(&economy).bind(&rules).bind(&history).bind(&narrative_usage)
+                    .execute(&self.pool).await.context("ins loc profile")?;
+            }
+        }
+        let li: Option<(String,)> = sqlx::query_as("SELECT id::text FROM location_identity WHERE entity_id = $1")
+            .bind(id).fetch_optional(&self.pool).await.context("chk loc identity")?;
+        match li {
+            Some((pid,)) => {
+                sqlx::query("UPDATE location_identity SET location_type=$1, size=$2, climate=$3, era=$4, accessibility=$5 WHERE id=$6")
+                    .bind(&location_type).bind(&size).bind(&climate).bind(&era).bind(&accessibility).bind(pid)
+                    .execute(&self.pool).await.context("upd loc identity")?;
+            }
+            None => {
+                sqlx::query("INSERT INTO location_identity (id, entity_id, location_type, size, climate, era, accessibility) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6)")
+                    .bind(id).bind(&location_type).bind(&size).bind(&climate).bind(&era).bind(&accessibility)
+                    .execute(&self.pool).await.context("ins loc identity")?;
+            }
+        }
+        let mut out = profile.clone();
+        out["entity_id"] = serde_json::json!(id.to_string());
+        Ok(out)
+    }
+
+    async fn get_faction_profile(&self, id: Uuid) -> Result<Option<Value>> {
+        let row: Option<(
+            Option<String>, Option<String>, Option<String>, Option<String>,
+            Option<String>, Option<String>, Option<String>, Option<String>,
+            Option<String>, Option<String>, Option<String>,
+        )> = sqlx::query_as(
+            "SELECT goals, leader, \"values\", resources, territory, members, enemies, allies, internal_conflicts, secrets, modus_operandi FROM faction_profile WHERE entity_id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get faction profile")?;
+        Ok(row.map(|r| {
+            serde_json::json!({
+                "goals": r.0, "leader": r.1, "values": r.2, "resources": r.3,
+                "territory": r.4, "members": r.5, "enemies": r.6, "allies": r.7,
+                "internal_conflicts": r.8, "secrets": r.9, "modus_operandi": r.10
+            })
+        }))
+    }
+
+    async fn upsert_faction_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+        let s = |k: &str| profile.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+        let goals = s("goals");
+        let leader = s("leader");
+        let values = s("values");
+        let resources = s("resources");
+        let territory = s("territory");
+        let members = s("members");
+        let enemies = s("enemies");
+        let allies = s("allies");
+        let internal_conflicts = s("internal_conflicts");
+        let secrets = s("secrets");
+        let modus_operandi = s("modus_operandi");
+        let existing: Option<(String,)> = sqlx::query_as("SELECT id::text FROM faction_profile WHERE entity_id = $1")
+            .bind(id).fetch_optional(&self.pool).await.context("chk faction profile")?;
+        match existing {
+            Some((pid,)) => {
+                sqlx::query("UPDATE faction_profile SET goals=$1, leader=$2, \"values\"=$3, resources=$4, territory=$5, members=$6, enemies=$7, allies=$8, internal_conflicts=$9, secrets=$10, modus_operandi=$11 WHERE id=$12")
+                    .bind(&goals).bind(&leader).bind(&values).bind(&resources).bind(&territory).bind(&members).bind(&enemies).bind(&allies).bind(&internal_conflicts).bind(&secrets).bind(&modus_operandi).bind(pid)
+                    .execute(&self.pool).await.context("upd faction profile")?;
+            }
+            None => {
+                sqlx::query("INSERT INTO faction_profile (id, entity_id, goals, leader, \"values\", resources, territory, members, enemies, allies, internal_conflicts, secrets, modus_operandi) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
+                    .bind(id).bind(&goals).bind(&leader).bind(&values).bind(&resources).bind(&territory).bind(&members).bind(&enemies).bind(&allies).bind(&internal_conflicts).bind(&secrets).bind(&modus_operandi)
+                    .execute(&self.pool).await.context("ins faction profile")?;
+            }
+        }
+        let mut out = profile.clone();
+        out["entity_id"] = serde_json::json!(id.to_string());
+        Ok(out)
     }
 
     async fn get_character_knowledge(&self, id: Uuid) -> Result<Vec<Value>> {

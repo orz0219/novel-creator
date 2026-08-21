@@ -327,7 +327,7 @@ impl MutationCommand {
     ) -> Self {
         MutationCommand::new(
             project_id,
-            world_id,
+            Uuid::nil(),
             MutationTargetType::Entity,
             None,
             MutationSource::User,

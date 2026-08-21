@@ -97,6 +97,7 @@ impl EntityService {
         name: Option<&str>,
         summary: Option<&str>,
         description: Option<&str>,
+        attributes: Option<&Value>,
     ) -> Result<Value> {
         let existing = self
             .repo
@@ -113,7 +114,7 @@ impl EntityService {
             name.map(|s| s.to_string()),
             summary.map(|s| s.to_string()),
             description.map(|s| s.to_string()),
-            None,
+            attributes.map(|v| v.clone()),
         );
         self.committer.commit(cmd).await?;
         self.repo
@@ -171,6 +172,30 @@ impl EntityService {
 
     pub async fn get_character_state(&self, id: Uuid) -> Result<Option<Value>> {
         self.repo.get_character_state(id).await
+    }
+
+    pub async fn update_character_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+        self.repo.update_character_profile(id, profile).await
+    }
+
+    pub async fn update_character_state(&self, id: Uuid, state: Value) -> Result<Value> {
+        self.repo.update_character_state(id, state).await
+    }
+
+    pub async fn get_location_profile(&self, id: Uuid) -> Result<Option<Value>> {
+        self.repo.get_location_profile(id).await
+    }
+
+    pub async fn upsert_location_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+        self.repo.upsert_location_profile(id, profile).await
+    }
+
+    pub async fn get_faction_profile(&self, id: Uuid) -> Result<Option<Value>> {
+        self.repo.get_faction_profile(id).await
+    }
+
+    pub async fn upsert_faction_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+        self.repo.upsert_faction_profile(id, profile).await
     }
 
     pub async fn get_character_knowledge(&self, id: Uuid) -> Result<Vec<Value>> {

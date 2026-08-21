@@ -70,4 +70,9 @@ impl StorylineService {
     ) -> Result<Value> {
         self.repo.update_storyline(id, name, description).await
     }
+
+    /// 删除剧情线（按 id）。
+    pub async fn delete_storyline(&self, id: Uuid) -> Result<()> {
+        self.repo.delete_storyline(id).await
+    }
 }

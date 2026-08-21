@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use domain::character_mind::{NarrativeState, StateDimension};
+use domain::narrative::{NarrativeState, StateDimension};
 use sqlx::PgPool;
 use uuid::Uuid;
 

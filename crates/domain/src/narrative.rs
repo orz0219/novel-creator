@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 /// 叙事节点类型
@@ -200,4 +201,58 @@ pub struct CharacterArc {
     pub key_moments: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// NarrativeState - 叙事状态（已从人物模块移出，归叙事引擎）
+///
+/// 区分 World State（世界发生了什么）和 Narrative State（叙事已揭示什么）。
+/// 例如：World State = 王家已灭亡，Narrative State = 读者不知道王家已灭亡。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NarrativeState {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    /// 状态维度（World/Narrative/Character/Reader）
+    pub state_dimension: StateDimension,
+    /// 状态键
+    pub state_key: String,
+    /// 状态值
+    pub state_value: Value,
+    /// 关联的场景 ID
+    pub scene_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// 状态维度
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StateDimension {
+    /// 世界状态（客观事实）
+    World,
+    /// 叙事状态（已揭示给读者的）
+    Narrative,
+    /// 角色状态（角色当前状态）
+    Character,
+    /// 读者状态（读者当前知道的）
+    Reader,
+}
+
+impl StateDimension {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StateDimension::World => "World",
+            StateDimension::Narrative => "Narrative",
+            StateDimension::Character => "Character",
+            StateDimension::Reader => "Reader",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "World" => StateDimension::World,
+            "Narrative" => StateDimension::Narrative,
+            "Character" => StateDimension::Character,
+            "Reader" => StateDimension::Reader,
+            _ => StateDimension::World,
+        }
+    }
 }

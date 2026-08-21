@@ -9,7 +9,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 use crate::state::AppState;
 use std::sync::Arc;
-use db::application_ports::DbGenerationRepositoryPort;
+use db::application_ports::{DbEntityRepositoryPort, DbGenerationRepositoryPort, DbNarrativeRepositoryPort};
+use domain::ports::{EntityRepositoryPort, GenerationRepositoryPort, NarrativeRepositoryPort};
 use super::error::AppError;
 use application::generation_service::GenerationService;
 use application::generation_executor::GenerationExecutor;
@@ -48,8 +49,63 @@ fn generation_executor(state: &AppState) -> GenerationExecutor {
 
 pub async fn execute_task(State(state): State<AppState>, Path(task_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     let task_id = Uuid::parse_str(&task_id).map_err(|_| AppError(anyhow::anyhow!("Invalid task ID")))?;
-    let output = generation_executor(&state).execute(task_id).await?;
+    // 组装「场景 + 世界观」上下文，让生成真正贴合设定（而非空输入客套话）。
+    let context = build_scene_context(&state.pool, task_id).await;
+    let output = generation_executor(&state).execute(task_id, context).await?;
     Ok(Json(serde_json::json!({ "output": output })))
+}
+
+/// 为生成任务组装「场景信息 + 世界观/角色」上下文文本。
+///
+/// 仅依赖 DB 仓储（narrative-engine 已依赖 db），不触碰未接线的 runtime ContextEngine。
+/// 返回 None 表示该任务没有关联场景（无需上下文）。
+async fn build_scene_context(pool: &sqlx::PgPool, task_id: Uuid) -> Option<String> {
+    let gen_repo = DbGenerationRepositoryPort::new(pool.clone());
+    let task = gen_repo.get_task_struct(task_id).await.ok().flatten()?;
+    let scene_id = task.scene_id?;
+
+    let narr = DbNarrativeRepositoryPort::new(pool.clone());
+    let scene = narr.get_node(scene_id).await.ok().flatten()?;
+    let world_id = scene.get("world_id").and_then(|v| v.as_str())?.to_string();
+    let world_id = Uuid::parse_str(&world_id).ok()?;
+    let title = scene.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let desc = scene.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    let attrs = scene.get("attributes").cloned().unwrap_or(serde_json::Value::Null);
+
+    let ent = DbEntityRepositoryPort::new(pool.clone());
+    let entities = ent.list_entities(world_id, None).await.ok().unwrap_or_default();
+    tracing::info!(scene_id = %scene_id, world_id = %world_id, entity_count = entities.len(), "build_scene_context assembled");
+
+    let mut ctx = String::new();
+    ctx.push_str(&format!("【场景】{}\n", title));
+    if !desc.is_empty() {
+        ctx.push_str(&format!("描述：{}\n", desc));
+    }
+    if attrs != serde_json::Value::Null {
+        ctx.push_str(&format!(
+            "设定：{}\n",
+            serde_json::to_string_pretty(&attrs).unwrap_or_default()
+        ));
+    }
+    if !entities.is_empty() {
+        ctx.push_str("\n【世界观与角色】\n");
+        for e in &entities {
+            let etype = e.get("entity_type_id").and_then(|v| v.as_str()).unwrap_or("");
+            let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let summary = e.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+            let edesc = e.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let mut line = format!("- [{}] {}：", etype, name);
+            if !summary.is_empty() {
+                line.push_str(&format!("{}；", summary));
+            }
+            if !edesc.is_empty() {
+                line.push_str(edesc);
+            }
+            line.push('\n');
+            ctx.push_str(&line);
+        }
+    }
+    Some(ctx)
 }
 
 pub async fn list_tasks(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {

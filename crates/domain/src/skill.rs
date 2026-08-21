@@ -308,11 +308,11 @@ impl SkillTemplates {
         }
     }
 
-    /// 5. Character Designer - 设计角色
+    /// 5. Character Designer - 设计角色（通用小说人物设定，服务于后续情节）
     pub fn character_designer() -> SkillTemplate {
         SkillTemplate {
             name: "character_designer".to_string(),
-            description: "设计一个新角色".to_string(),
+            description: "设计一个服务于后续情节的新角色（通用，不绑定单一题材）".to_string(),
             skill_type: SkillType::CharacterDesigner,
             input_schema: serde_json::json!({
                 "type": "object",
@@ -321,7 +321,7 @@ impl SkillTemplates {
                     "volume_context": {"type": "string"},
                     "arc_context": {"type": "string"},
                     "existing_characters": {"type": "array"},
-                    "role_requirements": {"type": "string"}
+                    "role_requirements": {"type": "string", "description": "该角色在故事中的功能位与需要承担的情节作用"}
                 },
                 "required": ["world_context", "role_requirements"]
             }),
@@ -329,22 +329,144 @@ impl SkillTemplates {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "identity": {"type": "string"},
+                    "aliases": {"type": "array", "items": {"type": "string"}},
+                    "age_range": {"type": "string", "enum": ["Child","Teen","YoungAdult","Adult","MiddleAge","Elder","Unknown"]},
+                    "gender": {"type": "string", "enum": ["Male","Female","NonBinary","Unknown","Other"]},
+                    "identity": {"type": "string", "description": "身份定位，如'边境散修''王家家主'，不是真人档案"},
                     "appearance": {"type": "string"},
-                    "personality": {"type": "string"},
+                    "background_origin": {"type": "string", "description": "导致现在状态的关键经历"},
+                    "social_position": {
+                        "type": "object",
+                        "properties": {
+                            "rank": {"type": "string"},
+                            "authority_level": {"type": "integer"},
+                            "social_access": {"type": "array", "items": {"type": "string"}}
+                        }
+                    },
+                    "core_personality": {"type": "string"},
                     "values": {"type": "string"},
-                    "motivation": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "fear": {"type": "string"},
-                    "conflict": {"type": "string"},
-                    "ability": {"type": "string"},
-                    "weakness": {"type": "string"},
-                    "background": {"type": "string"},
-                    "relationships": {"type": "array"},
-                    "secrets": {"type": "array"}
+                    "role_in_story": {"type": "string", "enum": ["Protagonist","Antagonist","Mentor","Ally","Rival","Catalyst","Victim","Observer"]},
+                    "narrative_necessity": {
+                        "type": "object",
+                        "properties": {
+                            "importance": {"type": "integer"},
+                            "irreplaceability": {"type": "integer"},
+                            "absence_effect": {"type": "string"},
+                            "replacement_cost": {"type": "string"}
+                        }
+                    },
+                    "drive": {
+                        "type": "object",
+                        "properties": {
+                            "primary_goal": {"type": "string"},
+                            "motivation": {"type": "string"},
+                            "urgency": {"type": "integer"},
+                            "hidden_goal": {"type": "string"},
+                            "fear": {"type": "string"},
+                            "weakness": {"type": "string"},
+                            "desire": {"type": "string"},
+                            "contradiction": {"type": "string"}
+                        }
+                    },
+                    "conflicts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "conflict_type": {"type": "string", "enum": ["Internal","External","Relationship","Ideology"]},
+                                "description": {"type": "string"},
+                                "target": {"type": "string"}
+                            }
+                        }
+                    },
+                    "relationships": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target": {"type": "string"},
+                                "relationship_type": {"type": "string"},
+                                "attitude": {"type": "string"},
+                                "trust_level": {"type": "integer"}
+                            }
+                        }
+                    },
+                    "secrets": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string"},
+                                "importance": {"type": "integer"},
+                                "reveal_condition": {"type": "string"}
+                            }
+                        }
+                    },
+                    "capabilities": {
+                        "type": "object",
+                        "properties": {
+                            "skills": {"type": "array", "items": {"type": "string"}},
+                            "limitations": {"type": "array", "items": {"type": "string"}}
+                        }
+                    },
+                    "arc_potential": {
+                        "type": "object",
+                        "properties": {
+                            "starting_state": {"type": "string"},
+                            "possible_change": {"type": "string"},
+                            "resistance": {"type": "string"}
+                        }
+                    },
+                    "extension": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["Fantasy","Modern","SciFi","Custom"]},
+                            "data": {"type": "object"}
+                        },
+                        "description": "题材相关扩展；通用字段不够时再填"
+                    },
+                    "traits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "trait_type": {"type": "string", "enum": ["Personality","Behavior","Value","Fear","Habit","Strength","Weakness"]},
+                                "name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "intensity": {"type": "integer"}
+                            }
+                        }
+                    },
+                    "state": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"},
+                            "physical_state": {"type": "string"},
+                            "mental_state": {"type": "string"},
+                            "resource_state": {"type": "string"},
+                            "social_state": {"type": "string"},
+                            "flags": {"type": "array", "items": {"type": "string"}}
+                        }
+                    }
                 }
             }),
-            prompt_template: "Design a character with identity, personality, motivation, and background.".to_string(),
+            prompt_template:
+                "你是一个通用小说人物设定助手。设计一个服务于后续情节的新角色——人物是剧情发动机，每个字段都要能驱动情节（冲突、关系、弧光、悬念），不要写真人档案或心理测评。\n\
+                 \n\
+                 严格遵守 ContextPolicy：\n\
+                 - L1 场景相关：只生成当前场景/卷真正会用到的内容，不要堆砌无关细节。\n\
+                 - L4 角色知识：仅当情节需要信息差时才给出角色隐藏知识，用 knowledge_scope 标出，不要默认全知。\n\
+                 \n\
+                 字段要求：\n\
+                 - age_range / gender 是可选的身份约束，不是性格，不要据此预设行为。\n\
+                 - social_position 用 rank/authority_level/social_access 抽象，不要写死'贵族/平民'。\n\
+                 - narrative_necessity 说明这个角色对剧情的重要性与可替换性。\n\
+                 - drive 给出 primary_goal + motivation + urgency，并尽量点出 hidden_goal / fear / weakness / contradiction（制造张力）。\n\
+                 - conflicts 至少一条，标明类型与目标（人物参与剧情的接口）。\n\
+                 - relationships / secrets / capabilities(限制比能力更重要) / arc_potential 都为后续情节服务。\n\
+                 - extension 仅在玄幻/都市/科幻等题材需要专属字段时填写（如修炼等级、职业、义体），通用设定不要往里塞。\n\
+                 \n\
+                 输出严格符合给定 JSON schema，不要添加 schema 之外的顶层字段。".to_string(),
         }
     }
 

@@ -311,6 +311,8 @@ pub trait StorylineRepositoryPort: Send + Sync {
         name: &str,
         description: Option<&str>,
     ) -> Result<serde_json::Value>;
+    /// 删除剧情线（按 id）。
+    async fn delete_storyline(&self, id: Uuid) -> Result<()>;
 }
 
 /// Foreshadow（伏笔）仓储端口。
@@ -331,6 +333,8 @@ pub trait ForeshadowRepositoryPort: Send + Sync {
         name: &str,
         description: Option<&str>,
     ) -> Result<serde_json::Value>;
+    /// 删除伏笔（按 id）。
+    async fn delete_foreshadow(&self, id: Uuid) -> Result<()>;
 }
 
 /// World（世界管理）仓储端口。
@@ -556,6 +560,7 @@ pub trait EntityRepositoryPort: Send + Sync {
         name: Option<&str>,
         summary: Option<&str>,
         description: Option<&str>,
+        attributes: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value>;
     async fn delete_entity(&self, id: Uuid) -> Result<serde_json::Value>;
 
@@ -571,6 +576,12 @@ pub trait EntityRepositoryPort: Send + Sync {
 
     async fn get_character_profile(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
     async fn get_character_state(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
+    async fn update_character_profile(&self, id: Uuid, profile: serde_json::Value) -> Result<serde_json::Value>;
+    async fn update_character_state(&self, id: Uuid, state: serde_json::Value) -> Result<serde_json::Value>;
+    async fn get_location_profile(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
+    async fn upsert_location_profile(&self, id: Uuid, profile: serde_json::Value) -> Result<serde_json::Value>;
+    async fn get_faction_profile(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
+    async fn upsert_faction_profile(&self, id: Uuid, profile: serde_json::Value) -> Result<serde_json::Value>;
     async fn get_character_knowledge(&self, id: Uuid) -> Result<Vec<serde_json::Value>>;
     async fn get_character_relationships(&self, id: Uuid) -> Result<Vec<serde_json::Value>>;
 }

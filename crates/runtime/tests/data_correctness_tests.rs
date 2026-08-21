@@ -398,7 +398,7 @@ mod tests {
             changes.push(ProposedChange {
                 id: Uuid::new_v4(),
                 project_id,
-                task_id,
+                task_id: Some(task_id),
                 change_type: ProposedChangeType::StateChange,
                 target_entity_id: *entity_id,
                 description: "Test change".to_string(),
@@ -465,7 +465,7 @@ mod tests {
         let fire_change = ProposedChange {
             id: Uuid::new_v4(),
             project_id,
-            task_id: fire_task_id,
+            task_id: Some(fire_task_id),
             change_type: ProposedChangeType::StateChange,
             target_entity_id: entity_id,
             description: "Set fire element".to_string(),
@@ -491,7 +491,7 @@ mod tests {
         let water_change = ProposedChange {
             id: Uuid::new_v4(),
             project_id,
-            task_id: water_task_id,
+            task_id: Some(water_task_id),
             change_type: ProposedChangeType::StateChange,
             target_entity_id: entity_id,
             description: "Set water element".to_string(),

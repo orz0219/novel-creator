@@ -52,7 +52,11 @@ impl GenerationExecutor {
     }
 
     /// 执行一次完整的生成任务，返回模型产出文本。
-    pub async fn execute(&self, task_id: Uuid) -> Result<String> {
+    ///
+    /// `scene_context` 为调用方（API 层）组装好的「场景 + 世界观」上下文文本。
+    /// 传入后会被注入到用户 Prompt，使模型产出真正贴合该场景/世界设定的小说正文，
+    /// 而非拿到空输入后回一句客套话。
+    pub async fn execute(&self, task_id: Uuid, scene_context: Option<String>) -> Result<String> {
         let task = self
             .repo
             .get_task_struct(task_id)
@@ -73,14 +77,28 @@ impl GenerationExecutor {
                 (sp, skill.prompt_template)
             }
             None => (
-                "You are a professional novel writing assistant.".to_string(),
+                "You are a professional novelist. Write immersive, coherent Chinese prose that follows the provided setting exactly.".to_string(),
                 String::new(),
             ),
         };
-        let user_prompt = format!(
+        // 组装用户 Prompt：先放场景/世界观上下文（若有），再放技能模板与输入，最后给明确写作指令。
+        let mut user_prompt = String::new();
+        if let Some(ctx) = &scene_context {
+            let ctx = ctx.trim();
+            if !ctx.is_empty() {
+                user_prompt.push_str("## 世界观与场景设定\n");
+                user_prompt.push_str(ctx);
+                user_prompt.push('\n');
+                user_prompt.push('\n');
+            }
+        }
+        user_prompt.push_str(&format!(
             "{}\n\n## 输入\n{}",
             skill_prompt_template,
             serde_json::to_string_pretty(&task.input).unwrap_or_default()
+        ));
+        user_prompt.push_str(
+            "\n\n## 任务\n请严格依据上述设定撰写本场景的小说正文（中文、第三人称叙事），直接输出正文本身，不要大纲、不要解释、不要任何额外说明。",
         );
         // 模型来源：统一配置透传（当前阶段以 OPENCODE_MODEL 为准；task 级覆盖为 P1）。
         let model = std::env::var("OPENCODE_MODEL")
