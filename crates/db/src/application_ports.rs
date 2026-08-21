@@ -1478,7 +1478,7 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
     ) -> Result<Value> {
         let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO event (id, project_id, name, description, involved_entity_ids, state_changes) VALUES ($1, $2, $3, $4, '{}', '[]')",
+            "INSERT INTO event (id, project_id, name, description) VALUES ($1, $2, $3, $4)",
         )
         .bind(&id)
         .bind(project_id)

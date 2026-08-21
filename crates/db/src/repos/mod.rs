@@ -29,7 +29,6 @@ pub mod knowledge_gap_repo;
 pub mod summary_repo;
 pub mod identity_repo;
 pub mod character_repo;
-pub mod faction_repo;
 pub mod narrative_budget_repo;
 pub mod outbox_repo;
 pub mod world_version_repo;
