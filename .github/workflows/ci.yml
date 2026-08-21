@@ -1,0 +1,100 @@
+# CI —— 每次 push / PR 自动执行
+#
+# 核心：schema-drift 任务离线校验 migrations ↔ Rust SQL 一致性，
+# 防止 character_state 缺列、faction_profile 列数不匹配这类漂移再次发生。
+# 另附后端全量测试（Postgres 服务容器）与前端类型检查 + 单测。
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------- 核心防线：schema 漂移校验（无需数据库） ----------
+  schema-drift:
+    name: Schema drift (migrations ↔ Rust SQL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+
+      - name: Schema consistency check
+        run: cargo test -p db --test schema_consistency -- --nocapture
+
+      - name: Fail fast summary
+        if: failure()
+        run: echo "::error::检测到 SQL 与 migrations 漂移：新增/重命名列后，请同步修改引用该表的 Rust 查询。"
+
+  # ---------- 后端全量测试（真实 PostgreSQL） ----------
+  backend-tests:
+    name: Backend tests (cargo)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: novel
+          POSTGRES_PASSWORD: novel_pass
+          POSTGRES_DB: novel_engine
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U novel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://novel:novel_pass@localhost:5432/novel_engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+
+      - name: Run all workspace tests
+        run: cargo test --workspace
+
+  # ---------- 前端类型检查 + 单测 ----------
+  frontend-checks:
+    name: Frontend (vue-tsc + vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx vue-tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
