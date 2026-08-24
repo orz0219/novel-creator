@@ -9,6 +9,7 @@
       </div>
       <nav class="header-nav">
         <router-link to="/" class="nav-link" :class="{ active: $route.path === '/' }">首页</router-link>
+        <router-link to="/agent" class="nav-link" :class="{ active: $route.path === '/agent' }">创作引导</router-link>
         <router-link v-if="pid" :to="'/project/' + pid" class="nav-link" :class="{ active: isProj && !$route.path.includes('/write') }">项目</router-link>
         <router-link v-if="pid" :to="'/project/' + pid + '/world'" class="nav-link" :class="{ active: $route.path.includes('/world') }">世界</router-link>
         <router-link v-if="pid" :to="'/project/' + pid + '/story'" class="nav-link" :class="{ active: $route.path.includes('/story') }">故事</router-link>

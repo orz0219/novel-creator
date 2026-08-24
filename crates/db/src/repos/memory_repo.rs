@@ -1,0 +1,76 @@
+//! Agent 记忆持久化（agent_memory 表）。
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use domain::agent_store::{AgentMemory, MemoryItem};
+
+pub struct MemoryRepo {
+    pool: PgPool,
+}
+
+impl MemoryRepo {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl AgentMemory for MemoryRepo {
+    async fn save(&self, session_id: Uuid, memory_type: &str, content: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_memory (session_id, memory_type, content) VALUES ($1, $2, $3)",
+        )
+        .bind(session_id)
+        .bind(memory_type)
+        .bind(content)
+        .execute(&self.pool)
+        .await
+        .context("Failed to save agent memory")?;
+        Ok(())
+    }
+
+    async fn list(&self, session_id: Uuid) -> Result<Vec<MemoryItem>> {
+        let rows = sqlx::query_as::<_, MemoryRow>(
+            "SELECT memory_type, content, created_at FROM agent_memory \
+             WHERE session_id = $1 ORDER BY created_at ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list agent memory")?;
+        Ok(rows.into_iter().map(|r| r.into_item()).collect())
+    }
+
+    async fn get_by_type(&self, session_id: Uuid, memory_type: &str) -> Result<Vec<MemoryItem>> {
+        let rows = sqlx::query_as::<_, MemoryRow>(
+            "SELECT memory_type, content, created_at FROM agent_memory \
+             WHERE session_id = $1 AND memory_type = $2 ORDER BY created_at ASC",
+        )
+        .bind(session_id)
+        .bind(memory_type)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list agent memory by type")?;
+        Ok(rows.into_iter().map(|r| r.into_item()).collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct MemoryRow {
+    memory_type: String,
+    content: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl MemoryRow {
+    fn into_item(self) -> MemoryItem {
+        MemoryItem {
+            memory_type: self.memory_type,
+            content: self.content,
+            created_at: self.created_at,
+        }
+    }
+}

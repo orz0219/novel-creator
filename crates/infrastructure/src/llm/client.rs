@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use super::provider::LlmProvider;
+use super::provider::TokenStream;
 use super::types::{LlmRequest, LlmResponse};
 
 /// LLM Client - manages provider selection and request handling
@@ -34,6 +35,15 @@ impl LlmClient {
 
         info!("Generating with provider: {}", provider.name());
         provider.generate(request).await
+    }
+
+    /// 流式生成（默认 provider），逐段产出 token。
+    pub async fn stream_generate(&self, request: LlmRequest) -> Result<TokenStream> {
+        let provider = self.find_provider(&self.default_provider)
+            .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", self.default_provider))?;
+
+        info!("Streaming with provider: {}", provider.name());
+        provider.stream_generate(request).await
     }
 
     /// Generate a response using a specific provider

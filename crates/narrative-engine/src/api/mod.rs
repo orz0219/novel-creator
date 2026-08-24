@@ -16,6 +16,7 @@ pub mod rules;
 pub mod snapshots;
 pub mod trace;
 pub mod settings;
+pub mod agent;
 pub mod error;
 
 use axum::{Router, routing::{get, post, put, delete}};
@@ -112,6 +113,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/settings", get(settings::get_settings).put(settings::update_settings))
         // Health
         .route("/api/v1/health", get(health_check))
+        // Agent（P1 引导式 Agent 框架）：会话 / 工具 / SSE 聊天
+        .route("/api/v1/agent/session", post(agent::create_session))
+        .route("/api/v1/agent/session/{id}", get(agent::get_session).delete(agent::delete_session).put(agent::rename_session))
+        .route("/api/v1/agent/sessions", get(agent::list_sessions))
+        .route("/api/v1/agent/tools", get(agent::list_tools))
+        .route("/api/v1/agent/chat", post(agent::chat))
+        .route("/api/v1/agent/tool/execute", post(agent::execute_tool))
+        .route("/api/v1/agent/prompt", get(agent::get_prompt).put(agent::save_prompt).delete(agent::delete_prompt))
         .with_state(state)
         .layer(cors)
 }

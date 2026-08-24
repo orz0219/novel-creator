@@ -9,7 +9,10 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::pin::Pin;
+use futures::Stream;
 use uuid::Uuid;
+use chrono::{DateTime, Utc};
 
 use crate::approval::{ApprovalRecord, ApprovalTargetType};
 use crate::canon::CanonRule;
@@ -201,6 +204,43 @@ pub trait GenerationRepositoryPort: Send + Sync {
 #[async_trait]
 pub trait LlmPort: Send + Sync {
     async fn complete(&self, system_prompt: &str, user_prompt: &str, model: &str) -> Result<String>;
+
+    /// 流式补全：返回的流逐段产出 token（`Result<String>`）。
+    ///
+    /// 默认实现回退到 `complete`，把整段文本作为单个 chunk 产出，
+    /// 因此未覆盖该方法的端口（如测试用 Mock）无需改动即可使用。
+    async fn stream_complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model: &str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        let text = self.complete(system_prompt, user_prompt, model).await?;
+        Ok(Box::pin(futures::stream::once(async move { Ok(text) })))
+    }
+}
+
+/// Agent 系统提示词自定义配置（落库实体）。
+#[derive(Debug, Clone)]
+pub struct AgentPromptConfig {
+    pub id: Uuid,
+    /// 作用域：'global' 或 'project:<uuid>'
+    pub scope: String,
+    pub project_id: Option<Uuid>,
+    /// 用户可编辑的「人格 / 引导策略」基座文本（工具列表、提问协议等结构性段落会由运行时自动追加）。
+    pub system_prompt: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// 提示词持久化端口（Agent 系统提示词的自定义基座，落库用）。
+#[async_trait]
+pub trait PromptRepositoryPort: Send + Sync {
+    /// 读取某作用域下当前生效的提示词配置（不存在返回 None）。
+    async fn load(&self, scope: &str) -> Result<Option<AgentPromptConfig>>;
+    /// 幂等保存（按 scope upsert）。
+    async fn save(&self, config: &AgentPromptConfig) -> Result<()>;
+    /// 删除某作用域的自定义覆盖（恢复为内置默认）。
+    async fn delete(&self, scope: &str) -> Result<()>;
 }
 
 /// 上下文快照仓储端口（提案 十二）。

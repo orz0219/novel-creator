@@ -4,12 +4,19 @@
 
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 use std::time::Duration;
 
 mod state;
 mod api;
 
 use state::AppState;
+use agent::{AgentRuntime, ToolRegistry, EchoTool, AskQuestionTool};
+use infrastructure::llm::{InfraLlmPort, LlmClient, OpenAiCompatibleProvider};
+use db::repos::prompt_repo::PromptRepo;
+use db::repos::session_repo::SessionRepo;
+use db::repos::memory_repo::MemoryRepo;
+use domain::ports::PromptRepositoryPort;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -84,8 +91,41 @@ async fn main() -> Result<()> {
         }
     }
 
+    // 构建 Agent 运行时：会话/记忆用内存；基础工具（echo/ask_question）+ P2 真实领域工具。
+    let base_url = std::env::var("OPENCODE_BASE_URL")
+        .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string());
+    let api_key = std::env::var("OPENCODE_API_KEY").ok();
+    let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "mimo-v2.5".to_string());
+    let mut llm_client = LlmClient::new("opencode".to_string());
+    llm_client.add_provider(Arc::new(OpenAiCompatibleProvider::new(
+        base_url, api_key, model.clone(),
+    )));
+    let llm = Arc::new(InfraLlmPort::new(llm_client));
+
+    let agent_tools = Arc::new(ToolRegistry::new());
+    // 基础工具
+    agent_tools.register(Arc::new(EchoTool));
+    agent_tools.register(Arc::new(AskQuestionTool));
+    // P2 真实领域工具（Entity + Narrative / Storyline / Foreshadow / Rule /
+    // Snapshot / Project / World / History 聚合；覆盖 C/U/D+R，D 为逻辑删除）
+    narrative_engine::agent_tools::register_all_domain_tools(&agent_tools, &pool);
+    let agent_sessions: Arc<dyn domain::agent_store::SessionStore> =
+        Arc::new(SessionRepo::new(pool.clone()));
+    let agent_memory: Arc<dyn domain::agent_store::AgentMemory> =
+        Arc::new(MemoryRepo::new(pool.clone()));
+    let prompt_store: Arc<dyn PromptRepositoryPort> = Arc::new(PromptRepo::new(pool.clone()));
+    let agent = Arc::new(AgentRuntime::new(
+        llm,
+        agent_tools,
+        agent_sessions,
+        agent_memory,
+        prompt_store,
+        agent::DEFAULT_SYSTEM_PROMPT_BASE.to_string(),
+        model,
+    ));
+
     // Create application state
-    let state = AppState::new(pool);
+    let state = AppState::new(pool, agent);
 
     // Build router
     let app = api::router(state);

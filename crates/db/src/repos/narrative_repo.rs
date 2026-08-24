@@ -75,7 +75,7 @@ impl NarrativeRepo {
     pub async fn get_node_by_id(&self, id: Uuid) -> Result<Option<NarrativeNode>> {
         let row = sqlx::query_as::<_, NarrativeNodeRow>(
             "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at \
-             FROM narrative_node WHERE id = $1",
+             FROM narrative_node WHERE id = $1 AND status != 'Deleted'",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -91,7 +91,7 @@ impl NarrativeRepo {
     /// Returns None if node doesn't exist OR doesn't belong to the project.
     pub async fn get_node_by_id_with_project(&self, project_id: Uuid, id: Uuid) -> Result<Option<NarrativeNode>> {
         let row = sqlx::query_as::<_, NarrativeNodeRow>(
-            "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at              FROM narrative_node WHERE id = $1 AND project_id = $2",
+            "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at              FROM narrative_node WHERE id = $1 AND project_id = $2 AND status != 'Deleted'",
         )
         .bind(id)
         .bind(project_id)
@@ -105,7 +105,7 @@ impl NarrativeRepo {
     pub async fn list_nodes_by_project(&self, project_id: Uuid) -> Result<Vec<NarrativeNode>> {
         let rows = sqlx::query_as::<_, NarrativeNodeRow>(
             "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at \
-             FROM narrative_node WHERE project_id = $1 ORDER BY sort_order",
+             FROM narrative_node WHERE project_id = $1 AND status != 'Deleted' ORDER BY sort_order",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -118,7 +118,7 @@ impl NarrativeRepo {
     pub async fn list_children(&self, parent_id: Uuid) -> Result<Vec<NarrativeNode>> {
         let rows = sqlx::query_as::<_, NarrativeNodeRow>(
             "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at \
-             FROM narrative_node WHERE parent_id = $1 ORDER BY sort_order",
+             FROM narrative_node WHERE parent_id = $1 AND status != 'Deleted' ORDER BY sort_order",
         )
         .bind(parent_id)
         .fetch_all(&self.pool)
@@ -168,7 +168,7 @@ impl NarrativeRepo {
     ) -> Result<Option<NarrativeNode>> {
         let row = sqlx::query_as::<_, NarrativeNodeRow>(
             "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, created_at, updated_at \
-             FROM narrative_node WHERE id = $1 AND project_id = $2",
+             FROM narrative_node WHERE id = $1 AND project_id = $2 AND status != 'Deleted'",
         )
         .bind(id)
         .bind(project_id)

@@ -202,7 +202,7 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
     async fn get_node(&self, id: Uuid) -> Result<Option<Value>> {
         let row: Option<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, Option<String>, String, i32, String, String, String)> =
             sqlx::query_as(
-                "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE id = $1"
+                "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE id = $1 AND status != 'Deleted'"
             )
             .bind(id)
             .fetch_optional(&self.pool)

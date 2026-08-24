@@ -3,14 +3,25 @@
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
+use std::pin::Pin;
+use futures::Stream;
+use async_stream::stream;
 
 use super::types::{LlmRequest, LlmResponse, LlmUsage};
+
+/// 逐 token 产出的流式输出：`Pin<Box<dyn Stream<Item = Result<String, anyhow::Error>> + Send>>`
+pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 
 /// LLM Provider trait
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Generate a response from the LLM
     async fn generate(&self, _request: LlmRequest) -> Result<LlmResponse>;
+
+    /// 流式生成：逐段产出 token 的流。默认实现直接报错，由具体 provider 覆盖。
+    async fn stream_generate(&self, _request: LlmRequest) -> Result<TokenStream> {
+        anyhow::bail!("该 provider 未实现 stream_generate")
+    }
 
     /// Get provider name
     fn name(&self) -> &str;
@@ -69,6 +80,24 @@ struct ChatUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
     total_tokens: u32,
+}
+
+/// 流式响应分片
+#[derive(serde::Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(serde::Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: StreamDelta,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[async_trait]
@@ -143,6 +172,58 @@ impl LlmProvider for OpenAiCompatibleProvider {
             }
         }
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("LLM generation failed after retries")))
+    }
+
+    async fn stream_generate(&self, request: LlmRequest) -> Result<TokenStream> {
+        use futures::StreamExt;
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": request.messages,
+            "max_tokens": request.max_tokens,
+            "temperature": request.temperature,
+            "stream": true,
+        });
+        let mut req = self.client.post(&url).header("Content-Type", "application/json").json(&body);
+        if let Some(key) = &self.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+        let resp = req.send().await.map_err(|e| anyhow::anyhow!("LLM stream request failed: {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("LLM provider error {}: {}", status, body_text));
+        }
+        let mut byte_stream = resp.bytes_stream();
+        let s = stream! {
+            let mut buf = String::new();
+            while let Some(chunk) = byte_stream.next().await {
+                let bytes = match chunk {
+                    Ok(b) => b,
+                    Err(e) => { yield Err(anyhow::anyhow!("LLM stream read error: {}", e)); return; }
+                };
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                while let Some(nl) = buf.find('\n') {
+                    let line = buf[..nl].trim().to_string();
+                    buf = buf[nl + 1..].to_string();
+                    if line.is_empty() { continue; }
+                    if let Some(data) = line.strip_prefix("data:") {
+                        let data = data.trim();
+                        if data == "[DONE]" { return; }
+                        if let Ok(parsed) = serde_json::from_str::<StreamChunk>(data) {
+                            if let Some(choice) = parsed.choices.into_iter().next() {
+                                if let Some(content) = choice.delta.content {
+                                    if !content.is_empty() {
+                                        yield Ok(content);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(s))
     }
 
     fn name(&self) -> &str {

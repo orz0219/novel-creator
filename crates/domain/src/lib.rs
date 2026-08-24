@@ -35,6 +35,7 @@ pub mod repair;
 pub mod world_version;
 pub mod util;
 pub mod extraction;
+pub mod agent_store;
 
 pub use util::{deterministic_uuid, sha256_hex};
 pub use extraction::*;

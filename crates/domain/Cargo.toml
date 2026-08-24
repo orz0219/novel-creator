@@ -15,3 +15,4 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 sha2 = "0.10"
+futures = "0.3"
