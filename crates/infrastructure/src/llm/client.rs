@@ -116,6 +116,7 @@ mod tests {
             messages: vec![],
             max_tokens: 100,
             temperature: 0.7,
+            model: "mock".to_string(),
         };
 
         let response = client.generate(request).await.unwrap();

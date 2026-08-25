@@ -8,6 +8,7 @@ pub struct LlmRequest {
     pub messages: Vec<Message>,
     pub max_tokens: u32,
     pub temperature: f32,
+    pub model: String,
 }
 
 /// Message in LLM request

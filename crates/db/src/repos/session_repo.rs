@@ -111,11 +111,12 @@ impl SessionStore for SessionRepo {
         Ok(())
     }
 
-    async fn list(&self) -> Result<Vec<AgentSession>> {
+    async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<AgentSession>> {
         let rows = sqlx::query_as::<_, SessionRow>(
             "SELECT id, project_id, title, current_step, created_at, updated_at \
-             FROM agent_sessions ORDER BY updated_at DESC",
+             FROM agent_sessions WHERE project_id = $1 ORDER BY updated_at DESC",
         )
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .context("Failed to list agent sessions")?;
@@ -151,7 +152,7 @@ impl SessionStore for SessionRepo {
 #[derive(sqlx::FromRow)]
 struct SessionRow {
     id: Uuid,
-    project_id: Option<Uuid>,
+    project_id: Uuid,
     title: Option<String>,
     current_step: String,
     created_at: chrono::DateTime<chrono::Utc>,

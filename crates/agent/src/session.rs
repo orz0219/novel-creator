@@ -57,11 +57,16 @@ impl SessionStore for InMemorySessionStore {
         Ok(())
     }
 
-    async fn list(&self) -> Result<Vec<AgentSession>> {
+    async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<AgentSession>> {
         Ok(self
             .sessions
             .read()
-            .map(|g| g.values().cloned().collect())
+            .map(|g| {
+                g.values()
+                    .filter(|s| s.project_id == project_id)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default())
     }
 }

@@ -27,15 +27,9 @@ export interface Project extends Timestamps {
 export interface CreateProjectInput {
   name: string
   description?: string
-  language?: string
-  world_setting?: string
 }
 
 export interface UpdateProjectInput {
   name?: string
   description?: string
-  status?: ProjectStatus
-  default_model?: string
-  default_style?: string
-  config?: Record<string, unknown>
 }

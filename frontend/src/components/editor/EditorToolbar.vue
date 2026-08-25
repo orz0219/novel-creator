@@ -2,16 +2,16 @@
   <div class="editor-toolbar">
     <div class="toolbar-group">
       <button class="toolbar-btn" @click="$emit('save')" :disabled="!isDirty" title="保存">
-        <span>💾</span>
+        <Save :size="16" />
       </button>
       <button class="toolbar-btn" @click="$emit('generate')" title="AI 生成">
-        <span>🤖</span>
+        <Bot :size="16" />
       </button>
     </div>
     <div class="toolbar-separator"></div>
     <div class="toolbar-group">
-      <button class="toolbar-btn" @click="$emit('command', 'undo')" title="撤销">↩️</button>
-      <button class="toolbar-btn" @click="$emit('command', 'redo')" title="重做">↪️</button>
+      <button class="toolbar-btn" @click="$emit('command', 'undo')" title="撤销"><Undo :size="16" /></button>
+      <button class="toolbar-btn" @click="$emit('command', 'redo')" title="重做"><Redo :size="16" /></button>
     </div>
     <div class="toolbar-separator"></div>
     <div class="toolbar-group">
@@ -25,6 +25,7 @@
 </template>
 
 <script setup lang="ts">
+import { Save, Bot, Undo, Redo } from 'lucide-vue-next'
 defineProps<{
   wordCount: number
   isDirty: boolean

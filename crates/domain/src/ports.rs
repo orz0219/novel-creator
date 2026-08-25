@@ -149,13 +149,6 @@ pub trait ProposedChangeQueryPort: Send + Sync {
     ) -> Result<Vec<ProposedChange>>;
 }
 
-/// The single canonical write boundary. The concrete implementation owns the
-/// database transaction; runtime only orchestrates and calls this port.
-#[async_trait]
-pub trait StateCommitterPort: Send + Sync {
-    async fn commit(&self, project_id: Uuid, change_ids: &[Uuid]) -> Result<CommitResponse>;
-}
-
 /// Generation（生成任务）仓储端口。
 ///
 /// 与 P1 的 runtime 端口一致：具体 SQL 留在 db 实现，

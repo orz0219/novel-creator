@@ -9,13 +9,14 @@ const router = createRouter({
       children: [
         { path: '', name: 'Home', component: () => import('@/pages/Home.vue') },
         { path: 'search', name: 'Search', component: () => import('@/pages/Search.vue') },
-        { path: 'agent', name: 'Agent', component: () => import('@/pages/Agent.vue') },
         { path: 'settings', name: 'Settings', component: () => import('@/pages/Settings.vue') },
         {
           path: 'project/:id',
           component: () => import('@/layouts/ProjectLayout.vue'),
           children: [
-            { path: '', name: 'ProjectDashboard', component: () => import('@/pages/ProjectDashboard.vue') },
+            { path: '', redirect: { name: 'ProjectAgent' } },
+            { path: 'dashboard', name: 'ProjectDashboard', component: () => import('@/pages/ProjectDashboard.vue') },
+            { path: 'agent', name: 'ProjectAgent', component: () => import('@/pages/Agent.vue') },
             { path: 'world', name: 'World', component: () => import('@/pages/World.vue') },
             { path: 'world/characters', name: 'Characters', component: () => import('@/pages/Characters.vue') },
             { path: 'world/locations', name: 'Locations', component: () => import('@/pages/Locations.vue') },

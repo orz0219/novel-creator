@@ -32,6 +32,17 @@ pub enum AgentStreamEvent {
     Token(String),
     /// 一道选择题（前端渲染为选项卡片 + 自由输入框）。
     Question { question: String, options: Vec<String> },
+    /// 工具调用及其结果（前端渲染为工具卡片）。
+    Tool {
+        /// 工具名。
+        name: String,
+        /// 模型传入的入参（原样回显）。
+        input: serde_json::Value,
+        /// 是否执行成功。
+        ok: bool,
+        /// 成功时为结果 JSON（已美化）；失败时为错误信息。
+        output: String,
+    },
     /// 本轮结束。
     Done,
     /// 出错（message 为错误信息）。
@@ -98,7 +109,7 @@ impl AgentRuntime {
         self.tools.list()
     }
 
-    pub async fn create_session(&self, project_id: Option<Uuid>) -> Result<Uuid> {
+    pub async fn create_session(&self, project_id: Uuid) -> Result<Uuid> {
         let s = AgentSession::new(project_id);
         let id = s.id;
         self.sessions.create(s).await?;
@@ -125,9 +136,9 @@ impl AgentRuntime {
         self.sessions.delete(id).await
     }
 
-    /// 列出全部会话（用于历史会话侧栏）。
-    pub async fn list_sessions(&self) -> Result<Vec<AgentSession>> {
-        self.sessions.list().await
+    /// 列出某项目下的会话（按项目隔离，用于历史会话侧栏）。
+    pub async fn list_sessions_by_project(&self, project_id: Uuid) -> Result<Vec<AgentSession>> {
+        self.sessions.list_by_project(project_id).await
     }
 
     /// 读取某作用域的提示词视图（含内置默认与是否自定义）。
@@ -162,12 +173,15 @@ impl AgentRuntime {
         self.prompt_store.delete(scope).await
     }
 
-    /// 解析当前生效的基座：有自定义用自定义，否则用内置默认。
-    async fn resolve_base(&self) -> Result<String> {
-        let cfg = self.prompt_store.load("global").await?;
-        Ok(cfg
-            .map(|c| c.system_prompt)
-            .unwrap_or_else(|| self.default_system_prompt.clone()))
+    /// 解析当前生效的基座：优先指定 scope（如 project:<uuid>），否则 global，再否则内置默认。
+    async fn resolve_base(&self, scope: &str) -> Result<String> {
+        if let Some(cfg) = self.prompt_store.load(scope).await? {
+            return Ok(cfg.system_prompt);
+        }
+        if let Some(cfg) = self.prompt_store.load("global").await? {
+            return Ok(cfg.system_prompt);
+        }
+        Ok(self.default_system_prompt.clone())
     }
 
     /// 聊天一轮：记录用户消息 → 拼接提示词 → 调 LLM → 记录助手消息。
@@ -188,20 +202,18 @@ impl AgentRuntime {
         });
 
         // 召回该项目已记住的设定 / 偏好，注入提示词
-        let memories: Vec<String> = match session.project_id {
-            Some(pid) => self
-                .memory
-                .list(pid)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|m| format!("[{}] {}", m.memory_type, m.content))
-                .collect(),
-            None => Vec::new(),
-        };
+        let memories: Vec<String> = self
+            .memory
+            .list(session.project_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| format!("[{}] {}", m.memory_type, m.content))
+            .collect();
 
+        let scope = format!("project:{}", session.project_id);
         let system = build_system_prompt(
-            &self.resolve_base().await?,
+            &self.resolve_base(&scope).await?,
             &session.current_step,
             &self.tools.list(),
             &memories,
@@ -261,32 +273,8 @@ impl AgentRuntime {
             .and_then(|m| extract_question_text(&m.content));
         let answer_text = message.to_string();
 
-        // 跨刷新记忆：读取本会话已记住的偏好/设定，注入系统提示词
-        let memories: Vec<String> = self
-            .memory
-            .list(session.id)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|m| format!("[{}] {}", m.memory_type, m.content))
-            .collect();
-
-        let system = build_system_prompt(
-            &self.resolve_base().await?,
-            &session.current_step,
-            &self.tools.list(),
-            &memories,
-        );
-        let history = session
-            .messages
-            .iter()
-            .map(|m| format!("{}：{}", m.role, m.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let user_prompt = format!("{}\n\n用户：{}", history, message);
-
         session.updated_at = Utc::now();
-        // 先落库 user 消息（clone 一份，原值留给流闭包统一再存）
+        // 先落库 user 消息（助手/工具消息在流闭包内按迭代逐步落库）
         self.sessions.update(session.clone()).await?;
 
         // 克隆 Arc，移入流闭包，使返回的流为 'static + Send。
@@ -299,83 +287,217 @@ impl AgentRuntime {
         // 自动记忆捕获所需的上下文（移入流闭包）
         let answered_question = answered_question;
         let answer_text = answer_text;
-        let session_key = session_id;
+        let session_key = session.project_id;
 
-        const MARKER: &str = "<<ASK_QUESTION>>";
-        const END: &str = "<<END>>";
+        // 提示词基座与工具列表在流外确定一次（owned，避免闭包捕获 &self）
+        let base = self.resolve_base(&format!("project:{}", session.project_id)).await?;
+        let tools = self.tools.clone();
+        let tool_list = tools.list();
 
         let s = stream! {
-            let mut llm_stream = match llm.stream_complete(&system, &user_prompt, &model).await {
-                Ok(st) => st,
-                Err(e) => { yield Ok::<_, anyhow::Error>(AgentStreamEvent::Error(e.to_string())); return; }
-            };
-            let mut acc = String::new();
-            let mut in_q = false;
-            let mut qjson = String::new();
-            let mut question: Option<(String, Vec<String>)> = None;
+            const MARKER: &str = "<<ASK_QUESTION>>";
+            const END: &str = "<<END>>";
+            const TOOL_MARKER: &str = "<<CALL_TOOL>>";
+            const TOOL_RESULT_MARKER: &str = "<<TOOL_RESULT>>";
+            const MAX_TOOL_ITERS: usize = 6;
 
-            while let Some(res) = llm_stream.next().await {
-                match res {
-                    Ok(tok) => {
-                        acc.push_str(&tok);
-                        if !in_q {
-                            if acc.contains(MARKER) {
-                                in_q = true;
+            let mut tool_iters: usize = 0;
+
+            loop {
+                // 每次迭代重建提示词与历史（含已积累的 tool 消息），让模型看到上一轮工具结果
+                let memories: Vec<String> = memory
+                    .list(session.project_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| format!("[{}] {}", m.memory_type, m.content))
+                    .collect();
+                let system = build_system_prompt(&base, &session.current_step, &tool_list, &memories);
+                let history = session
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        let body = if m.role == "tool" {
+                            match parse_tool_result(&m.content) {
+                                Some((name, ok, output)) => format!(
+                                    "工具 {} 执行{}：{}",
+                                    name,
+                                    if ok { "成功" } else { "失败" },
+                                    output
+                                ),
+                                None => m.content.clone(),
+                            }
+                        } else {
+                            m.content.clone()
+                        };
+                        format!("{}：{}", m.role, body)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let mut llm_stream = match llm.stream_complete(&system, &history, &model).await {
+                    Ok(st) => st,
+                    Err(e) => {
+                        yield Ok(AgentStreamEvent::Error(e.to_string()));
+                        return;
+                    }
+                };
+
+                let mut acc = String::new();
+                let mut in_q = false;
+                let mut qjson = String::new();
+                let mut in_tool = false;
+                let mut tjson = String::new();
+                let mut question: Option<(String, Vec<String>)> = None;
+                let mut tool_json: Option<String> = None;
+
+                while let Some(res) = llm_stream.next().await {
+                    match res {
+                        Ok(tok) => {
+                            acc.push_str(&tok);
+                            // 优先识别工具调用标记；其次选择题标记；否则按 token 透传
+                            if !in_q && !in_tool {
+                                if acc.contains(TOOL_MARKER) {
+                                    in_tool = true;
+                                    if let Some(pos) = acc.find(TOOL_MARKER) {
+                                        tjson = acc[pos + TOOL_MARKER.len()..].to_string();
+                                    }
+                                } else if acc.contains(MARKER) {
+                                    in_q = true;
+                                    if let Some(pos) = acc.find(MARKER) {
+                                        qjson = acc[pos + MARKER.len()..].to_string();
+                                    }
+                                } else {
+                                    yield Ok(AgentStreamEvent::Token(tok));
+                                }
+                            }
+                            if in_tool {
+                                if let Some(pos) = acc.find(TOOL_MARKER) {
+                                    tjson = acc[pos + TOOL_MARKER.len()..].to_string();
+                                }
+                                if tjson.contains(END) {
+                                    tool_json =
+                                        Some(tjson[..tjson.find(END).unwrap()].trim().to_string());
+                                    break;
+                                }
+                            }
+                            if in_q {
                                 if let Some(pos) = acc.find(MARKER) {
                                     qjson = acc[pos + MARKER.len()..].to_string();
                                 }
-                            } else {
-                                yield Ok(AgentStreamEvent::Token(tok));
-                            }
-                        }
-                        if in_q {
-                            if let Some(pos) = acc.find(MARKER) {
-                                qjson = acc[pos + MARKER.len()..].to_string();
-                            }
-                            if qjson.contains(END) {
-                                let json_str = qjson[..qjson.find(END).unwrap()].trim().to_string();
-                                if let Some((q, opts)) = parse_ask_question(&json_str) {
-                                    // 命中选择题：把助手消息（标记格式）写入会话
-                                    question = Some((q.clone(), opts.clone()));
-                                    let content = format!("{}{}{}", MARKER, json_str, END);
-                                    session.messages.push(ChatMessage {
-                                        role: "assistant".into(),
-                                        content,
-                                        created_at: Utc::now(),
-                                    });
-                                    // 先落库再下发：避免客户端在收到问题事件后立即断开导致漏存
-                                    if let Err(e) = sessions.update(session.clone()).await {
-                                        yield Ok(AgentStreamEvent::Error(format!("保存会话失败: {}", e)));
+                                if qjson.contains(END) {
+                                    let json_str = qjson[..qjson.find(END).unwrap()].trim().to_string();
+                                    if let Some((q, opts)) = parse_ask_question(&json_str) {
+                                        // 命中选择题：把助手消息（标记格式）写入会话
+                                        question = Some((q.clone(), opts.clone()));
+                                        let content = format!("{}{}{}", MARKER, json_str, END);
+                                        session.messages.push(ChatMessage {
+                                            role: "assistant".into(),
+                                            content,
+                                            created_at: Utc::now(),
+                                        });
+                                        // 先落库再下发：避免客户端在收到问题事件后立即断开导致漏存
+                                        if let Err(e) = sessions.update(session.clone()).await {
+                                            yield Ok(AgentStreamEvent::Error(format!(
+                                                "保存会话失败: {}",
+                                                e
+                                            )));
+                                        }
+                                        yield Ok(AgentStreamEvent::Question {
+                                            question: q,
+                                            options: opts,
+                                        });
+                                        break;
+                                    } else {
+                                        // 解析失败：退回文本（回放已收集内容）
+                                        yield Ok(AgentStreamEvent::Token(qjson.clone()));
+                                        in_q = false;
                                     }
-                                    yield Ok(AgentStreamEvent::Question { question: q, options: opts });
-                                    break;
-                                } else {
-                                    // 解析失败：退回文本（回放已收集内容）
-                                    yield Ok(AgentStreamEvent::Token(qjson.clone()));
-                                    in_q = false;
                                 }
                             }
                         }
+                        Err(e) => {
+                            yield Ok(AgentStreamEvent::Error(e.to_string()));
+                            return;
+                        }
                     }
-                    Err(e) => { yield Ok(AgentStreamEvent::Error(e.to_string())); return; }
                 }
+
+                // 流结束：未闭合的工具标记也强制进入工具处理（解析会失败并回灌错误）
+                if in_tool {
+                    tool_json = tool_json.or(Some(tjson.trim().to_string()));
+                }
+
+                // 工具调用：执行（含入参校验），结果/错误作为 tool 消息回灌模型后继续循环
+                if let Some(json_str) = tool_json {
+                    tool_iters += 1;
+                    if tool_iters > MAX_TOOL_ITERS {
+                        yield Ok(AgentStreamEvent::Error(
+                            "工具调用次数超过上限，请简化请求或分步进行".into(),
+                        ));
+                        break;
+                    }
+                    let (name, input, ok, output) = match parse_tool_call(&json_str) {
+                        Ok((n, i)) => {
+                            match tool_execute(&tools, session.project_id, &n, i.clone()).await {
+                                Ok(v) => (
+                                    n,
+                                    i,
+                                    true,
+                                    serde_json::to_string_pretty(&v)
+                                        .unwrap_or_else(|_| v.to_string()),
+                                ),
+                                Err(e) => (n, i, false, e.to_string()),
+                            }
+                        }
+                        Err(e) => (String::new(), serde_json::json!({}), false, e.to_string()),
+                    };
+                    // 持久化工具结果（前端重载时按 <<TOOL_RESULT>> 标记渲染为工具卡片）
+                    let result_content = format!(
+                        "{}{}{}",
+                        TOOL_RESULT_MARKER,
+                        serde_json::json!({ "name": name, "input": input, "ok": ok, "output": output }),
+                        END
+                    );
+                    session.messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: result_content,
+                        created_at: Utc::now(),
+                    });
+                    if let Err(e) = sessions.update(session.clone()).await {
+                        yield Ok(AgentStreamEvent::Error(format!("保存会话失败: {}", e)));
+                    }
+                    yield Ok(AgentStreamEvent::Tool {
+                        name,
+                        input,
+                        ok,
+                        output,
+                    });
+                    continue;
+                }
+
+                // 选择题：已在流内落库并下发，此处仅收尾
+                if let Some((q, opts)) = question {
+                    let _ = (q, opts);
+                    break;
+                }
+
+                // 普通文本：把整段作为助手消息落库
+                if !acc.trim().is_empty() {
+                    session.messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: acc.trim().to_string(),
+                        created_at: Utc::now(),
+                    });
+                    if let Err(e) = sessions.update(session.clone()).await {
+                        yield Ok(AgentStreamEvent::Error(format!("保存会话失败: {}", e)));
+                    }
+                }
+                yield Ok(AgentStreamEvent::Done);
+                break;
             }
 
-            // 流结束：普通回复把整段文本作为助手消息（同样先落库再下发）
-            if question.is_none() && !acc.trim().is_empty() {
-                session.messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content: acc.trim().to_string(),
-                    created_at: Utc::now(),
-                });
-                if let Err(e) = sessions.update(session.clone()).await {
-                    yield Ok(AgentStreamEvent::Error(format!("保存会话失败: {}", e)));
-                }
-            }
-            if question.is_none() {
-                yield Ok(AgentStreamEvent::Done);
-            }
-            // 统一落库（user + assistant），失败则上报错误事件
+            // 统一落库（user + assistant/tool），失败则上报错误事件
             if let Err(e) = sessions.update(session).await {
                 yield Ok(AgentStreamEvent::Error(format!("保存会话失败: {}", e)));
             }
@@ -397,31 +519,19 @@ impl AgentRuntime {
     /// 最后交给工具实现。Schema 校验失败会返回明确错误，不静默放行。
     pub async fn execute_tool(
         &self,
+        project_id: Uuid,
         name: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let tool = self
-            .tools
-            .get(name)
-            .with_context(|| format!("tool not found: {}", name))?;
-
-        if !input.is_object() {
-            anyhow::bail!("tool input must be a JSON object");
-        }
-
-        if let Err(e) = validate_input(&input, &tool.input_schema()) {
-            anyhow::bail!("工具 '{}' 入参校验失败: {}", name, e);
-        }
-
-        tool.execute(input).await
+        tool_execute(&self.tools, project_id, name, input).await
     }
 
-    pub async fn remember(&self, session_id: Uuid, memory_type: &str, content: &str) -> Result<()> {
-        self.memory.save(session_id, memory_type, content).await
+    pub async fn remember(&self, project_id: Uuid, memory_type: &str, content: &str) -> Result<()> {
+        self.memory.save(project_id, memory_type, content).await
     }
 
-    pub async fn recall(&self, session_id: Uuid) -> Result<Vec<MemoryItem>> {
-        self.memory.list(session_id).await
+    pub async fn recall(&self, project_id: Uuid) -> Result<Vec<MemoryItem>> {
+        self.memory.list(project_id).await
     }
 }
 
@@ -456,6 +566,70 @@ fn parse_ask_question(s: &str) -> Option<(String, Vec<String>)> {
         return None;
     }
     Some((question, options))
+}
+
+/// 解析 `<<CALL_TOOL>>` 的 JSON：`{"name":"...","input":{...}}`。
+///
+/// 复用 `extract_json_object` 容忍多余字符。`name` 必填；`input` 缺省为空对象；
+/// `input` 非对象则报错（与 `execute_tool` 的约束一致）。
+fn parse_tool_call(s: &str) -> Result<(String, serde_json::Value)> {
+    let json = extract_json_object(s)
+        .ok_or_else(|| anyhow::anyhow!("工具调用 JSON 解析失败"))?;
+    let v: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("工具调用 JSON 解析失败: {}", e))?;
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow::anyhow!("工具调用缺少 name 字段"))?
+        .to_string();
+    let input = v.get("input").cloned().unwrap_or(serde_json::json!({}));
+    if !input.is_object() {
+        anyhow::bail!("工具调用 input 必须为 JSON 对象");
+    }
+    Ok((name, input))
+}
+
+/// 从历史回读 `<<TOOL_RESULT>>...<<END>>` 标记，转换为模型可读文本（避免把标记原样喂给模型）。
+fn parse_tool_result(content: &str) -> Option<(String, bool, String)> {
+    const M: &str = "<<TOOL_RESULT>>";
+    const END: &str = "<<END>>";
+    if !content.starts_with(M) {
+        return None;
+    }
+    let inner = &content[M.len()..];
+    let end = inner.find(END)?;
+    let v: serde_json::Value = serde_json::from_str(&inner[..end]).ok()?;
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+    let output = v.get("output").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Some((name, ok, output))
+}
+
+/// 在流闭包内执行工具（不依赖 `&self`，仅用已克隆的 `ToolRegistry`）。
+///
+/// 逻辑与 `AgentRuntime::execute_tool` 一致：先查表，再校验 input 为对象 + JSON Schema，
+/// 最后交给工具实现；任一环节失败返回明确错误，不静默放行。
+async fn tool_execute(
+    tools: &Arc<ToolRegistry>,
+    project_id: Uuid,
+    name: &str,
+    mut input: serde_json::Value,
+) -> Result<serde_json::Value> {
+    // 物理隔离：用会话 project_id 覆盖模型可能传入的值，使所有项目级工具的读写
+    // 都限定在当前项目内。world 级工具（实体 / 规则）的 world_id 由模型经
+    // get_main_world 取得，world 维度的隔离待后续对齐 world 时再加校验。
+    if let Some(obj) = input.as_object_mut() {
+        obj.insert("project_id".into(), serde_json::json!(project_id.to_string()));
+    } else {
+        anyhow::bail!("tool input must be a JSON object");
+    }
+    let tool = tools
+        .get(name)
+        .with_context(|| format!("tool not found: {}", name))?;
+    if let Err(e) = validate_input(&input, &tool.input_schema()) {
+        anyhow::bail!("工具 '{}' 入参校验失败: {}", name, e);
+    }
+    tool.execute(input).await
 }
 
 /// 从文本中取出第一个完整的 JSON 对象（首个 `{` 到最后一个 `}`），容忍前后多余字符。

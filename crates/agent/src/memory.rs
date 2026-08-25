@@ -32,9 +32,9 @@ impl Default for InMemoryAgentMemory {
 
 #[async_trait]
 impl AgentMemory for InMemoryAgentMemory {
-    async fn save(&self, session_id: Uuid, memory_type: &str, content: &str) -> Result<()> {
+    async fn save(&self, project_id: Uuid, memory_type: &str, content: &str) -> Result<()> {
         if let Ok(mut g) = self.items.write() {
-            g.entry(session_id).or_default().push(MemoryItem {
+            g.entry(project_id).or_default().push(MemoryItem {
                 memory_type: memory_type.to_string(),
                 content: content.to_string(),
                 created_at: chrono::Utc::now(),
@@ -43,20 +43,11 @@ impl AgentMemory for InMemoryAgentMemory {
         Ok(())
     }
 
-    async fn list(&self, session_id: Uuid) -> Result<Vec<MemoryItem>> {
+    async fn list(&self, project_id: Uuid) -> Result<Vec<MemoryItem>> {
         Ok(self
             .items
             .read()
-            .map(|g| g.get(&session_id).and_then(|v| Some(v.clone())).unwrap_or_default())
+            .map(|g| g.get(&project_id).and_then(|v| Some(v.clone())).unwrap_or_default())
             .unwrap_or_default())
-    }
-
-    async fn get_by_type(&self, session_id: Uuid, memory_type: &str) -> Result<Vec<MemoryItem>> {
-        Ok(self
-            .list(session_id)
-            .await?
-            .into_iter()
-            .filter(|m| m.memory_type == memory_type)
-            .collect())
     }
 }

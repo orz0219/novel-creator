@@ -7,14 +7,15 @@
     </div>
     <div class="diff-desc">{{ change.description }}</div>
     <div class="diff-actions" v-if="showActions">
-      <button class="accept-btn" @click="$emit('accept')">✓</button>
-      <button class="reject-btn" @click="$emit('reject')">✗</button>
+      <button class="accept-btn" @click="$emit('accept')"><Check :size="14" /></button>
+      <button class="reject-btn" @click="$emit('reject')"><X :size="14" /></button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import type { ProposalChange } from '@/types'
+import { Check, X } from 'lucide-vue-next'
 defineProps<{
   change: ProposalChange
   showActions?: boolean

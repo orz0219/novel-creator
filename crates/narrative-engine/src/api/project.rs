@@ -11,11 +11,17 @@ use uuid::Uuid;
 use crate::state::AppState;
 use super::error::AppError;
 use application::project_service::ProjectService;
-use db::application_ports::DbProjectRepositoryPort;
+use application::world_service::WorldService;
+use db::application_ports::{DbProjectRepositoryPort, DbWorldRepositoryPort};
 use std::sync::Arc;
 
 fn service(state: &AppState) -> ProjectService {
-    ProjectService::new(Arc::new(DbProjectRepositoryPort::new(state.pool.clone())))
+    ProjectService::new(
+        Arc::new(DbProjectRepositoryPort::new(state.pool.clone())),
+        Arc::new(WorldService::new(Arc::new(DbWorldRepositoryPort::new(
+            state.pool.clone(),
+        )))),
+    )
 }
 
 #[derive(Deserialize)]
@@ -23,15 +29,12 @@ fn service(state: &AppState) -> ProjectService {
 pub struct CreateProjectInput {
     pub name: String,
     pub description: Option<String>,
-    pub language: Option<String>,
-    pub world_setting: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateProjectInput {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub status: Option<String>,
 }
 
 pub async fn list_projects(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
@@ -50,7 +53,7 @@ pub async fn get_project(State(state): State<AppState>, Path(id): Path<String>) 
 
 pub async fn create_project(State(state): State<AppState>, Json(input): Json<CreateProjectInput>) -> Result<Json<serde_json::Value>, AppError> {
     let project = service(&state)
-        .create_project(&input.name, input.description.as_deref(), input.language.as_deref())
+        .create_project(&input.name, input.description.as_deref(), None)
         .await?;
     Ok(Json(project))
 }
@@ -58,7 +61,7 @@ pub async fn create_project(State(state): State<AppState>, Json(input): Json<Cre
 pub async fn update_project(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<UpdateProjectInput>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
     let project = service(&state)
-        .update_project(id, input.name.as_deref(), input.description.as_deref(), input.status.as_deref())
+        .update_project(id, input.name.as_deref(), input.description.as_deref(), None)
         .await?;
     Ok(Json(project))
 }

@@ -27,13 +27,3 @@ export const api = {
   patch: <T>(url: string, data?: unknown) => request<T>(url, { method: 'PATCH', body: data ? JSON.stringify(data) : undefined }),
   delete: <T>(url: string) => request<T>(url, { method: 'DELETE' }),
 }
-
-// SSE helper for long-running tasks
-export function createSSE(url: string, onMessage: (event: MessageEvent) => void): EventSource {
-  const eventSource = new EventSource(BASE_URL + url)
-  eventSource.onmessage = onMessage
-  eventSource.onerror = (error) => {
-    console.error('SSE error:', error)
-  }
-  return eventSource
-}

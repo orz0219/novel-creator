@@ -9,7 +9,7 @@
         @click="setActiveBlock(block.id)"
       >
         <div class="block-gutter">
-          <span class="block-type-icon">{{ blockIcons[block.type] }}</span>
+          <span class="block-type-icon"><component :is="blockIcons[block.type]" :size="12" /></span>
         </div>
         <div
           class="block-content"
@@ -36,6 +36,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useWorldStore } from '@/stores/world'
+import { MessageSquare, Zap, BookOpen } from 'lucide-vue-next'
 
 interface EditorBlock {
   id: string
@@ -71,11 +72,11 @@ const editorRef = ref<HTMLElement>()
 const activeBlockId = ref<string | null>(null)
 let blockCounter = 0
 
-const blockIcons: Record<string, string> = {
+const blockIcons: Record<string, any> = {
   paragraph: '¶',
-  dialogue: '💬',
-  action: '⚡',
-  narration: '📖',
+  dialogue: MessageSquare,
+  action: Zap,
+  narration: BookOpen,
   heading: '§',
 }
 

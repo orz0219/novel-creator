@@ -42,7 +42,7 @@ fn make_runtime() -> Arc<AgentRuntime> {
 #[tokio::test]
 async fn session_create_and_chat_records_messages() {
     let rt = make_runtime();
-    let id = rt.create_session(Some(Uuid::nil())).await.unwrap();
+    let id = rt.create_session(Uuid::nil()).await.unwrap();
     let reply = rt.chat(id, "我想写一个玄幻小说").await.unwrap();
     assert!(reply.contains("模拟回复"), "reply = {}", reply);
 
@@ -63,7 +63,7 @@ async fn chat_unknown_session_errors() {
 async fn tool_execute_echo() {
     let rt = make_runtime();
     let out = rt
-        .execute_tool("echo", serde_json::json!({ "text": "hello" }))
+        .execute_tool(Uuid::nil(), "echo", serde_json::json!({ "text": "hello" }))
         .await
         .unwrap();
     assert_eq!(out["echo"], "hello");
@@ -72,14 +72,14 @@ async fn tool_execute_echo() {
 #[tokio::test]
 async fn tool_execute_unknown_errors() {
     let rt = make_runtime();
-    let r = rt.execute_tool("nope", serde_json::json!({})).await;
+    let r = rt.execute_tool(Uuid::nil(), "nope", serde_json::json!({})).await;
     assert!(r.is_err(), "未知工具应报错");
 }
 
 #[tokio::test]
 async fn tool_execute_non_object_input_errors() {
     let rt = make_runtime();
-    let r = rt.execute_tool("echo", serde_json::json!("not an object")).await;
+    let r = rt.execute_tool(Uuid::nil(), "echo", serde_json::json!("not an object")).await;
     assert!(r.is_err(), "非对象输入应报错");
 }
 
@@ -87,7 +87,7 @@ async fn tool_execute_non_object_input_errors() {
 async fn tool_execute_missing_required_field_errors() {
     let rt = make_runtime();
     // echo 的 schema 要求必填字段 "text"，缺失应被 Schema 校验拦截。
-    let r = rt.execute_tool("echo", serde_json::json!({})).await;
+    let r = rt.execute_tool(Uuid::nil(), "echo", serde_json::json!({})).await;
     assert!(r.is_err(), "缺少必填字段应报错");
     let msg = format!("{}", r.unwrap_err());
     assert!(msg.contains("text"), "错误信息应指明缺失字段: {}", msg);

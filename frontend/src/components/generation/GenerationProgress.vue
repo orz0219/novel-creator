@@ -11,14 +11,14 @@
 import { computed } from 'vue'
 const props = defineProps<{ status: string }>()
 const stages = [
-  { id: 'BuildingContext', label: '构建上下文' },
-  { id: 'Generating', label: '生成内容' },
-  { id: 'Validating', label: '验证' },
+  { id: 'Running', label: '生成中' },
   { id: 'Completed', label: '完成' },
 ]
 function isDone(stageId: string): boolean {
-  const order = ['BuildingContext', 'Generating', 'Validating', 'Completed']
-  return order.indexOf(props.status) > order.indexOf(stageId)
+  const order = ['Running', 'Completed']
+  const statusIdx = order.indexOf(props.status)
+  const stageIdx = order.indexOf(stageId)
+  return statusIdx > stageIdx || (props.status === 'Completed' && stageId === 'Completed')
 }
 </script>
 

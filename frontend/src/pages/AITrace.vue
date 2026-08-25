@@ -7,7 +7,7 @@
 
     <!-- Generation Runs -->
     <section class="section">
-      <h2 class="section-title">🤖 生成运行（generation_run）</h2>
+      <h2 class="section-title"><Bot class="section-icon" :size="18" /> 生成运行（generation_run）</h2>
       <div v-if="loadingGen" class="empty-state">加载中…</div>
       <div v-else-if="genRuns.length" class="run-list">
         <div v-for="run in genRuns" :key="run.id" class="run-card">
@@ -49,7 +49,7 @@
 
     <!-- Validation Runs -->
     <section class="section">
-      <h2 class="section-title">✅ 校验运行（validation_run）</h2>
+      <h2 class="section-title"><CheckCircle2 class="section-icon" :size="18" /> 校验运行（validation_run）</h2>
       <div v-if="loadingVal" class="empty-state">加载中…</div>
       <div v-else-if="valRuns.length" class="run-list">
         <div v-for="run in valRuns" :key="run.id" class="run-card">
@@ -92,6 +92,7 @@ import {
   type GenerationRun,
   type ValidationRun,
 } from '@/api/trace'
+import { Bot, CheckCircle2 } from 'lucide-vue-next'
 
 const route = useRoute()
 const projectStore = useProjectStore()
@@ -167,7 +168,8 @@ function severityClass(severity: string): string {
 .page-title { font-size: var(--text-2xl); font-weight: 700; font-family: var(--font-serif); }
 .hint { display: block; margin-top: var(--space-1); font-size: var(--text-xs); color: var(--text-tertiary); }
 .section { margin-bottom: var(--space-6); }
-.section-title { font-size: var(--text-md); font-weight: 600; margin-bottom: var(--space-3); }
+.section-title { font-size: var(--text-md); font-weight: 600; margin-bottom: var(--space-3); display: flex; align-items: center; gap: var(--space-2); }
+.section-icon { flex-shrink: 0; }
 .run-list { display: flex; flex-direction: column; gap: var(--space-2); }
 .run-card { border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-panel); overflow: hidden; }
 .run-header { display: flex; align-items: center; gap: var(--space-2); width: 100%; padding: var(--space-3) var(--space-4); background: transparent; border: none; cursor: pointer; text-align: left; color: inherit; }

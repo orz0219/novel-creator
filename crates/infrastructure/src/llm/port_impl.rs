@@ -40,8 +40,8 @@ impl LlmPort for InfraLlmPort {
             ],
             max_tokens: 4096,
             temperature: 0.7,
+            model: model.to_string(),
         };
-        let _ = model; // 具体 model 由 provider 配置决定；此处保留接口兼容
         let response = self.client.generate(request).await?;
         Ok(response.content)
     }
@@ -52,7 +52,6 @@ impl LlmPort for InfraLlmPort {
         user_prompt: &str,
         model: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        let _ = model;
         let request = LlmRequest {
             messages: vec![
                 Message {
@@ -66,6 +65,7 @@ impl LlmPort for InfraLlmPort {
             ],
             max_tokens: 4096,
             temperature: 0.7,
+            model: model.to_string(),
         };
         self.client.stream_generate(request).await
     }

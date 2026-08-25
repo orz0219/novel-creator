@@ -12,9 +12,6 @@ mod integration_tests {
     use uuid::Uuid;
 
 
-    fn build_state_committer(pool: sqlx::PgPool) -> runtime::state_committer::DbStateCommitter {
-        runtime::state_committer::DbStateCommitter::new(std::sync::Arc::new(db::runtime_ports::DbStateCommitterPort::new(pool)))
-    }
 
     async fn test_pool() -> Result<PgPool> {
         let database_url = std::env::var("DATABASE_URL")
@@ -100,88 +97,6 @@ mod integration_tests {
         Ok(id)
     }
 
-    // ============================================================
-    // P2-10: Transaction Atomicity Test
-    // ============================================================
-    #[tokio::test]
-    async fn test_commit_atomicity() -> Result<()> {
-        let pool = test_pool().await?;
-        let project_id = create_test_project(&pool).await?;
-        let entity_id = create_test_entity(&pool, project_id).await?;
-
-        // 创建初始状态
-        let state_repo = db::repos::state_repo::StateRepo::new(pool.clone());
-        state_repo.upsert_state(project_id, entity_id, "hp", serde_json::json!(100), None).await?;
-
-        // 创建两个 Approved 的 ProposedChange
-        let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
-
-        let task_id1 = Uuid::new_v4();
-        ensure_task(&pool, project_id, task_id1).await?;
-        let change1 = val_repo.create_proposed_change(
-            project_id,
-            Some(task_id1),
-            ProposedChangeType::StateChange,
-            entity_id,
-            "Take damage",
-            serde_json::json!({"state_key": "hp", "new_value": 80}),
-        ).await?;
-
-        let task_id2 = Uuid::new_v4();
-        ensure_task(&pool, project_id, task_id2).await?;
-        let change2 = val_repo.create_proposed_change(
-            project_id,
-            Some(task_id2),
-            ProposedChangeType::StateChange,
-            entity_id,
-            "Heal",
-            serde_json::json!({"state_key": "mp", "new_value": 90}),
-        ).await?;
-
-        // 更新状态为 Approved
-        sqlx::query("UPDATE proposed_change SET status = 'Approved' WHERE id IN ($1, $2)")
-            .bind(change1.id)
-            .bind(change2.id)
-            .execute(&pool)
-            .await?;
-
-        // 执行 commit
-        let state_committer = build_state_committer(pool.clone());
-        let result = state_committer.commit(project_id, &[change1.id, change2.id]).await;
-
-        // 验证结果
-        assert!(result.is_ok(), "Commit should succeed");
-
-        let response = result.unwrap();
-        assert_eq!(response.results.len(), 2, "Should have 2 results");
-        assert_eq!(response.events.len(), 2, "Should have 2 events");
-
-        // 验证最终状态（两个不同 state_key 的变化都应原子地生效）
-        let final_hp = state_repo.get_current_state(project_id, entity_id, "hp").await?;
-        assert!(final_hp.is_some());
-        assert_eq!(final_hp.unwrap().state_value, serde_json::json!(80));
-        let final_mp = state_repo.get_current_state(project_id, entity_id, "mp").await?;
-        assert!(final_mp.is_some());
-        assert_eq!(final_mp.unwrap().state_value, serde_json::json!(90));
-
-        // 验证 proposal 状态
-        let pc1 = val_repo.get_proposed_change_by_id(change1.id).await?;
-        assert_eq!(pc1.unwrap().status, ProposedChangeStatus::Applied);
-
-        let pc2 = val_repo.get_proposed_change_by_id(change2.id).await?;
-        assert_eq!(pc2.unwrap().status, ProposedChangeStatus::Applied);
-
-        // 清理
-        sqlx::query("DELETE FROM state_change WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM current_state WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM proposed_change WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM system_events WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM entity WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM world WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM project WHERE id = $1").bind(project_id).execute(&pool).await?;
-
-        Ok(())
-    }
 
     // ============================================================
     // P2-11: Cross-Project Isolation Test
@@ -238,77 +153,4 @@ mod integration_tests {
         Ok(())
     }
 
-    // ============================================================
-    // CAS Conflict Test
-    // ============================================================
-    #[tokio::test]
-    async fn test_cas_conflict_rollback() -> Result<()> {
-        let pool = test_pool().await?;
-        let project_id = create_test_project(&pool).await?;
-        let entity_id = create_test_entity(&pool, project_id).await?;
-
-        let state_repo = db::repos::state_repo::StateRepo::new(pool.clone());
-
-        // 创建初始状态 (version 1)
-        state_repo.upsert_state(project_id, entity_id, "hp", serde_json::json!(100), None).await?;
-
-        // 创建两个 Approved 的 ProposedChange
-        let val_repo = db::repos::validation_repo::ValidationRepo::new(pool.clone());
-
-        let task_id1 = Uuid::new_v4();
-        ensure_task(&pool, project_id, task_id1).await?;
-        let change1 = val_repo.create_proposed_change(
-            project_id,
-            Some(task_id1),
-            ProposedChangeType::StateChange,
-            entity_id,
-            "Change 1",
-            serde_json::json!({"state_key": "hp", "new_value": 80}),
-        ).await?;
-
-        let task_id2 = Uuid::new_v4();
-        ensure_task(&pool, project_id, task_id2).await?;
-        let change2 = val_repo.create_proposed_change(
-            project_id,
-            Some(task_id2),
-            ProposedChangeType::StateChange,
-            entity_id,
-            "Change 2",
-            serde_json::json!({"state_key": "hp", "new_value": 90}),
-        ).await?;
-
-        // 更新状态为 Approved
-        sqlx::query("UPDATE proposed_change SET status = 'Approved' WHERE id IN ($1, $2)")
-            .bind(change1.id)
-            .bind(change2.id)
-            .execute(&pool)
-            .await?;
-
-        // 模拟并发：手动修改状态版本
-        // change1 会成功，change2 应该因为 CAS 冲突而失败
-        let state_committer = build_state_committer(pool.clone());
-        let result = state_committer.commit(project_id, &[change1.id, change2.id]).await;
-
-        // 由于两个 change 都修改同一个 state_key，第二个应该因为 CAS 冲突失败
-        // 整个事务应该回滚
-        assert!(result.is_err(), "Should fail due to CAS conflict");
-
-        // 验证状态没有改变（事务回滚）
-        let final_state = state_repo.get_current_state(project_id, entity_id, "hp").await?;
-        assert!(final_state.is_some());
-        assert_eq!(final_state.unwrap().state_value, serde_json::json!(100));
-
-        // 验证 proposal 状态没有改变
-        let pc1 = val_repo.get_proposed_change_by_id(change1.id).await?;
-        assert_eq!(pc1.unwrap().status, ProposedChangeStatus::Approved);
-
-        // 清理
-        sqlx::query("DELETE FROM proposed_change WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM current_state WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM entity WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM world WHERE project_id = $1").bind(project_id).execute(&pool).await?;
-        sqlx::query("DELETE FROM project WHERE id = $1").bind(project_id).execute(&pool).await?;
-
-        Ok(())
-    }
 }

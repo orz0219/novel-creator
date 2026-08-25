@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use domain::ports::*;
 use domain::*;
-use crate::repos::world_version_repo::WorldVersionRepo;
 use crate::ser;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -276,165 +275,6 @@ impl ProposedChangeQueryPort for DbProposedChangeQueryPort {
     }
 }
 
-pub struct DbStateCommitterPort { pool: PgPool }
-
-#[async_trait::async_trait]
-impl StateCommitterPort for DbStateCommitterPort {
-    async fn commit(&self, project_id: Uuid, change_ids: &[Uuid]) -> Result<CommitResponse> {
-        commit_changes(&self.pool, project_id, change_ids).await
-    }
-}
-
-/// Transactional commit of approved ProposedChanges. All changes are committed
-/// in a single BEGIN/COMMIT transaction; any failure rolls back. This is the
-/// ONLY place that mutates canonical world state.
-///
-/// NOTE (架构边界，来自 P2 评审，见 docs/contracts/world-version.md):
-/// 本路径与 `DbMutationCommitter` **共享 `WorldVersionRepo` 作为唯一的版本分配器
-/// (canonical version allocator)**，但本路径**不是** `MutationCommitter` 的 adapter。
-/// 原因是本路径拥有 `proposed_change` 的生命周期语义（Approved→Applied 的 CAS 流转）
-/// 与 `CommitResponse` 返回模型，而 `MutationCommitter` 是 mutation pipeline 的
-/// 事务执行器，两者承担不同的 domain contract。因此"共享版本拥有者" ≠ "必须共享
-/// mutation 执行器"——不要把二者混为一谈。直接写 `world_version` 绕过 canonical
-/// commit 是被契约测试禁止的。
-async fn commit_changes(pool: &PgPool, project_id: Uuid, change_ids: &[Uuid]) -> Result<CommitResponse> {
-    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
-    let mut results = Vec::new();
-    let mut event_ids = Vec::new();
-    // Intra-batch CAS guard: two changes in the *same* commit batch that target the
-    // same (entity_id, state_key) are mutually exclusive — the second one must fail
-    // so the whole transaction rolls back (last-write-wins across an atomic commit is
-    // non-deterministic and must be rejected at commit time).
-    let mut committed_state_keys: std::collections::HashSet<(Uuid, String)> = std::collections::HashSet::new();
-
-    for change_id in change_ids {
-        let change = crate::repos::validation_repo::ValidationRepo::get_proposed_change_by_id_for_update_tx(&mut *tx, *change_id).await?
-            .ok_or_else(|| anyhow::anyhow!("ProposedChange {} not found in database", change_id))?;
-
-        if change.status != ProposedChangeStatus::Approved {
-            return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: status is {:?}, expected Approved", change.id, change.status));
-        }
-        if change.project_id != project_id {
-            return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: project_id {} does not match expected {}", change.id, change.project_id, project_id));
-        }
-
-        let event = DomainEvent::new(DomainEventType::ProposalCommitted, project_id, Some(change.target_entity_id), serde_json::json!({"proposed_change_id": change.id, "change_type": format!("{:?}", change.change_type), "payload": change.payload}));
-
-        sqlx::query("INSERT INTO system_events (id, event_type, project_id, entity_id, data, source, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-            .bind(event.id).bind(format!("{:?}", event.event_type)).bind(event.project_id).bind(event.entity_id).bind(&event.data).bind(&event.metadata.source).bind(event.created_at)
-            .execute(&mut *tx).await.context("Failed to persist DomainEvent")?;
-
-        event_ids.push(event.id);
-
-        // Dispatch on the authoritative change_type (the stored JSON payload has no
-        // serde discriminator, so it cannot be deserialized into ChangePayload directly).
-        match change.change_type {
-            ProposedChangeType::StateChange => {
-                #[derive(serde::Deserialize)]
-                struct StateChangePayload { state_key: String, new_value: serde_json::Value }
-                let p: StateChangePayload = serde_json::from_value(change.payload.clone())
-                    .map_err(|e| anyhow::anyhow!("Invalid StateChange payload for {}: {}", change.id, e))?;
-                let state_key = (change.target_entity_id, p.state_key.clone());
-                if committed_state_keys.contains(&state_key) {
-                    return Err(anyhow::anyhow!(
-                        "CAS conflict in commit batch: ProposedChange {} targets state_key '{}' on entity {} which was already modified by another change in this same commit",
-                        change.id, p.state_key, change.target_entity_id
-                    ));
-                }
-                committed_state_keys.insert(state_key);
-                let entity = crate::repos::entity_repo::EntityRepo::get_by_id_with_project_tx(&mut *tx, project_id, change.target_entity_id).await?;
-                if entity.is_none() {
-                    return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: target entity {} not found in project {}", change.id, change.target_entity_id, project_id));
-                }
-                let (record, new_version) = crate::repos::state_repo::StateRepo::commit_state_change_tx(&mut *tx, project_id, Some(event.id), "STATE_CHANGE", change.target_entity_id, &p.state_key, p.new_value, Some("committer")).await?;
-                let rows_affected = crate::repos::validation_repo::ValidationRepo::update_status_with_guard_tx(&mut *tx, change.id, ProposedChangeStatus::Applied, ProposedChangeStatus::Approved).await?;
-                if rows_affected == 0 {
-                    return Err(anyhow::anyhow!("Concurrent modification detected for ProposedChange {}", change.id));
-                }
-                results.push(CommitResult::StateChange { record, new_version });
-            }
-            ProposedChangeType::EntityCreate => {
-                #[derive(serde::Deserialize)]
-                struct EntityCreatePayload { entity_type: String, name: String, attributes: serde_json::Value }
-                let p: EntityCreatePayload = serde_json::from_value(change.payload.clone())
-                    .map_err(|e| anyhow::anyhow!("Invalid EntityCreate payload for {}: {}", change.id, e))?;
-                let entity_type_obj = crate::repos::entity_repo::EntityTypeRepo::ensure_tx(&mut *tx, &p.entity_type, None).await?;
-                let world_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM world WHERE project_id = $1 AND is_main = TRUE LIMIT 1").bind(project_id).fetch_one(&mut *tx).await.context("No main world found for project")?;
-                let entity = crate::repos::entity_repo::EntityRepo::create_tx(&mut *tx, project_id, Uuid::new_v4(), world_id, entity_type_obj.id, &p.name, None, None, p.attributes).await?;
-                let rows_affected = crate::repos::validation_repo::ValidationRepo::update_status_with_guard_tx(&mut *tx, change.id, ProposedChangeStatus::Applied, ProposedChangeStatus::Approved).await?;
-                if rows_affected == 0 {
-                    return Err(anyhow::anyhow!("Concurrent modification detected for ProposedChange {}", change.id));
-                }
-                results.push(CommitResult::EntityCreated { entity_id: entity.id, entity_name: entity.name });
-            }
-            ProposedChangeType::RelationCreate => {
-                #[derive(serde::Deserialize)]
-                struct RelationCreatePayload { target_entity_id: Uuid, relation_type: String, attributes: serde_json::Value }
-                let p: RelationCreatePayload = serde_json::from_value(change.payload.clone())
-                    .map_err(|e| anyhow::anyhow!("Invalid RelationCreate payload for {}: {}", change.id, e))?;
-                let source = crate::repos::entity_repo::EntityRepo::get_by_id_with_project_tx(&mut *tx, project_id, change.target_entity_id).await?;
-                if source.is_none() {
-                    return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: source entity {} not found in project {}", change.id, change.target_entity_id, project_id));
-                }
-                let target = crate::repos::entity_repo::EntityRepo::get_by_id_with_project_tx(&mut *tx, project_id, p.target_entity_id).await?;
-                if target.is_none() {
-                    return Err(anyhow::anyhow!("Cannot commit ProposedChange {}: target entity {} not found", change.id, p.target_entity_id));
-                }
-                let relation = crate::repos::entity_repo::RelationRepo::create_tx(&mut *tx, project_id, change.target_entity_id, p.target_entity_id, &p.relation_type, None, p.attributes).await?;
-                let rows_affected = crate::repos::validation_repo::ValidationRepo::update_status_with_guard_tx(&mut *tx, change.id, ProposedChangeStatus::Applied, ProposedChangeStatus::Approved).await?;
-                if rows_affected == 0 {
-                    return Err(anyhow::anyhow!("Concurrent modification detected for ProposedChange {}", change.id));
-                }
-                results.push(CommitResult::RelationCreated { relation_id: relation.id, source_entity_id: relation.source_entity_id, target_entity_id: relation.target_entity_id, relation_type: relation.relation_type });
-            }
-            _ => {
-                return Err(anyhow::anyhow!("Unsupported change payload type for ProposedChange {}", change.id));
-            }
-        }
-    }
-
-    // Invariant C (commit contract): a successful commit advances the world
-    // version. Version advancement is owned by `WorldVersionRepo` — the single
-    // canonical owner used by EVERY commit path (including DbMutationCommitter),
-    // so there is exactly ONE place that computes "next version = prev + 1" and
-    // writes the row. This eliminates the duplicated version logic that used to
-    // live in this function. It is the mechanical "world moves forward one
-    // version per commit" invariant; the *semantic* meaning of world_version
-    // (optimistic lock vs history vs narrative timeline) is decided in the P2
-    // review (see docs/contracts/world-version.md). Direct writes to
-    // `world_version` outside the canonical commit are forbidden by contract.
-    if !results.is_empty() {
-        let world_id: Uuid = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM world WHERE project_id = $1 AND is_main = TRUE LIMIT 1",
-        )
-        .bind(project_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("Failed to resolve main world for version bump")?
-        .ok_or_else(|| anyhow::anyhow!("No main world found for project {}", project_id))?;
-
-        let repo = WorldVersionRepo::new(pool.clone());
-        let parent = repo.latest_tx(&mut *tx, world_id).await?;
-        let new_version = parent.as_ref().map(|p| p.version).unwrap_or(0) + 1;
-        let v = WorldVersion {
-            id: Uuid::new_v4(),
-            world_id,
-            version: new_version,
-            kind: WorldVersionKind::AiProposal,
-            trigger_id: change_ids.first().copied(),
-            summary: Some(format!("commit {} change(s)", results.len())),
-            parent_version_id: parent.as_ref().map(|p| p.id),
-            created_at: Utc::now(),
-        };
-        repo.create_tx(&mut *tx, &v).await?;
-    }
-
-    tx.commit().await.context("Failed to commit transaction")?;
-
-    tracing::info!("Committed {} changes with {} events in a single transaction", results.len(), event_ids.len());
-
-    Ok(CommitResponse { project_id, results, events: event_ids, committed_at: Utc::now() })
-}
 
 // ---------------------------------------------------------------------------
 // Constructors: each port is built from a PgPool. These are the only place the
@@ -472,8 +312,5 @@ impl DbApprovalPort {
     pub fn new(pool: PgPool) -> Self { Self { pool } }
 }
 impl DbProposedChangeQueryPort {
-    pub fn new(pool: PgPool) -> Self { Self { pool } }
-}
-impl DbStateCommitterPort {
     pub fn new(pool: PgPool) -> Self { Self { pool } }
 }

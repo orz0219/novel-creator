@@ -8,11 +8,11 @@
     </div>
     <div class="panel-body">
       <div class="task-info" v-if="currentTask">
-        <div class="task-type">{{ currentTask.type }}</div>
+        <div class="task-type">{{ currentTask.skill_id || currentTask.scene_id || currentTask.id }}</div>
         <GenerationProgress :status="currentTask.status" />
-        <div class="task-result" v-if="currentTask.result">
+        <div class="task-result" v-if="currentTask.output !== undefined && currentTask.output !== null">
           <div class="result-label">结果</div>
-          <div class="result-text">{{ currentTask.result }}</div>
+          <div class="result-text">{{ JSON.stringify(currentTask.output) }}</div>
         </div>
       </div>
       <div class="empty-state" v-else>选择场景后点击开始生成</div>

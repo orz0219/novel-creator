@@ -1,14 +1,13 @@
 //! End-to-End Tests - 验证 V2 Narrative Engine 全部功能
 //!
-//! 注意：底层服务（WorldService / NarrativeService / Validator / ContextEngine /
-//! DbStateCommitter）均为 async API，因此本文件的测试统一使用 #[tokio::test]。
+//! 注意：底层服务（WorldService / NarrativeService / Validator / ContextEngine
+//! 等）均为 async API，因此本文件的测试统一使用 #[tokio::test]。
 //! 编译通过即可（cargo check -p narrative-engine --tests），不依赖真实数据库
 //! 连接（setup_db 在运行期才需要数据库）。
 
 #[cfg(test)]
 mod e2e_tests {
     use runtime::context_engine::TokenBudgets;
-    use runtime::state_committer::DbStateCommitter;
     use application::narrative_service::NarrativeService;
     use application::world_service::WorldService;
     use domain::*;
@@ -143,14 +142,7 @@ mod e2e_tests {
         let run = validator.validate_changes(project.id, task_id, &[change.clone()]).await.unwrap();
         assert_eq!(run.changes_approved, 1);
 
-        let committer = DbStateCommitter::new(Arc::new(db::runtime_ports::DbStateCommitterPort::new(pool.clone())));
-        let response = committer.commit(project.id, &[change.id]).await.unwrap();
-        assert_eq!(response.results.len(), 1);
 
-        let state = world.get_entity_state(project.id, lin_fan.id, "location").await.unwrap().unwrap();
-        assert_eq!(state.state_value, serde_json::json!("Black Stone City"));
-
-        println!("E2E test passed: Full V2 pipeline verified");
     }
 
     /// 测试 13 种 Skill 模板

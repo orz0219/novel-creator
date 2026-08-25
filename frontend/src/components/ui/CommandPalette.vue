@@ -8,7 +8,7 @@
       </div>
       <div class="command-list" v-if="filtered.length">
         <div v-for="(cmd, i) in filtered" :key="cmd.id" class="command-item" :class="{ selected: i === selectedIndex }" @click="cmd.action(); $emit('close')" @mouseenter="selectedIndex = i">
-          <span class="cmd-icon">{{ cmd.icon }}</span>
+          <span class="cmd-icon"><component :is="cmd.icon" :size="16" /></span>
           <span class="cmd-label">{{ cmd.label }}</span>
           <span class="cmd-cat">{{ cmd.cat }}</span>
         </div>
@@ -21,6 +21,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { Folder, Globe, User, MapPin, Swords, Calendar, BookOpen, GitBranch, Sparkles, PenLine, Map, ClipboardList, ScrollText, Home, Search, Settings } from 'lucide-vue-next'
 defineEmits(['close'])
 const route = useRoute()
 const router = useRouter()
@@ -37,26 +38,26 @@ const pid = computed(() => {
 const cmds = computed(() => {
   const p = pid.value
   const projectCmds = p ? [
-    { id: 'proj', icon: '📁', label: '项目仪表盘', cat: '导航', action: () => router.push('/project/' + p) },
-    { id: 'world', icon: '🌍', label: '世界总览', cat: '世界', action: () => router.push('/project/' + p + '/world') },
-    { id: 'chars', icon: '👤', label: '人物列表', cat: '世界', action: () => router.push('/project/' + p + '/world/characters') },
-    { id: 'locs', icon: '📍', label: '地点列表', cat: '世界', action: () => router.push('/project/' + p + '/world/locations') },
-    { id: 'facs', icon: '⚔️', label: '势力列表', cat: '世界', action: () => router.push('/project/' + p + '/world/factions') },
-    { id: 'tl', icon: '📅', label: '时间线', cat: '世界', action: () => router.push('/project/' + p + '/world/timeline') },
-    { id: 'story', icon: '📖', label: '故事结构', cat: '故事', action: () => router.push('/project/' + p + '/story') },
-    { id: 'sl', icon: '🧵', label: '剧情线', cat: '故事', action: () => router.push('/project/' + p + '/story/storylines') },
-    { id: 'fs', icon: '🔮', label: '伏笔管理', cat: '故事', action: () => router.push('/project/' + p + '/story/foreshadows') },
-    { id: 'write', icon: '✍️', label: '进入写作', cat: '创作', action: () => router.push('/project/' + p + '/write') },
-    { id: 'graph', icon: '🗺️', label: '关系图谱', cat: '工具', action: () => router.push('/project/' + p + '/graph') },
-    { id: 'prop', icon: '📋', label: 'AI 提案', cat: 'AI', action: () => router.push('/project/' + p + '/proposals') },
-    { id: 'hist', icon: '📜', label: '历史记录', cat: '工具', action: () => router.push('/project/' + p + '/history') },
+    { id: 'proj', icon: Folder, label: '项目仪表盘', cat: '导航', action: () => router.push('/project/' + p) },
+    { id: 'world', icon: Globe, label: '世界总览', cat: '世界', action: () => router.push('/project/' + p + '/world') },
+    { id: 'chars', icon: User, label: '人物列表', cat: '世界', action: () => router.push('/project/' + p + '/world/characters') },
+    { id: 'locs', icon: MapPin, label: '地点列表', cat: '世界', action: () => router.push('/project/' + p + '/world/locations') },
+    { id: 'facs', icon: Swords, label: '势力列表', cat: '世界', action: () => router.push('/project/' + p + '/world/factions') },
+    { id: 'tl', icon: Calendar, label: '时间线', cat: '世界', action: () => router.push('/project/' + p + '/world/timeline') },
+    { id: 'story', icon: BookOpen, label: '故事结构', cat: '故事', action: () => router.push('/project/' + p + '/story') },
+    { id: 'sl', icon: GitBranch, label: '剧情线', cat: '故事', action: () => router.push('/project/' + p + '/story/storylines') },
+    { id: 'fs', icon: Sparkles, label: '伏笔管理', cat: '故事', action: () => router.push('/project/' + p + '/story/foreshadows') },
+    { id: 'write', icon: PenLine, label: '进入写作', cat: '创作', action: () => router.push('/project/' + p + '/write') },
+    { id: 'graph', icon: Map, label: '关系图谱', cat: '工具', action: () => router.push('/project/' + p + '/graph') },
+    { id: 'prop', icon: ClipboardList, label: 'AI 提案', cat: 'AI', action: () => router.push('/project/' + p + '/proposals') },
+    { id: 'hist', icon: ScrollText, label: '历史记录', cat: '工具', action: () => router.push('/project/' + p + '/history') },
   ] : []
 
   return [
-    { id: 'home', icon: '🏠', label: '返回首页', cat: '导航', action: () => router.push('/') },
+    { id: 'home', icon: Home, label: '返回首页', cat: '导航', action: () => router.push('/') },
     ...projectCmds,
-    { id: 'search', icon: '🔍', label: '全局搜索', cat: '工具', action: () => router.push('/search') },
-    { id: 'settings', icon: '⚙️', label: '设置', cat: '系统', action: () => router.push('/settings') },
+    { id: 'search', icon: Search, label: '全局搜索', cat: '工具', action: () => router.push('/search') },
+    { id: 'settings', icon: Settings, label: '设置', cat: '系统', action: () => router.push('/settings') },
   ]
 })
 const filtered = computed(() => {

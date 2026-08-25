@@ -22,7 +22,6 @@ use application::foreshadow_service::ForeshadowService;
 use application::history_service::HistoryService;
 use application::mutation::MutationCommitter;
 use application::narrative_service::NarrativeService;
-use application::project_service::ProjectService;
 use application::rule_service::RuleService;
 use application::snapshot_service::SnapshotService;
 use application::storyline_service::StorylineService;
@@ -30,7 +29,7 @@ use application::world_service::WorldService;
 use async_trait::async_trait;
 use db::application_ports::{
     DbEntityRepositoryPort, DbForeshadowRepositoryPort, DbHistoryRepositoryPort, DbNarrativeRepositoryPort,
-    DbNarrativeStateWritePort, DbProjectRepositoryPort, DbRuleRepositoryPort, DbSnapshotRepositoryPort,
+    DbNarrativeStateWritePort, DbRuleRepositoryPort, DbSnapshotRepositoryPort,
     DbStorylineRepositoryPort, DbWorldRepositoryPort,
 };
 use db::mutation_committer::DbMutationCommitter;
@@ -157,7 +156,7 @@ fn entity_schema(a: EntityAction) -> Value {
         | EntityAction::CreateItem => json!({
             "type": "object",
             "properties": {
-                "world_id": { "type": "string", "description": "目标世界 UUID" },
+                "world_id": { "type": "string", "description": "目标世界 UUID（先调 get_main_world 取得）" },
                 "name": { "type": "string" },
                 "summary": { "type": "string" },
                 "description": { "type": "string" }
@@ -351,14 +350,13 @@ fn narrative_schema(a: NarrativeAction) -> Value {
         NarrativeAction::CreateNode => json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
                 "node_type": { "type": "string", "description": "Volume / Arc / Chapter / Scene / Beat" },
                 "parent_id": { "type": "string", "description": "可选：父节点 UUID" },
                 "title": { "type": "string" },
                 "description": { "type": "string" },
                 "attributes": { "type": "object" }
             },
-            "required": ["project_id", "node_type", "title"]
+            "required": ["node_type", "title"]
         }),
         NarrativeAction::ReviseNode => json!({
             "type": "object",
@@ -378,8 +376,8 @@ fn narrative_schema(a: NarrativeAction) -> Value {
         }),
         NarrativeAction::ListNodes => json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" } },
-            "required": ["project_id"]
+            "properties": {},
+            "required": []
         }),
     }
 }
@@ -493,12 +491,11 @@ fn storyline_schema(a: StorylineAction) -> Value {
         StorylineAction::CreateStoryline => json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
                 "name": { "type": "string" },
                 "description": { "type": "string" },
                 "importance": { "type": "string", "description": "可选：Normal / High / Critical" }
             },
-            "required": ["project_id", "name"]
+            "required": ["name"]
         }),
         StorylineAction::ReviseStoryline => json!({
             "type": "object",
@@ -516,8 +513,8 @@ fn storyline_schema(a: StorylineAction) -> Value {
         }),
         StorylineAction::ListStorylines => json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" } },
-            "required": ["project_id"]
+            "properties": {},
+            "required": []
         }),
     }
 }
@@ -621,13 +618,12 @@ fn foreshadow_schema(a: ForeshadowAction) -> Value {
         ForeshadowAction::CreateForeshadow => json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
                 "name": { "type": "string" },
                 "description": { "type": "string" },
                 "importance": { "type": "string", "description": "可选：Normal / High / Critical" },
                 "hint_level": { "type": "string", "description": "可选：提示等级" }
             },
-            "required": ["project_id", "name"]
+            "required": ["name"]
         }),
         ForeshadowAction::ReviseForeshadow => json!({
             "type": "object",
@@ -645,8 +641,8 @@ fn foreshadow_schema(a: ForeshadowAction) -> Value {
         }),
         ForeshadowAction::ListForeshadows => json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" } },
-            "required": ["project_id"]
+            "properties": {},
+            "required": []
         }),
     }
 }
@@ -754,7 +750,7 @@ fn rule_schema(a: RuleAction) -> Value {
         RuleAction::CreateRule => json!({
             "type": "object",
             "properties": {
-                "world_id": { "type": "string" },
+                "world_id": { "type": "string", "description": "目标世界 UUID（先调 get_main_world 取得）" },
                 "rule_content": { "type": "string" },
                 "rule_level": { "type": "string", "description": "可选" },
                 "affected_scope": { "type": "string", "description": "可选" },
@@ -778,7 +774,7 @@ fn rule_schema(a: RuleAction) -> Value {
         }),
         RuleAction::ListRules => json!({
             "type": "object",
-            "properties": { "world_id": { "type": "string" } },
+            "properties": { "world_id": { "type": "string", "description": "世界 UUID" } },
             "required": ["world_id"]
         }),
     }
@@ -884,12 +880,11 @@ fn snapshot_schema(a: SnapshotAction) -> Value {
         SnapshotAction::CreateSnapshot => json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
                 "name": { "type": "string" },
                 "story_time": { "type": "string" },
                 "world_summary": { "type": "string" }
             },
-            "required": ["project_id"]
+            "required": []
         }),
         SnapshotAction::DeleteSnapshot => json!({
             "type": "object",
@@ -898,8 +893,8 @@ fn snapshot_schema(a: SnapshotAction) -> Value {
         }),
         SnapshotAction::ListSnapshots => json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" } },
-            "required": ["project_id"]
+            "properties": {},
+            "required": []
         }),
     }
 }
@@ -935,134 +930,6 @@ impl AgentTool for SnapshotTool {
                 let project_id = parse_uuid(&input, "project_id")?;
                 let list = self.service.list_snapshots(project_id).await?;
                 Ok(json!({ "ok": true, "action": "list_snapshots", "data": list }))
-            }
-        }
-    }
-}
-
-// ============================================================
-// Project 聚合
-// ============================================================
-
-#[derive(Clone, Copy)]
-pub enum ProjectAction {
-    CreateProject,
-    UpdateProject,
-    DeleteProject,
-    GetProject,
-    ListProjects,
-}
-
-pub struct ProjectTool {
-    action: ProjectAction,
-    service: Arc<ProjectService>,
-}
-
-impl ProjectTool {
-    pub fn new(action: ProjectAction, service: Arc<ProjectService>) -> Self {
-        Self { action, service }
-    }
-}
-
-pub fn register_project_tools(registry: &ToolRegistry, service: Arc<ProjectService>) {
-    for a in [
-        ProjectAction::CreateProject,
-        ProjectAction::UpdateProject,
-        ProjectAction::DeleteProject,
-        ProjectAction::GetProject,
-        ProjectAction::ListProjects,
-    ] {
-        registry.register(Arc::new(ProjectTool::new(a, service.clone())));
-    }
-}
-
-fn project_name(a: ProjectAction) -> &'static str {
-    match a {
-        ProjectAction::CreateProject => "create_project",
-        ProjectAction::UpdateProject => "update_project",
-        ProjectAction::DeleteProject => "delete_project",
-        ProjectAction::GetProject => "get_project",
-        ProjectAction::ListProjects => "list_projects",
-    }
-}
-
-fn project_description(a: ProjectAction) -> String {
-    match a {
-        ProjectAction::CreateProject => "创建新小说项目（含自动创建主世界）。".into(),
-        ProjectAction::UpdateProject => "修改项目元信息（名称 / 描述 / 状态）。这会修改已有产物。".into(),
-        ProjectAction::DeleteProject => "删除一个项目。删除前请先用 get_project / list_projects 确认目标 id。".into(),
-        ProjectAction::GetProject => "读取单一项目。".into(),
-        ProjectAction::ListProjects => "列出全部项目，用于检索上下文。".into(),
-    }
-}
-
-fn project_schema(a: ProjectAction) -> Value {
-    match a {
-        ProjectAction::CreateProject => json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "description": { "type": "string" },
-                "language": { "type": "string", "description": "可选：创作语言" }
-            },
-            "required": ["name"]
-        }),
-        ProjectAction::UpdateProject => json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "name": { "type": "string" },
-                "description": { "type": "string" },
-                "status": { "type": "string" }
-            },
-            "required": ["id"]
-        }),
-        ProjectAction::DeleteProject | ProjectAction::GetProject => json!({
-            "type": "object",
-            "properties": { "id": { "type": "string" } },
-            "required": ["id"]
-        }),
-        ProjectAction::ListProjects => json!({ "type": "object", "properties": {} }),
-    }
-}
-
-#[async_trait]
-impl AgentTool for ProjectTool {
-    fn name(&self) -> String {
-        project_name(self.action).to_string()
-    }
-    fn description(&self) -> String {
-        project_description(self.action)
-    }
-    fn input_schema(&self) -> Value {
-        project_schema(self.action)
-    }
-
-    async fn execute(&self, input: Value) -> Result<Value> {
-        match self.action {
-            ProjectAction::CreateProject => {
-                let name = opt_str(&input, "name").ok_or_else(|| anyhow::anyhow!("name 缺失"))?;
-                let p = self.service.create_project(name, opt_str(&input, "description"), opt_str(&input, "language")).await?;
-                Ok(json!({ "ok": true, "action": "create_project", "data": p }))
-            }
-            ProjectAction::UpdateProject => {
-                let id = parse_uuid(&input, "id")?;
-                let p = self.service.update_project(id, opt_str(&input, "name"), opt_str(&input, "description"), opt_str(&input, "status")).await?;
-                Ok(json!({ "ok": true, "action": "update_project", "data": p }))
-            }
-            ProjectAction::DeleteProject => {
-                let id = parse_uuid(&input, "id")?;
-                self.service.delete_project(id).await?;
-                Ok(json!({ "ok": true, "action": "delete_project", "id": id.to_string() }))
-            }
-            ProjectAction::GetProject => {
-                let id = parse_uuid(&input, "id")?;
-                let p = self.service.get_project(id).await?.ok_or_else(|| anyhow::anyhow!("项目不存在: {}", id))?;
-                Ok(json!({ "ok": true, "action": "get_project", "data": p }))
-            }
-            ProjectAction::ListProjects => {
-                let list = self.service.list_projects().await?;
-                Ok(json!({ "ok": true, "action": "list_projects", "data": list }))
             }
         }
     }
@@ -1113,18 +980,17 @@ fn world_schema(a: WorldAction) -> Value {
     match a {
         WorldAction::GetMainWorld => json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" } },
-            "required": ["project_id"]
+            "properties": {},
+            "required": []
         }),
         WorldAction::UpdateMainWorld => json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
                 "name": { "type": "string" },
                 "description": { "type": "string" },
                 "world_rules": { "type": "string" }
             },
-            "required": ["project_id"]
+            "required": []
         }),
     }
 }
@@ -1221,34 +1087,31 @@ fn history_schema(a: HistoryAction) -> Value {
         HistoryAction::CreateEvent => json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
                 "name": { "type": "string" },
                 "description": { "type": "string" }
             },
-            "required": ["project_id", "name", "description"]
+            "required": ["name", "description"]
         }),
         HistoryAction::CreateFact => json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
                 "content": { "type": "string" },
                 "category": { "type": "string", "description": "可选" },
                 "certainty": { "type": "string", "description": "如 CANON / SPECULATIVE" }
             },
-            "required": ["project_id", "content", "certainty"]
+            "required": ["content", "certainty"]
         }),
         HistoryAction::ListEvents => json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
                 "limit": { "type": "number", "description": "可选，默认 50" }
             },
-            "required": ["project_id"]
+            "required": []
         }),
         HistoryAction::ListFacts => json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" } },
-            "required": ["project_id"]
+            "properties": {},
+            "required": []
         }),
     }
 }
@@ -1336,9 +1199,6 @@ pub fn register_all_domain_tools(registry: &ToolRegistry, pool: &PgPool) {
         Arc::new(DbNarrativeStateWritePort::new(pool.clone())),
     ));
     register_snapshot_tools(registry, snapshot);
-
-    let project = Arc::new(ProjectService::new(Arc::new(DbProjectRepositoryPort::new(pool.clone()))));
-    register_project_tools(registry, project);
 
     let world = Arc::new(WorldService::new(Arc::new(DbWorldRepositoryPort::new(pool.clone()))));
     register_world_tools(registry, world);

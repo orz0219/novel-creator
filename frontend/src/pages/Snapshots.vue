@@ -13,7 +13,8 @@
       <div v-for="snap in snapshots" :key="snap.id" class="snapshot-card">
         <div class="snap-header">
           <span class="snap-id">#{{ snap.id.slice(0, 8) }}</span>
-          <span class="snap-name">{{ snap.name }}</span>
+          <span class="snap-name" v-if="snap.story_time">{{ snap.story_time }}</span>
+          <span class="snap-name" v-else>快照</span>
           <span class="snap-time">{{ formatDate(snap.created_at) }}</span>
         </div>
 
@@ -33,12 +34,11 @@
         </div>
 
         <div class="snap-stats">
-          <span class="stat">🧵 活跃线程 {{ snap.active_threads_count }}</span>
-          <span class="stat">🔮 未解伏笔 {{ snap.unresolved_foreshadows_count }}</span>
-          <span class="stat">👤 已知人物 {{ snap.known_characters_count }}</span>
-          <span class="stat">📍 已知地点 {{ snap.known_locations_count }}</span>
-          <span class="stat" v-if="snap.progress">📈 进度 {{ snap.progress }}</span>
-          <span class="stat">🕒 创建时间 {{ formatDate(snap.created_at) }}</span>
+          <span class="stat"><GitBranch class="stat-icon" :size="14" /> 活跃线程 {{ snap.active_threads_count }}</span>
+          <span class="stat"><Sparkles class="stat-icon" :size="14" /> 未解伏笔 {{ snap.unresolved_foreshadows_count }}</span>
+          <span class="stat"><User class="stat-icon" :size="14" /> 已知人物 {{ snap.known_characters_count }}</span>
+          <span class="stat"><MapPin class="stat-icon" :size="14" /> 已知地点 {{ snap.known_locations_count }}</span>
+          <span class="stat"><Clock class="stat-icon" :size="14" /> 创建时间 {{ formatDate(snap.created_at) }}</span>
         </div>
 
         <div class="snap-actions">
@@ -51,7 +51,7 @@
     </div>
 
     <div v-else class="empty-state">
-      <span class="empty-icon">🌍</span>
+      <Globe class="empty-icon" :size="40" />
       <span class="empty-text">暂无快照</span>
     </div>
   </div>
@@ -62,6 +62,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import { snapshotsApi, type Snapshot } from '@/api/snapshots'
+import { GitBranch, Sparkles, User, MapPin, TrendingUp, Clock, Globe } from 'lucide-vue-next'
 
 const route = useRoute()
 const projectStore = useProjectStore()
@@ -90,7 +91,7 @@ function formatDate(dateStr: string) {
 }
 
 async function handleCreate() {
-  await snapshotsApi.create(projectId, { name: '手动快照' })
+  await snapshotsApi.create(projectId, {})
   snapshots.value = await snapshotsApi.list(projectId).catch(() => [])
 }
 
@@ -101,7 +102,7 @@ async function handleDelete(id: string) {
 }
 
 async function handleRestore(snap: Snapshot) {
-  if (!confirm(`将世界状态恢复到快照「${snap.name}」时点？当前叙事状态将被覆盖。`)) return
+  if (!confirm('将世界状态恢复到该快照时点？当前叙事状态将被覆盖。')) return
   restoringId.value = snap.id
   try {
     await snapshotsApi.restore(snap.id)
@@ -133,7 +134,8 @@ async function handleRestore(snap: Snapshot) {
 .snap-summary { flex-direction: column; gap: var(--space-1); }
 .snap-summary .field-label { flex: none; }
 .snap-stats { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-3); margin-bottom: var(--space-3); }
-.stat { font-size: var(--text-sm); color: var(--text-secondary); }
+.stat { font-size: var(--text-sm); color: var(--text-secondary); display: inline-flex; align-items: center; gap: var(--space-1); }
+.stat-icon { flex-shrink: 0; }
 .snap-actions { display: flex; gap: var(--space-2); }
 .action-btn { padding: var(--space-1) var(--space-3); border: 1px solid var(--border-default); background: transparent; color: var(--text-secondary); border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; transition: all var(--transition-fast); }
 .action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }

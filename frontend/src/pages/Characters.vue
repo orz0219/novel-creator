@@ -16,7 +16,7 @@
       />
     </div>
     <div v-else class="empty-state">
-      <span class="empty-icon">👤</span>
+      <User class="empty-icon" :size="40" />
       <span class="empty-text">暂无人物，点击上方按钮创建</span>
     </div>
 
@@ -71,20 +71,20 @@
             <input v-model="stateForm.location" class="field-input" type="text" />
           </div>
           <div class="field">
-            <label class="field-label">健康</label>
-            <input v-model="stateForm.health" class="field-input" type="text" />
+            <label class="field-label">身体状态</label>
+            <input v-model="stateForm.physical_state" class="field-input" type="text" />
           </div>
           <div class="field">
-            <label class="field-label">修为</label>
-            <input v-model="stateForm.cultivation" class="field-input" type="text" />
+            <label class="field-label">心理状态</label>
+            <input v-model="stateForm.mental_state" class="field-input" type="text" />
           </div>
           <div class="field">
-            <label class="field-label">财力</label>
-            <input v-model="stateForm.money" class="field-input" type="text" />
+            <label class="field-label">资源状态</label>
+            <input v-model="stateForm.resource_state" class="field-input" type="text" />
           </div>
-          <div class="field field-inline">
-            <label class="field-label">通缉</label>
-            <input v-model="stateForm.wanted" class="field-checkbox" type="checkbox" />
+          <div class="field">
+            <label class="field-label">社会状态</label>
+            <input v-model="stateForm.social_state" class="field-input" type="text" />
           </div>
           <div class="field field-wide">
             <label class="field-label">额外信息 (JSON)</label>
@@ -104,6 +104,7 @@ import EntityDialog from '@/components/ui/EntityDialog.vue'
 import { characterApi } from '@/api/character'
 import type { Entity } from '@/types'
 import type { CharacterProfile, CharacterState } from '@/types/character'
+import { User } from 'lucide-vue-next'
 
 const worldStore = useWorldStore()
 
@@ -120,14 +121,14 @@ const savingProfile = ref(false)
 const savingState = ref(false)
 
 const profileFields: { key: keyof CharacterProfile; label: string; textarea?: boolean }[] = [
-  { key: 'real_name', label: '真名' },
-  { key: 'nickname', label: '别名' },
+  { key: 'name', label: '真名' },
+  { key: 'aliases', label: '别名' },
   { key: 'age', label: '年龄' },
   { key: 'gender', label: '性别' },
   { key: 'identity', label: '身份' },
   { key: 'appearance', label: '外貌', textarea: true },
-  { key: 'background', label: '背景', textarea: true },
-  { key: 'social_status', label: '社会地位' },
+  { key: 'background_origin', label: '背景', textarea: true },
+  { key: 'social_position', label: '社会地位' },
   { key: 'core_personality', label: '核心性格', textarea: true },
   { key: 'values', label: '价值观' },
 ]

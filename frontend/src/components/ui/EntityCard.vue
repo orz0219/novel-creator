@@ -2,13 +2,13 @@
   <div class="entity-card" @click="$emit('click')">
     <div class="card-header">
       <span class="card-type">{{ type }}</span>
-      <button class="card-delete" title="删除" @click.stop="$emit('delete')">🗑</button>
+      <button class="card-delete" title="删除" @click.stop="$emit('delete')"><Trash2 :size="14" /></button>
       <span class="card-version">v{{ entity.version }}</span>
     </div>
     <div class="card-name">{{ entity.name }}</div>
     <div class="card-summary" v-if="entity.summary">{{ entity.summary }}</div>
     <div class="card-meta">
-      <span class="meta-item" v-if="entity.source_generation_id">🤖 AI 生成</span>
+      <span class="meta-item" v-if="entity.source_generation_id"><Bot class="meta-icon" :size="12" /> AI 生成</span>
       <span class="meta-item">{{ formatDate(entity.updated_at) }}</span>
     </div>
   </div>
@@ -16,6 +16,7 @@
 
 <script setup lang="ts">
 import type { Entity } from '@/types'
+import { Trash2, Bot } from 'lucide-vue-next'
 
 defineProps<{
   entity: Entity
@@ -55,7 +56,10 @@ function formatDate(dateStr: string): string {
   padding: 2px 4px;
   border-radius: 4px;
   transition: opacity var(--transition-fast);
+  display: flex;
+  align-items: center;
 }
+.meta-icon { flex-shrink: 0; }
 .entity-card:hover .card-delete {
   opacity: 1;
 }

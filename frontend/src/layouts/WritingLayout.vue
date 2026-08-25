@@ -67,7 +67,7 @@
         />
       </div>
       <div class="editor-empty" v-else>
-        <div class="empty-icon">✍️</div>
+        <div class="empty-icon"><PenLine :size="40" /></div>
         <div class="empty-title">选择一个场景开始写作</div>
         <div class="empty-desc">选择下方任一场景后，即可用「AI 生成」撰写本章正文</div>
         <div v-if="flatScenes.length" class="scene-quicklist">
@@ -132,7 +132,7 @@
             </div>
             <div class="entity-reasons">
               <div v-for="reason in entity.reasons" :key="reason" class="reason-item">
-                ✓ {{ reason }}
+                <Check class="reason-check" :size="12" /> {{ reason }}
               </div>
             </div>
             <div class="entity-actions">
@@ -142,7 +142,7 @@
                 @click="contextStore.togglePin(entity.entity_id)"
                 title="钉住"
               >
-                📌
+                <Pin :size="14" />
               </button>
               <button
                 class="ctx-btn"
@@ -150,7 +150,7 @@
                 @click="contextStore.toggleExclude(entity.entity_id)"
                 title="排除"
               >
-                🚫
+                <Ban :size="14" />
               </button>
             </div>
           </div>
@@ -204,38 +204,30 @@
         </div>
         <div class="gen-task" v-if="generationStore.currentTask">
           <div class="gen-task-header">
-            <span class="task-type">{{ generationStore.currentTask.type }}</span>
+            <span class="task-type">{{ generationStore.currentTask.skill_id || generationStore.currentTask.scene_id || generationStore.currentTask.id }}</span>
             <span class="task-status" :class="generationStore.currentTask.status.toLowerCase()">
               {{ statusLabels[generationStore.currentTask.status] || generationStore.currentTask.status }}
             </span>
           </div>
           <div class="gen-progress">
-            <div class="progress-step" :class="{ done: isStageDone('BuildingContext'), active: generationStore.currentTask.status === 'BuildingContext' }">
+            <div class="progress-step" :class="{ done: generationStore.currentTask.status === 'Completed', active: generationStore.currentTask.status === 'Running' }">
               <span class="step-dot"></span>
-              <span>构建 Context</span>
-            </div>
-            <div class="progress-step" :class="{ done: isStageDone('Generating'), active: generationStore.currentTask.status === 'Generating' }">
-              <span class="step-dot"></span>
-              <span>生成内容</span>
-            </div>
-            <div class="progress-step" :class="{ done: isStageDone('Validating'), active: generationStore.currentTask.status === 'Validating' }">
-              <span class="step-dot"></span>
-              <span>验证</span>
+              <span>生成中</span>
             </div>
             <div class="progress-step" :class="{ done: generationStore.currentTask.status === 'Completed', active: generationStore.currentTask.status === 'Completed' }">
               <span class="step-dot"></span>
               <span>完成</span>
             </div>
           </div>
-          <div class="gen-result" v-if="generationStore.currentTask.result">
+          <div class="gen-result" v-if="generationStore.currentTask.output !== undefined && generationStore.currentTask.output !== null">
             <div class="result-label">结果</div>
-            <div class="result-text">{{ generationStore.currentTask.result }}</div>
+            <div class="result-text">{{ JSON.stringify(generationStore.currentTask.output) }}</div>
           </div>
         </div>
         <div class="gen-history">
           <div class="context-subtitle">历史任务</div>
           <div v-for="task in generationStore.tasks" :key="task.id" class="gen-history-item">
-            <span class="history-type">{{ task.type }}</span>
+            <span class="history-type">{{ task.skill_id || task.scene_id || task.id }}</span>
             <span class="history-status" :class="task.status.toLowerCase()">{{ statusLabels[task.status] || task.status }}</span>
           </div>
         </div>
@@ -296,6 +288,7 @@ import SelectionActions from '@/components/editor/SelectionActions.vue'
 import KnowledgePanel from '@/components/knowledge/KnowledgePanel.vue'
 import ConstraintPanel from '@/components/constraint/ConstraintPanel.vue'
 import EventLog from '@/components/event/EventLog.vue'
+import { PenLine, Check, Pin, Ban } from 'lucide-vue-next'
 
 const route = useRoute()
 const storyStore = useStoryStore()
@@ -318,9 +311,7 @@ const contextTabs = [
 
 const statusLabels: Record<string, string> = {
   Pending: '等待中',
-  BuildingContext: '构建上下文',
-  Generating: '生成中',
-  Validating: '验证中',
+  Running: '生成中',
   Completed: '已完成',
   Failed: '失败',
   Cancelled: '已取消',
@@ -395,20 +386,18 @@ async function createAndOpenScene() {
 }
 
 function handleAiAction(payload: any) {
-  generationStore.startGeneration(projectId, payload.action === "rewrite" ? "RewriteSelection" : "GenerateScene")
+  generationStore.startGeneration(projectId, {
+    type: payload.action === "rewrite" ? "RewriteSelection" : "GenerateScene",
+  })
   activeContextTab.value = "generation"
 }
 
 function startGeneration() {
-  generationStore.startGeneration(projectId, 'GenerateScene', editorStore.currentSceneId || undefined)
+  generationStore.startGeneration(projectId, {
+    type: 'GenerateScene',
+    scene_id: editorStore.currentSceneId || undefined,
+  })
   activeContextTab.value = 'generation'
-}
-
-function isStageDone(stage: string): boolean {
-  const stages = ['BuildingContext', 'Generating', 'Validating', 'Completed']
-  const currentIndex = stages.indexOf(generationStore.currentTask?.status || '')
-  const stageIndex = stages.indexOf(stage)
-  return currentIndex > stageIndex
 }
 
 // Resize handlers

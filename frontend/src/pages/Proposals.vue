@@ -5,7 +5,7 @@
     </div>
 
     <div v-if="loading" class="loading-state">
-      <span class="loading-icon">⏳</span>
+      <Loader2 class="loading-icon" :size="40" />
       <span class="loading-text">加载提案中…</span>
     </div>
 
@@ -29,8 +29,8 @@
             <span class="change-desc">{{ change.description }}</span>
             <span class="change-risk" :class="change.risk_level.toLowerCase()">{{ riskLabels[change.risk_level] }}</span>
             <div class="change-actions" v-if="proposal.status === 'Pending'">
-              <button class="accept-btn" :disabled="changeBusy" @click.stop="acceptChange(proposal, change)">✓</button>
-              <button class="reject-btn" :disabled="changeBusy" @click.stop="rejectChange(proposal, change)">✗</button>
+              <button class="accept-btn" :disabled="changeBusy" @click.stop="acceptChange(proposal, change)"><Check :size="14" /></button>
+              <button class="reject-btn" :disabled="changeBusy" @click.stop="rejectChange(proposal, change)"><X :size="14" /></button>
             </div>
             <div class="change-state" v-if="change.state_change">
               <span class="state-key">{{ change.state_change.state_key }}</span>
@@ -78,7 +78,7 @@
     </div>
 
     <div v-else class="empty-state">
-      <div class="empty-icon">📋</div>
+      <div class="empty-icon"><ClipboardList :size="40" /></div>
       <div class="empty-title">暂无 AI 提案</div>
       <div class="empty-desc">
         提案由 AI 在剧情推进中自动生成。可先在「人物 / 地点 / 势力」页丰富世界观，
@@ -95,6 +95,7 @@ import { useProjectStore } from '@/stores/project'
 import { proposalApi } from '@/api/proposal'
 import type { Proposal, ProposalChange, ValidationResult } from '@/types'
 import { validationApi } from '@/api/validation'
+import { Check, X, ClipboardList, Loader2 } from 'lucide-vue-next'
 
 const route = useRoute()
 const projectStore = useProjectStore()

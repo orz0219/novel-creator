@@ -10,7 +10,7 @@
     <div v-if="worldStore.error" class="error-banner">{{ worldStore.error }}</div>
 
     <div v-if="worldStore.loading" class="empty-state">
-      <span class="empty-icon">⏳</span>
+      <Loader2 class="empty-icon" :size="40" />
       <span class="empty-text">加载中…</span>
     </div>
 
@@ -53,22 +53,22 @@
 
       <div class="world-stats">
         <div class="stat-card" @click="$router.push('/project/' + route.params.id + '/world/characters')">
-          <span class="stat-icon">👤</span>
+          <User class="stat-icon" :size="24" />
           <span class="stat-value">{{ worldStore.characters.length }}</span>
           <span class="stat-label">人物</span>
         </div>
         <div class="stat-card" @click="$router.push('/project/' + route.params.id + '/world/locations')">
-          <span class="stat-icon">📍</span>
+          <MapPin class="stat-icon" :size="24" />
           <span class="stat-value">{{ worldStore.locations.length }}</span>
           <span class="stat-label">地点</span>
         </div>
         <div class="stat-card" @click="$router.push('/project/' + route.params.id + '/world/factions')">
-          <span class="stat-icon">⚔️</span>
+          <Swords class="stat-icon" :size="24" />
           <span class="stat-value">{{ worldStore.factions.length }}</span>
           <span class="stat-label">势力</span>
         </div>
         <div class="stat-card" @click="$router.push('/project/' + route.params.id + '/world/timeline')">
-          <span class="stat-icon">📅</span>
+          <Calendar class="stat-icon" :size="24" />
           <span class="stat-value">{{ worldStore.events.length }}</span>
           <span class="stat-label">事件</span>
         </div>
@@ -136,7 +136,7 @@
     </template>
 
     <div v-else class="empty-state">
-      <span class="empty-icon">🌍</span>
+      <Globe class="empty-icon" :size="40" />
       <span class="empty-text">暂无世界数据</span>
     </div>
 
@@ -181,6 +181,7 @@ import { useRoute } from 'vue-router'
 import { useWorldStore } from '@/stores/world'
 import { worldApi } from '@/api/world'
 import { ref, onMounted, computed } from 'vue'
+import { User, MapPin, Swords, Calendar, Globe, Loader2 } from 'lucide-vue-next'
 
 const route = useRoute()
 const worldStore = useWorldStore()

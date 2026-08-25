@@ -6,17 +6,18 @@
       <span class="item-relevance">{{ Math.round(item.relevance * 100) }}%</span>
     </div>
     <div class="item-reasons">
-      <div v-for="reason in item.reasons" :key="reason" class="reason">✓ {{ reason }}</div>
+      <div v-for="reason in item.reasons" :key="reason" class="reason"><Check class="reason-check" :size="12" /> {{ reason }}</div>
     </div>
     <div class="item-actions">
-      <button class="ctx-btn" :class="{ active: item.policy === 'Pinned' }" @click="$emit('pin')" title="钉住">📌</button>
-      <button class="ctx-btn" :class="{ active: item.policy === 'Excluded' }" @click="$emit('exclude')" title="排除">🚫</button>
+      <button class="ctx-btn" :class="{ active: item.policy === 'Pinned' }" @click="$emit('pin')" title="钉住"><Pin :size="14" /></button>
+      <button class="ctx-btn" :class="{ active: item.policy === 'Excluded' }" @click="$emit('exclude')" title="排除"><Ban :size="14" /></button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import type { ContextEntity } from '@/types'
+import { Check, Pin, Ban } from 'lucide-vue-next'
 defineProps<{ item: ContextEntity }>()
 defineEmits(['pin', 'exclude'])
 </script>

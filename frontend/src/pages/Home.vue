@@ -17,136 +17,77 @@
 
     <!-- Recent Projects -->
     <div class="home-section">
-      <h2 class="section-title">最近项目</h2>
+
 
       <div v-if="projectStore.error" class="error-banner">{{ projectStore.error }}</div>
 
-      <div v-if="projectStore.loading" class="loading-state">
-        <span class="loading-icon">⏳</span>
+      <div v-else-if="projectStore.loading" class="loading-state">
+        <Loader2 class="loading-icon" :size="24" />
         <span class="loading-text">加载中...</span>
       </div>
 
-      <div v-else-if="projectStore.projects.length" class="project-grid">
-        <div
-          v-for="project in projectStore.projects"
-          :key="project.id"
-          class="project-card"
-        >
-          <div class="project-card-header">
-            <span class="project-status" :class="(project.status || '').toLowerCase()">{{ statusLabels[project.status] || project.status }}</span>
-          </div>
-          <h3 class="project-name">{{ project.name }}</h3>
-          <p v-if="project.description" class="project-desc">{{ project.description }}</p>
-          <p v-else class="project-desc project-desc--empty">暂无描述</p>
-
-          <div v-if="project.language || project.default_model || project.default_style" class="project-fields">
-            <div v-if="project.language" class="project-field">
-              <span class="project-field-label">语言</span>
-              <span class="project-field-value">{{ project.language }}</span>
-            </div>
-            <div v-if="project.world_setting" class="project-field">
-              <span class="project-field-label">世界设定</span>
-              <span class="project-field-value">{{ project.world_setting }}</span>
-            </div>
-            <div v-if="project.system_setting" class="project-field">
-              <span class="project-field-label">系统设定</span>
-              <span class="project-field-value">{{ project.system_setting }}</span>
-            </div>
-            <div v-if="project.default_model" class="project-field">
-              <span class="project-field-label">模型</span>
-              <span class="project-field-value">{{ project.default_model }}</span>
-            </div>
-            <div v-if="project.default_style" class="project-field">
-              <span class="project-field-label">风格</span>
-              <span class="project-field-value">{{ project.default_style }}</span>
-            </div>
-          </div>
-
-          <div class="project-meta">
-            <span v-if="project.created_at">创建于 {{ formatDate(project.created_at) }}</span>
-            <span v-if="project.updated_at">更新于 {{ formatDate(project.updated_at) }}</span>
-          </div>
-
-          <div class="project-actions" @click.stop>
-            <button class="btn-ghost" @click="openEdit(project)">编辑</button>
-            <button class="btn-danger" @click="handleDelete(project)">删除</button>
-            <button class="btn-link" @click="$router.push('/project/' + project.id)">打开 →</button>
+      <template v-else>
+        <div v-if="projectStore.projects.length" class="list-toolbar">
+          <div class="search-box">
+            <Search class="search-icon" :size="16" />
+            <NeInput v-model="searchQuery" placeholder="搜索项目名称或描述" />
           </div>
         </div>
-      </div>
 
-      <div v-else class="empty-state">
-        <span class="empty-icon">📚</span>
-        <span class="empty-text">暂无项目，点击"创建新项目"开始</span>
-      </div>
-    </div>
+        <div v-if="filteredProjects.length" class="project-table-wrap">
+          <table class="project-table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>描述</th>
+                <th>状态</th>
+                <th>更新时间</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="project in filteredProjects" :key="project.id">
+                <td class="cell-name">
+                  <button class="cell-link" @click="$router.push('/project/' + project.id)">{{ project.name }}</button>
+                </td>
+                <td class="cell-desc" :title="project.description || '—'">{{ project.description || '—' }}</td>
+                <td>
+                  <span class="project-status" :class="(project.status || '').toLowerCase()">{{ statusLabels[project.status] || project.status }}</span>
+                </td>
+                <td class="cell-time">{{ formatDate(project.updated_at) }}</td>
+                <td class="col-actions">
+                  <div class="row-actions" @click.stop>
+                    <button class="btn-ghost" @click="openEdit(project)">编辑</button>
+                    <button class="btn-danger" @click="openDelete(project)">删除</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-    <!-- Architecture Overview -->
-    <div class="home-section">
-      <h2 class="section-title">系统架构</h2>
-      <div class="arch-flow">
-        <div class="arch-step">
-          <span class="arch-icon">🌍</span>
-          <span class="arch-label">World</span>
-          <span class="arch-desc">世界事实</span>
+        <div v-else-if="projectStore.projects.length" class="empty-state">
+          <Search class="empty-icon" :size="40" />
+          <span class="empty-text">未找到匹配的项目</span>
         </div>
-        <span class="arch-arrow">→</span>
-        <div class="arch-step">
-          <span class="arch-icon">📖</span>
-          <span class="arch-label">Story</span>
-          <span class="arch-desc">叙事结构</span>
+
+        <div v-else class="empty-state">
+          <BookOpen class="empty-icon" :size="40" />
+          <span class="empty-text">暂无项目，点击"创建新项目"开始</span>
         </div>
-        <span class="arch-arrow">→</span>
-        <div class="arch-step">
-          <span class="arch-icon">🧠</span>
-          <span class="arch-label">Context</span>
-          <span class="arch-desc">AI 上下文</span>
-        </div>
-        <span class="arch-arrow">→</span>
-        <div class="arch-step">
-          <span class="arch-icon">🤖</span>
-          <span class="arch-label">Generation</span>
-          <span class="arch-desc">AI 生成</span>
-        </div>
-        <span class="arch-arrow">→</span>
-        <div class="arch-step">
-          <span class="arch-icon">📋</span>
-          <span class="arch-label">Proposal</span>
-          <span class="arch-desc">AI 提案</span>
-        </div>
-        <span class="arch-arrow">→</span>
-        <div class="arch-step">
-          <span class="arch-icon">✅</span>
-          <span class="arch-label">Validation</span>
-          <span class="arch-desc">系统审查</span>
-        </div>
-        <span class="arch-arrow">→</span>
-        <div class="arch-step">
-          <span class="arch-icon">📝</span>
-          <span class="arch-label">Commit</span>
-          <span class="arch-desc">提交变更</span>
-        </div>
-      </div>
+      </template>
     </div>
 
     <!-- Create Project Dialog -->
     <NeDialog v-model="showCreateDialog" title="创建新项目" size="md">
       <form @submit.prevent="handleCreate" class="entity-form">
         <div class="form-group">
-          <label class="form-label">项目名称 *</label>
-          <input v-model="newProject.name" class="form-input" placeholder="请输入项目名称" required />
+          <label class="form-label">项目名称 *（最多 10 字）</label>
+          <input v-model="newProject.name" class="form-input" maxlength="10" placeholder="请输入项目名称" required />
         </div>
         <div class="form-group">
-          <label class="form-label">项目描述</label>
-          <textarea v-model="newProject.description" class="form-textarea" placeholder="请输入项目描述" rows="3"></textarea>
-        </div>
-        <div class="form-group">
-          <label class="form-label">语言</label>
-          <input v-model="newProject.language" class="form-input" placeholder="如 zh-CN" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">世界设定</label>
-          <textarea v-model="newProject.world_setting" class="form-textarea" placeholder="请输入世界设定" rows="2"></textarea>
+          <label class="form-label">项目描述（最多 500 字）</label>
+          <textarea v-model="newProject.description" class="form-textarea" maxlength="500" placeholder="请输入项目描述" rows="3"></textarea>
         </div>
         <div v-if="createError" class="form-error">{{ createError }}</div>
       </form>
@@ -162,26 +103,12 @@
     <NeDialog v-model="showEditDialog" title="编辑项目" size="md">
       <form @submit.prevent="handleEdit" class="entity-form">
         <div class="form-group">
-          <label class="form-label">项目名称 *</label>
-          <input v-model="editForm.name" class="form-input" placeholder="请输入项目名称" required />
+          <label class="form-label">项目名称 *（最多 10 字）</label>
+          <input v-model="editForm.name" class="form-input" maxlength="10" placeholder="请输入项目名称" required />
         </div>
         <div class="form-group">
-          <label class="form-label">项目描述</label>
-          <textarea v-model="editForm.description" class="form-textarea" placeholder="请输入项目描述" rows="3"></textarea>
-        </div>
-        <div class="form-group">
-          <label class="form-label">状态</label>
-          <select v-model="editForm.status" class="form-input">
-            <option v-for="(label, value) in statusLabels" :key="value" :value="value">{{ label }}</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">默认模型</label>
-          <input v-model="editForm.default_model" class="form-input" placeholder="如 gpt-4" />
-        </div>
-        <div class="form-group">
-          <label class="form-label">默认风格</label>
-          <input v-model="editForm.default_style" class="form-input" placeholder="如 严肃" />
+          <label class="form-label">项目描述（最多 500 字）</label>
+          <textarea v-model="editForm.description" class="form-textarea" maxlength="500" placeholder="请输入项目描述" rows="3"></textarea>
         </div>
         <div v-if="editError" class="form-error">{{ editError }}</div>
       </form>
@@ -192,18 +119,44 @@
         </button>
       </template>
     </NeDialog>
+
+    <!-- Delete Confirm Dialog -->
+    <NeDialog v-model="showDeleteDialog" title="删除项目" size="sm">
+      <p class="confirm-text">
+        确认删除项目「<strong>{{ deleteTarget?.name }}</strong>」？此操作不可撤销。
+      </p>
+      <template #footer>
+        <button class="btn-secondary" @click="showDeleteDialog = false">取消</button>
+        <button class="btn-danger-solid" :disabled="deleting" @click="confirmDelete">
+          {{ deleting ? '删除中...' : '删除' }}
+        </button>
+      </template>
+    </NeDialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
-import type { Project, ProjectStatus } from '@/types/project'
+import { useUiStore } from '@/stores/ui'
+import type { Project } from '@/types/project'
 import NeDialog from '@/components/ui/NeDialog.vue'
+import NeInput from '@/components/ui/NeInput.vue'
+import { BookOpen, Loader2, Search } from 'lucide-vue-next'
 
 const router = useRouter()
 const projectStore = useProjectStore()
+const uiStore = useUiStore()
+
+const searchQuery = ref('')
+const filteredProjects = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return projectStore.projects
+  return projectStore.projects.filter(
+    (p) => (p.name?.toLowerCase().includes(q)) || (p.description?.toLowerCase().includes(q)),
+  )
+})
 
 const statusLabels: Record<string, string> = {
   Concept: '概念',
@@ -217,30 +170,15 @@ const statusLabels: Record<string, string> = {
 const showCreateDialog = ref(false)
 const creating = ref(false)
 const createError = ref('')
-const newProject = ref({ name: '', description: '', language: '', world_setting: '' })
+const newProject = ref({ name: '', description: '' })
 
 const showEditDialog = ref(false)
 const saving = ref(false)
 const editError = ref('')
 const editingProject = ref<Project | null>(null)
-const editForm = ref<{
-  name: string
-  description: string
-  status: ProjectStatus
-  language: string
-  world_setting: string
-  system_setting: string
-  default_model: string
-  default_style: string
-}>({
+const editForm = ref<{ name: string; description: string }>({
   name: '',
   description: '',
-  status: 'Concept',
-  language: '',
-  world_setting: '',
-  system_setting: '',
-  default_model: '',
-  default_style: '',
 })
 
 onMounted(async () => {
@@ -257,7 +195,7 @@ function formatDate(dateStr: string) {
 }
 
 function openCreate() {
-  newProject.value = { name: '', description: '', language: '', world_setting: '' }
+  newProject.value = { name: '', description: '' }
   createError.value = ''
   showCreateDialog.value = true
 }
@@ -273,11 +211,9 @@ async function handleCreate() {
     const project = await projectStore.createProject({
       name: newProject.value.name.trim(),
       description: newProject.value.description.trim() || undefined,
-      language: newProject.value.language.trim() || undefined,
-      world_setting: newProject.value.world_setting.trim() || undefined,
     })
     showCreateDialog.value = false
-    newProject.value = { name: '', description: '', language: '', world_setting: '' }
+    newProject.value = { name: '', description: '' }
     router.push('/project/' + project.id)
   } catch (e: any) {
     createError.value = e.message || '创建失败'
@@ -291,12 +227,6 @@ function openEdit(project: Project) {
   editForm.value = {
     name: project.name,
     description: project.description ?? '',
-    status: project.status,
-    language: project.language ?? '',
-    world_setting: project.world_setting ?? '',
-    system_setting: project.system_setting ?? '',
-    default_model: project.default_model ?? '',
-    default_style: project.default_style ?? '',
   }
   editError.value = ''
   showEditDialog.value = true
@@ -314,9 +244,6 @@ async function handleEdit() {
     await projectStore.updateProject(editingProject.value.id, {
       name: editForm.value.name.trim(),
       description: editForm.value.description.trim() || undefined,
-      status: editForm.value.status,
-      default_model: editForm.value.default_model.trim() || undefined,
-      default_style: editForm.value.default_style.trim() || undefined,
     })
     showEditDialog.value = false
     editingProject.value = null
@@ -327,12 +254,30 @@ async function handleEdit() {
   }
 }
 
-async function handleDelete(project: Project) {
-  if (!confirm(`确认删除「${project.name}」？此操作不可撤销。`)) return
+const showDeleteDialog = ref(false)
+const deleting = ref(false)
+const deleteTarget = ref<Project | null>(null)
+
+function openDelete(project: Project) {
+  deleteTarget.value = project
+  showDeleteDialog.value = true
+}
+
+async function confirmDelete() {
+  if (!deleteTarget.value) return
+  deleting.value = true
+  const name = deleteTarget.value.name
   try {
-    await projectStore.deleteProject(project.id)
+    await projectStore.deleteProject(deleteTarget.value.id)
+    uiStore.addToast({ type: 'success', title: '已删除项目', message: name })
+    showDeleteDialog.value = false
+    deleteTarget.value = null
   } catch (e: any) {
-    projectStore.error = e.message || '删除失败'
+    uiStore.addToast({ type: 'error', title: '删除失败', message: e.message || '' })
+    showDeleteDialog.value = false
+    deleteTarget.value = null
+  } finally {
+    deleting.value = false
   }
 }
 </script>
@@ -412,67 +357,85 @@ async function handleDelete(project: Project) {
   font-weight: 600;
   margin-bottom: var(--space-6);
 }
-.project-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: var(--space-4);
+.list-toolbar {
+  display: flex;
+  justify-content: flex-start;
+  max-width: 880px;
+  margin: 0 auto var(--space-4);
 }
-.project-card {
-  padding: var(--space-5);
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 320px;
+  max-width: 100%;
+}
+.search-icon { flex: 0 0 auto; color: var(--text-tertiary); }
+.search-box :deep(.ne-input-wrapper) { flex: 1; min-width: 0; }
+.search-box :deep(.ne-input) { width: 100%; }
+
+/* 项目表格 */
+.project-table-wrap {
+  max-width: 880px;
+  margin: 0 auto;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
+  overflow: hidden;
   background: var(--bg-panel);
-  transition: all var(--transition-fast);
 }
-.project-card:hover { border-color: var(--border-emphasis); transform: translateY(-2px); }
-.project-card-header { margin-bottom: var(--space-3); }
+.project-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.project-table th {
+  text-align: left;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  background: var(--bg-panel-secondary);
+  border-bottom: 1px solid var(--border-default);
+  white-space: nowrap;
+}
+.project-table td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-muted);
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
+.project-table tbody tr:last-child td { border-bottom: none; }
+.project-table tbody tr:hover { background: var(--bg-hover); }
+.cell-name { font-weight: 600; color: var(--text-primary); }
+.cell-link {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; font-weight: 600; color: var(--color-primary-text);
+}
+.cell-link:hover { text-decoration: underline; }
+.cell-desc {
+  max-width: 360px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cell-time { white-space: nowrap; color: var(--text-tertiary); }
+.col-actions { text-align: right; white-space: nowrap; }
+.row-actions { display: inline-flex; align-items: center; gap: var(--space-2); }
 .project-status {
+  display: inline-block;
   font-size: var(--text-xs);
   padding: 2px 8px;
   border-radius: 10px;
+  background: var(--bg-panel-secondary);
+  color: var(--text-tertiary);
 }
 .project-status.concept { background: var(--bg-panel-secondary); color: var(--text-tertiary); }
 .project-status.planning { background: var(--color-info-subtle); color: var(--color-info); }
 .project-status.writing { background: var(--color-success-subtle); color: var(--color-success); }
-.project-name {
-  font-size: var(--text-lg);
-  font-weight: 600;
-  margin-bottom: var(--space-2);
-}
-.project-desc {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  margin-bottom: var(--space-4);
-  line-height: 1.6;
-}
-.project-desc--empty { color: var(--text-tertiary); font-style: italic; }
-.project-fields {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin-bottom: var(--space-4);
-  padding: var(--space-3);
-  background: var(--bg-panel-secondary);
-  border-radius: var(--radius-sm);
-}
-.project-field { display: flex; gap: var(--space-3); font-size: var(--text-sm); line-height: 1.5; }
-.project-field-label { flex: 0 0 64px; color: var(--text-tertiary); }
-.project-field-value { flex: 1; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
-.project-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
-  margin-bottom: var(--space-4);
-}
-.project-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  border-top: 1px solid var(--border-default);
-  padding-top: var(--space-4);
-}
+
 .btn-ghost {
   padding: var(--space-2) var(--space-4);
   background: transparent;
@@ -495,16 +458,26 @@ async function handleDelete(project: Project) {
   transition: all var(--transition-fast);
 }
 .btn-danger:hover { background: var(--color-error-subtle); }
-.btn-link {
-  margin-left: auto;
-  padding: var(--space-2) var(--space-2);
-  background: transparent;
+.btn-danger-solid {
+  padding: var(--space-3) var(--space-6);
+  background: var(--color-error);
   border: none;
-  color: var(--color-primary-text);
-  font-size: var(--text-sm);
+  color: white;
+  border-radius: var(--radius-md);
+  font-size: var(--text-md);
+  font-weight: 500;
   cursor: pointer;
+  transition: filter var(--transition-fast);
 }
-.btn-link:hover { text-decoration: underline; }
+.btn-danger-solid:hover { filter: brightness(0.92); }
+.btn-danger-solid:disabled { opacity: 0.5; cursor: not-allowed; }
+.confirm-text {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin: 0;
+}
+.confirm-text strong { color: var(--text-primary); font-weight: 600; }
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -532,29 +505,6 @@ async function handleDelete(project: Project) {
   margin-bottom: var(--space-4);
   font-size: var(--text-sm);
 }
-.arch-flow {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  padding: var(--space-6);
-  background: var(--bg-panel);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-}
-.arch-step {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-3);
-}
-.arch-icon { font-size: 24px; }
-.arch-label { font-size: var(--text-sm); font-weight: 600; }
-.arch-desc { font-size: var(--text-xs); color: var(--text-tertiary); }
-.arch-arrow { color: var(--text-tertiary); font-size: var(--text-lg); }
-
 /* Form styles */
 .entity-form { display: flex; flex-direction: column; gap: var(--space-4); }
 .form-group { display: flex; flex-direction: column; gap: var(--space-1); }

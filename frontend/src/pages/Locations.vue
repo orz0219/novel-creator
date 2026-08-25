@@ -16,7 +16,7 @@
       />
     </div>
     <div v-else class="empty-state">
-      <span class="empty-icon">📍</span>
+      <MapPin class="empty-icon" :size="40" />
       <span class="empty-text">暂无地点，点击上方按钮创建</span>
     </div>
 
@@ -67,6 +67,7 @@ import EntityCard from '@/components/ui/EntityCard.vue'
 import EntityDialog from '@/components/ui/EntityDialog.vue'
 import { locationProfileApi } from '@/api/character'
 import type { Entity, LocationProfile } from '@/types'
+import { MapPin } from 'lucide-vue-next'
 
 const worldStore = useWorldStore()
 

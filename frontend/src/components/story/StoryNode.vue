@@ -9,13 +9,14 @@
       <span class="node-status" :class="node.status">{{ statusLabels[node.status] || node.status }}</span>
     </div>
     <div class="node-actions">
-      <button v-if="node.node_type === 'Scene'" class="action-btn" @click.stop="$emit('write', node)">✍️</button>
+      <button v-if="node.node_type === 'Scene'" class="action-btn" @click.stop="$emit('write', node)"><PenLine :size="14" /></button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import type { NarrativeNode } from '@/types'
+import { PenLine } from 'lucide-vue-next'
 defineProps<{
   node: NarrativeNode & { children?: NarrativeNode[] }
   expanded?: boolean

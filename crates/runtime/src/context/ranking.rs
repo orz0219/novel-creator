@@ -22,16 +22,6 @@ impl ContextScore {
     pub fn total_score(&self) -> f64 {
         self.relevance * self.importance * self.visibility * self.recency * self.explicitness
     }
-
-    pub fn default_score() -> Self {
-        Self {
-            relevance: 0.5,
-            importance: 0.5,
-            recency: 0.5,
-            explicitness: 0.5,
-            visibility: 1.0,
-        }
-    }
 }
 
 /// 按策略过滤 + 排序，产出 FilteredContext。
@@ -156,13 +146,6 @@ pub fn filter(result: RetrievalResult, policy: &ContextPolicy) -> Result<Filtere
             },
         ));
     }
-
-    // 按评分排序
-    layers.sort_by(|a, b| {
-        b.2.total_score()
-            .partial_cmp(&a.2.total_score())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
 
     Ok(FilteredContext { layers })
 }

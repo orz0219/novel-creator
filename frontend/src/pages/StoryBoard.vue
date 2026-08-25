@@ -8,7 +8,7 @@
       <span class="state-text">加载中…</span>
     </div>
     <div v-else-if="!storyStore.nodes.length" class="state-block">
-      <span class="state-icon">📋</span>
+      <ClipboardList class="state-icon" :size="18" />
       <span class="state-text">暂无节点</span>
     </div>
 
@@ -44,6 +44,7 @@ import { useRoute } from 'vue-router'
 import { useStoryStore } from '@/stores/story'
 import { computed, onMounted } from 'vue'
 import type { NarrativeNode, NarrativeNodeStatus } from '@/types'
+import { ClipboardList } from 'lucide-vue-next'
 
 const route = useRoute()
 const storyStore = useStoryStore()

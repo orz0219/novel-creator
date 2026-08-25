@@ -7,7 +7,7 @@
         :style="actionStyle"
       >
         <button v-for="action in actions" :key="action.id" class="action-btn" @click="executeAction(action)">
-          <span class="action-icon">{{ action.icon }}</span>
+          <component :is="action.icon" class="action-icon" :size="14" />
           <span class="action-label">{{ action.label }}</span>
         </button>
       </div>
@@ -19,18 +19,19 @@
 import { computed } from 'vue'
 import { useSelection } from '@/composables/useSelection'
 import { useGeneration } from '@/composables/useGeneration'
+import { PenLine, Ruler, Play, Drama, Search } from 'lucide-vue-next'
 
 const emit = defineEmits(['action'])
 const { selectedText, selectionRect, hasSelection } = useSelection()
 const { startGeneration } = useGeneration()
 
 const actions = [
-  { id: 'rewrite', icon: '✏️', label: '重写', type: 'RewriteSelection' },
-  { id: 'expand', icon: '📝', label: '扩展', type: 'ExpandParagraph' },
-  { id: 'shorten', icon: '📐', label: '精简', type: 'RewriteSelection' },
-  { id: 'continue', icon: '▶️', label: '续写', type: 'GenerateScene' },
-  { id: 'tone', icon: '🎭', label: '改风格', type: 'RewriteSelection' },
-  { id: 'analyze', icon: '🔍', label: '分析', type: 'AnalyzeCharacter' },
+  { id: 'rewrite', icon: PenLine, label: '重写', type: 'RewriteSelection' },
+  { id: 'expand', icon: PenLine, label: '扩展', type: 'ExpandParagraph' },
+  { id: 'shorten', icon: Ruler, label: '精简', type: 'RewriteSelection' },
+  { id: 'continue', icon: Play, label: '续写', type: 'GenerateScene' },
+  { id: 'tone', icon: Drama, label: '改风格', type: 'RewriteSelection' },
+  { id: 'analyze', icon: Search, label: '分析', type: 'AnalyzeCharacter' },
 ]
 
 const actionStyle = computed(() => {
@@ -43,7 +44,8 @@ const actionStyle = computed(() => {
 })
 
 function executeAction(action: any) {
-  startGeneration(action.type)
+  // 后端 GenerationTask.input 为 Value；原前端 type 无对应字段，封装进 input 保留语义。
+  startGeneration({ type: action.type, text: selectedText.value })
   emit('action', { action: action.id, text: selectedText.value })
 }
 </script>

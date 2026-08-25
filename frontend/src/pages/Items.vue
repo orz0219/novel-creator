@@ -15,7 +15,7 @@
       />
     </div>
     <div v-else class="empty-state">
-      <span class="empty-icon">📦</span>
+      <Package class="empty-icon" :size="40" />
       <span class="empty-text">暂无物品，点击上方按钮创建</span>
     </div>
 
@@ -58,6 +58,7 @@ import { entityApi } from '@/api/world'
 import EntityCard from '@/components/ui/EntityCard.vue'
 import NeDialog from '@/components/ui/NeDialog.vue'
 import type { Entity } from '@/types'
+import { Package } from 'lucide-vue-next'
 
 const route = useRoute()
 const worldStore = useWorldStore()

@@ -6,7 +6,7 @@
     </div>
     <div class="activity-list">
       <div v-for="activity in activities" :key="activity.id" class="activity-item" :class="activity.status">
-        <span class="activity-icon">{{ statusIcons[activity.status] }}</span>
+        <span class="activity-icon"><component v-if="statusIcons[activity.status] !== '●'" :is="statusIcons[activity.status]" :size="16" /><template v-else>●</template></span>
         <div class="activity-body">
           <span class="activity-text">{{ activity.text }}</span>
           <span class="activity-time">{{ activity.time }}</span>
@@ -20,7 +20,8 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-const statusIcons: Record<string, string> = { completed: '✓', running: '●', failed: '✗', warning: '⚠' }
+import { Check, X, AlertTriangle } from 'lucide-vue-next'
+const statusIcons: Record<string, any> = { completed: Check, running: '●', failed: X, warning: AlertTriangle }
 const activities = ref([
   { id: '1', text: '场景生成完成', status: 'completed', time: '2分钟前' },
   { id: '2', text: '验证完成 - 1 个警告', status: 'warning', time: '1分钟前' },

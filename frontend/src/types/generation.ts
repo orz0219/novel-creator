@@ -1,37 +1,29 @@
 // Generation types
 
-export type GenerationTaskType =
-  | 'GenerateScene'
-  | 'RewriteSelection'
-  | 'ExpandParagraph'
-  | 'GenerateLocation'
-  | 'GenerateCharacter'
-  | 'AnalyzeCharacter'
-  | 'CheckConsistency'
-  | 'GenerateArc'
-  | 'Custom'
-
 export type GenerationTaskStatus =
   | 'Pending'
-  | 'BuildingContext'
-  | 'Generating'
-  | 'Validating'
+  | 'Running'
   | 'Completed'
   | 'Failed'
   | 'Cancelled'
 
 export interface GenerationTask {
   id: string
-  type: GenerationTaskType
-  target_id?: string
-  model?: string
-  parameters: Record<string, unknown>
+  project_id: string
+  skill_id?: string
+  scene_id?: string
+  input: Record<string, unknown> | unknown
+  output?: unknown
   status: GenerationTaskStatus
-  context_tokens?: number
-  result?: string
+  token_usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    total_tokens?: number
+    [k: string]: unknown
+  }
   error?: string
   created_at: string
-  updated_at: string
+  completed_at?: string
 }
 
 export interface GenerationProgressEvent {

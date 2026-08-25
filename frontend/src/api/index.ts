@@ -1,4 +1,4 @@
-export { api, createSSE } from './client'
+export { api } from './client'
 export { projectApi } from './project'
 export { worldApi, entityApi, relationApi, eventApi, factApi } from './world'
 export { characterApi } from './character'

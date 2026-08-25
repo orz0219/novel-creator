@@ -30,9 +30,9 @@ export const useGenerationStore = defineStore("generation", () => {
   }
 
   // Start a real generation and poll its status until it reaches a terminal state.
-  async function startGeneration(projectId: string, type: string, targetId?: string) {
+  async function startGeneration(projectId: string, input?: unknown) {
     stopPolling()
-    const task = await generationApi.start(projectId, { type, target_id: targetId })
+    const task = await generationApi.start(projectId, { input })
     currentTask.value = task
     pollTimer = setInterval(async () => {
       try {

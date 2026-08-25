@@ -39,7 +39,12 @@ async fn entity_tools_create_revise_retire_logical_delete() -> Result<()> {
     let pool = test_pool().await?;
 
     // 项目 + 主世界
-    let project_service = ProjectService::new(Arc::new(DbProjectRepositoryPort::new(pool.clone())));
+    let project_service = ProjectService::new(
+        Arc::new(DbProjectRepositoryPort::new(pool.clone())),
+        Arc::new(WorldService::new(Arc::new(DbWorldRepositoryPort::new(
+            pool.clone(),
+        )))),
+    );
     let project = project_service
         .create_project("tool-test-project", None, None)
         .await?;

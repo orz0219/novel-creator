@@ -4,12 +4,10 @@ import { ref } from 'vue'
 import * as agentApi from '@/api/agent'
 
 export interface ChatMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'tool'
   content: string
   streaming?: boolean
 }
-
-const CURRENT_KEY = 'agent:currentSessionId'
 
 export const useAgentStore = defineStore('agent', () => {
   const sessionId = ref<string | null>(null)
@@ -20,17 +18,22 @@ export const useAgentStore = defineStore('agent', () => {
   const thinking = ref(false)
   const error = ref<string | null>(null)
 
-  function readPersistedSession(): string | null {
+  // 当前会话按项目分别持久化（对话-项目绑定）
+  function keyFor(projectId: string): string {
+    return `agent:currentSessionId:${projectId}`
+  }
+
+  function readPersistedSession(projectId: string): string | null {
     try {
-      return localStorage.getItem(CURRENT_KEY)
+      return localStorage.getItem(keyFor(projectId))
     } catch {
       return null
     }
   }
 
-  function persistCurrent(id: string) {
+  function persistCurrent(id: string, projectId: string) {
     try {
-      localStorage.setItem(CURRENT_KEY, id)
+      localStorage.setItem(keyFor(projectId), id)
     } catch {
       // localStorage 不可用时忽略（仅影响刷新恢复）
     }
@@ -46,44 +49,45 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  async function loadSessions() {
+  async function loadSessions(projectId: string) {
     try {
-      sessions.value = await agentApi.listSessions()
+      sessions.value = await agentApi.listSessions(projectId)
     } catch {
       sessions.value = []
     }
   }
 
-  async function newSession(projectId?: string) {
+  async function newSession(projectId: string) {
     const { session_id } = await agentApi.createSession(projectId)
     sessionId.value = session_id
     messages.value = []
     error.value = null
     status.value = 'idle'
-    persistCurrent(session_id)
-    await loadSessions()
+    persistCurrent(session_id, projectId)
+    await loadSessions(projectId)
   }
 
-  /** 从服务端恢复某个会话（刷新/切换页面后回填消息）。 */
-  async function restoreSession(id: string) {
+  /** 从服务端恢复某个会话（刷新/切换项目后回填消息）。 */
+  async function restoreSession(id: string): Promise<agentApi.AgentSession> {
     const s = await agentApi.getSession(id)
     sessionId.value = s.id
     messages.value = s.messages.map((m) => ({
-      role: (m.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
+      role: m.role as ChatMessage['role'],
       content: m.content,
     }))
     error.value = null
     status.value = 'idle'
-    persistCurrent(s.id)
+    if (s.project_id) persistCurrent(s.id, s.project_id)
+    return s
   }
 
-  /** 切换到某个已有会话。 */
+  /** 切换到某个已有会话（按所属项目刷新列表）。 */
   async function selectSession(id: string) {
-    await restoreSession(id)
-    await loadSessions()
+    const s = await restoreSession(id)
+    await loadSessions(s.project_id)
   }
 
-  async function deleteSession(id: string) {
+  async function deleteSession(id: string, projectId: string) {
     try {
       await agentApi.deleteSession(id)
     } catch {
@@ -91,9 +95,9 @@ export const useAgentStore = defineStore('agent', () => {
     }
     sessions.value = sessions.value.filter((s) => s.id !== id)
     if (sessionId.value === id) {
-      await newSession()
+      await newSession(projectId)
     } else {
-      await loadSessions()
+      await loadSessions(projectId)
     }
   }
 
@@ -107,23 +111,42 @@ export const useAgentStore = defineStore('agent', () => {
     sessions.value = sessions.value.map((s) => (s.id === id ? { ...s, title: t } : s))
   }
 
-  async function ensureSession(projectId?: string) {
-    if (!sessionId.value) await newSession(projectId)
+  async function ensureSession(projectId: string) {
+    // 当前会话不属于本项目时也重新创建，避免串项目
+    if (!sessionId.value || !sessions.value.some((s) => s.id === sessionId.value)) {
+      await newSession(projectId)
+    }
     return sessionId.value as string
   }
 
-  async function sendMessage(text: string, projectId?: string) {
+  async function sendMessage(text: string, projectId: string) {
     const sid = await ensureSession(projectId)
     const content = text.trim()
     if (!content) return
 
     messages.value.push({ role: 'user', content })
-    messages.value.push({ role: 'assistant', content: '', streaming: true })
-    // 通过数组的响应式代理（按索引）修改，避免直接 mutate 原始对象导致不刷新
-    const i = messages.value.length - 1
     status.value = 'streaming'
     thinking.value = true
     error.value = null
+    // 当前正在流式填充的助手文本气泡索引（-1 表示尚无）
+    let textIdx = -1
+
+    // 取得/新建一个流式助手文本气泡
+    const ensureTextBubble = (): number => {
+      const n = messages.value.length
+      if (n > 0 && messages.value[n - 1].role === 'assistant' && messages.value[n - 1].streaming) {
+        return n - 1
+      }
+      messages.value.push({ role: 'assistant', content: '', streaming: true })
+      return messages.value.length - 1
+    }
+    // 收尾当前文本气泡（关闭 streaming），并复位索引
+    const finalizeText = () => {
+      if (textIdx >= 0 && messages.value[textIdx]) {
+        messages.value[textIdx].streaming = false
+      }
+      textIdx = -1
+    }
 
     try {
       await agentApi.streamChat(sid, content, {
@@ -132,43 +155,69 @@ export const useAgentStore = defineStore('agent', () => {
         },
         onToken: (t) => {
           thinking.value = false
-          messages.value[i].content += t
-        },
-        onDone: () => {
-          thinking.value = false
-          messages.value[i].streaming = false
-          status.value = 'idle'
+          textIdx = ensureTextBubble()
+          messages.value[textIdx].content += t
         },
         onQuestion: (data) => {
           thinking.value = false
-          // 把当前（空的）助手气泡替换为问题卡片（与后端持久化格式一致）
+          finalizeText()
+          // 与后端持久化格式一致：选择题存为 assistant 的 <<ASK_QUESTION>> 标记
           const payload = JSON.stringify({ question: data.question, options: data.options })
-          messages.value[i].content = `<<ASK_QUESTION>>${payload}<<END>>`
-          messages.value[i].streaming = false
+          textIdx = ensureTextBubble()
+          messages.value[textIdx].content = `<<ASK_QUESTION>>${payload}<<END>>`
+          messages.value[textIdx].streaming = false
+          textIdx = -1
+          status.value = 'idle'
+        },
+        onTool: (data) => {
+          thinking.value = false
+          // 工具调用前先收尾当前文本气泡，使后续文本另起一条
+          finalizeText()
+          const payload = JSON.stringify({
+            name: data.name,
+            input: data.input,
+            ok: data.ok,
+            output: data.output,
+          })
+          messages.value.push({
+            role: 'tool',
+            content: `<<TOOL_RESULT>>${payload}<<END>>`,
+            streaming: false,
+          })
+        },
+        onDone: () => {
+          thinking.value = false
+          finalizeText()
           status.value = 'idle'
         },
         onError: (e) => {
           thinking.value = false
-          messages.value[i].streaming = false
-          messages.value[i].content += `\n\n[出错] ${e}`
+          finalizeText()
+          textIdx = ensureTextBubble()
+          messages.value[textIdx].content += `\n\n[出错] ${e}`
+          messages.value[textIdx].streaming = false
+          textIdx = -1
           status.value = 'error'
           error.value = e
         },
       })
     } catch (e) {
       thinking.value = false
-      messages.value[i].streaming = false
+      finalizeText()
       const msg = e instanceof Error ? e.message : String(e)
-      messages.value[i].content += `\n\n[出错] ${msg}`
+      textIdx = ensureTextBubble()
+      messages.value[textIdx].content += `\n\n[出错] ${msg}`
+      messages.value[textIdx].streaming = false
+      textIdx = -1
       status.value = 'error'
       error.value = msg
     }
     // 刷新历史列表（更新预览 / 时间 / 顺序）
-    void loadSessions()
+    void loadSessions(projectId)
   }
 
-  async function executeTool(name: string, input: unknown) {
-    return agentApi.executeTool(name, input)
+  async function executeTool(name: string, input: unknown, projectId: string) {
+    return agentApi.executeTool(name, input, projectId)
   }
 
   return {

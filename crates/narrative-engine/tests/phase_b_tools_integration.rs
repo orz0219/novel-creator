@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use agent::{AgentTool, ToolRegistry};
 use anyhow::Result;
+use application::project_service::ProjectService;
+use application::world_service::WorldService;
+use db::application_ports::{DbProjectRepositoryPort, DbWorldRepositoryPort};
 use narrative_engine::agent_tools::register_all_domain_tools;
 use serde_json::json;
 use sqlx::PgPool;
@@ -32,20 +35,17 @@ async fn phase_b_tools_crud_logical_delete() -> Result<()> {
     let registry = Arc::new(ToolRegistry::new());
     register_all_domain_tools(&registry, &pool);
 
-    // 1) 项目
-    let proj = tool(&registry, "create_project")
-        .execute(json!({ "name": "pb-test-project" }))
-        .await?;
-    let project_id = Uuid::parse_str(proj["data"]["id"].as_str().expect("proj id")).unwrap();
-    let list_p = tool(&registry, "list_projects").execute(json!({})).await?;
-    assert!(
-        list_p["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["id"] == proj["data"]["id"]),
-        "list_projects 应含新建项目"
+    // 1) 项目（经 ProjectService 创建并自动 ensure 主世界；create_project / list_projects 工具已移除）
+    let project_service = ProjectService::new(
+        Arc::new(DbProjectRepositoryPort::new(pool.clone())),
+        Arc::new(WorldService::new(Arc::new(DbWorldRepositoryPort::new(
+            pool.clone(),
+        )))),
     );
+    let proj = project_service
+        .create_project("pb-test-project", None, None)
+        .await?;
+    let project_id = Uuid::parse_str(proj["id"].as_str().expect("proj id")).unwrap();
 
     // 2) 叙事节点：create → revise → remove（逻辑删除）
     let node = tool(&registry, "create_node")

@@ -41,11 +41,14 @@ pub async fn get_session(
     Ok(Json(session))
 }
 
-/// `GET /api/agent/sessions` —— 列出全部会话（历史侧栏）。
+/// `GET /api/agent/sessions?project_id=xxx` —— 列出某项目下的会话（按项目隔离）。
 pub async fn list_sessions(
     State(state): State<AppState>,
+    Query(params): Query<ListSessionsQuery>,
 ) -> Result<Json<Vec<agent::AgentSession>>, AppError> {
-    let sessions = state.agent.list_sessions().await?;
+    let project_id = Uuid::parse_str(&params.project_id)
+        .map_err(|_| anyhow::anyhow!("Invalid project ID"))?;
+    let sessions = state.agent.list_sessions_by_project(project_id).await?;
     Ok(Json(sessions))
 }
 
@@ -73,6 +76,11 @@ pub struct RenameSessionRequest {
     title: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListSessionsQuery {
+    project_id: String,
+}
+
 /// `GET /api/agent/tools` —— 列出当前可用工具。
 pub async fn list_tools(
     State(state): State<AppState>,
@@ -87,7 +95,9 @@ pub async fn execute_tool(
     State(state): State<AppState>,
     Json(req): Json<ExecuteToolRequest>,
 ) -> Result<Json<ExecuteToolResponse>, AppError> {
-    let result = state.agent.execute_tool(&req.name, req.input).await?;
+    let result = state.agent
+        .execute_tool(req.project_id, &req.name, req.input)
+        .await?;
     Ok(Json(ExecuteToolResponse {
         name: req.name,
         result,
@@ -126,6 +136,16 @@ pub async fn chat(
                 Ok(agent::AgentStreamEvent::Question { question, options }) => {
                     let payload = serde_json::json!({ "question": question, "options": options }).to_string();
                     yield Ok(Event::default().event("question").data(payload));
+                }
+                Ok(agent::AgentStreamEvent::Tool { name, input, ok, output }) => {
+                    let payload = serde_json::json!({
+                        "name": name,
+                        "input": input,
+                        "ok": ok,
+                        "output": output,
+                    })
+                    .to_string();
+                    yield Ok(Event::default().event("tool").data(payload));
                 }
                 Ok(agent::AgentStreamEvent::Done) => {
                     yield Ok(Event::default().event("done").data(""));

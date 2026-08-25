@@ -19,11 +19,11 @@ impl MemoryRepo {
 
 #[async_trait]
 impl AgentMemory for MemoryRepo {
-    async fn save(&self, session_id: Uuid, memory_type: &str, content: &str) -> Result<()> {
+    async fn save(&self, project_id: Uuid, memory_type: &str, content: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO agent_memory (session_id, memory_type, content) VALUES ($1, $2, $3)",
+            "INSERT INTO agent_memory (project_id, memory_type, content) VALUES ($1, $2, $3)",
         )
-        .bind(session_id)
+        .bind(project_id)
         .bind(memory_type)
         .bind(content)
         .execute(&self.pool)
@@ -32,28 +32,15 @@ impl AgentMemory for MemoryRepo {
         Ok(())
     }
 
-    async fn list(&self, session_id: Uuid) -> Result<Vec<MemoryItem>> {
+    async fn list(&self, project_id: Uuid) -> Result<Vec<MemoryItem>> {
         let rows = sqlx::query_as::<_, MemoryRow>(
             "SELECT memory_type, content, created_at FROM agent_memory \
-             WHERE session_id = $1 ORDER BY created_at ASC",
+             WHERE project_id = $1 ORDER BY created_at ASC",
         )
-        .bind(session_id)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .context("Failed to list agent memory")?;
-        Ok(rows.into_iter().map(|r| r.into_item()).collect())
-    }
-
-    async fn get_by_type(&self, session_id: Uuid, memory_type: &str) -> Result<Vec<MemoryItem>> {
-        let rows = sqlx::query_as::<_, MemoryRow>(
-            "SELECT memory_type, content, created_at FROM agent_memory \
-             WHERE session_id = $1 AND memory_type = $2 ORDER BY created_at ASC",
-        )
-        .bind(session_id)
-        .bind(memory_type)
-        .fetch_all(&self.pool)
-        .await
-        .context("Failed to list agent memory by type")?;
         Ok(rows.into_iter().map(|r| r.into_item()).collect())
     }
 }

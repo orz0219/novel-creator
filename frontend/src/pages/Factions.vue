@@ -16,7 +16,7 @@
       />
     </div>
     <div v-else class="empty-state">
-      <span class="empty-icon">⚔️</span>
+      <Swords class="empty-icon" :size="40" />
       <span class="empty-text">暂无势力，点击上方按钮创建</span>
     </div>
 
@@ -67,6 +67,7 @@ import EntityCard from '@/components/ui/EntityCard.vue'
 import EntityDialog from '@/components/ui/EntityDialog.vue'
 import { factionProfileApi } from '@/api/character'
 import type { Entity, FactionProfile } from '@/types'
+import { Swords } from 'lucide-vue-next'
 
 const worldStore = useWorldStore()
 

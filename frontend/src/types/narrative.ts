@@ -106,14 +106,15 @@ export type HintLevel = 'Explicit' | 'Direct' | 'Subtle' | 'Hidden'
 export interface Foreshadowing extends Timestamps {
   id: string
   project_id: string
+  storyline_id?: string
   name: string
   description?: string
   status: ForeshadowingStatus
   importance: ForeshadowingImportance
   hint_level: HintLevel
-  planted_scene_id?: string
-  revealed_scene_id?: string
-  related_entity_ids: string[]
+  introduced_at?: string
+  expected_reveal_at?: string
+  actual_reveal_at?: string
 }
 
 // Tree node with children (for computed tree)

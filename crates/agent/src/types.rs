@@ -7,7 +7,8 @@ use uuid::Uuid;
 /// `POST /api/agent/session`
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
-    pub project_id: Option<Uuid>,
+    /// 所属项目（必填）：会话必须绑定到一个项目。
+    pub project_id: Uuid,
 }
 
 /// `POST /api/agent/session` 响应
@@ -29,6 +30,8 @@ pub struct ChatRequest {
 /// `POST /api/agent/tool/execute`
 #[derive(Deserialize)]
 pub struct ExecuteToolRequest {
+    /// 所属项目（必填）：工具执行时用于物理隔离（注入 project_id / world_id）。
+    pub project_id: Uuid,
     pub name: String,
     pub input: Value,
 }

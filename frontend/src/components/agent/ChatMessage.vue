@@ -2,12 +2,30 @@
   <div class="msg" :class="role">
     <div class="avatar" :class="role">
       <span v-if="role === 'assistant'" class="serif">导</span>
-      <span v-else>我</span>
+      <span v-else-if="role === 'user'">我</span>
+      <Wrench v-else :size="15" />
+    </div>
+
+    <!-- 工具卡片 -->
+    <div v-if="tool" class="bubble tool-card">
+      <div class="tool-head">
+        <span class="tool-name">{{ tool.name || '(解析失败)' }}</span>
+        <span class="tool-badge" :class="tool.ok ? 'ok' : 'fail'">{{ tool.ok ? '成功' : '失败' }}</span>
+      </div>
+      <div class="tool-section" v-if="hasInput">
+        <div class="tool-label">入参</div>
+        <pre class="tool-json">{{ pretty(tool.input) }}</pre>
+      </div>
+      <div class="tool-section">
+        <div class="tool-label">结果</div>
+        <pre class="tool-json">{{ pretty(tool.output) }}</pre>
+      </div>
+      <button v-if="!tool.ok" class="tool-retry" @click="retry">重试</button>
     </div>
 
     <!-- 选择题卡片 -->
-    <div v-if="q" class="bubble question-card">
-      <div class="role-label">创作向导 · 请选择</div>
+    <div v-else-if="q" class="bubble question-card">
+      <div class="role-label">请选择</div>
       <div class="q-text">{{ q.question }}</div>
       <div class="options">
         <button
@@ -35,35 +53,39 @@
       <div v-if="answered" class="answered">已回答：{{ chosen }}</div>
     </div>
 
-    <!-- 普通文本气泡 -->
+    <!-- 普通文本气泡（Markdown 渲染） -->
     <div v-else class="bubble" :class="{ streaming }">
-      <div class="role-label">{{ role === 'assistant' ? '创作向导' : '你' }}</div>
-      <div class="content">
-        <span v-if="!content && streaming" class="thinking">正在思考…</span>
-        <span class="text">{{ content }}</span><span v-if="streaming && content" class="caret"></span>
-      </div>
+      <div class="content" v-html="rendered"></div>
+      <span v-if="!content && streaming" class="thinking">正在思考…</span>
+      <span v-if="streaming && content" class="caret"></span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { Wrench } from 'lucide-vue-next'
+import { renderMarkdown, prettyJson } from '@/utils/markdown'
 
 const props = defineProps<{
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'tool'
   content: string
   streaming?: boolean
 }>()
 
-const emit = defineEmits<{ select: [text: string] }>()
+const emit = defineEmits<{
+  select: [text: string]
+  retry: [payload: { name: string; input: unknown }]
+}>()
 
-const MARKER = '<<ASK_QUESTION>>'
+const ASK = '<<ASK_QUESTION>>'
 const END = '<<END>>'
+const TOOL = '<<TOOL_RESULT>>'
 
-const isQuestion = computed(() => props.content.includes(MARKER))
+const isQuestion = computed(() => props.content.includes(ASK))
 const q = computed(() => {
   if (!isQuestion.value) return null
-  const start = props.content.indexOf(MARKER) + MARKER.length
+  const start = props.content.indexOf(ASK) + ASK.length
   const end = props.content.indexOf(END, start)
   const json = end === -1 ? props.content.slice(start) : props.content.slice(start, end)
   try {
@@ -76,6 +98,36 @@ const q = computed(() => {
     return null
   }
 })
+
+const tool = computed(() => {
+  if (props.role !== 'tool') return null
+  const start = props.content.indexOf(TOOL) + TOOL.length
+  if (start < TOOL.length) return null
+  const end = props.content.indexOf(END, start)
+  const json = end === -1 ? props.content.slice(start) : props.content.slice(start, end)
+  try {
+    const v = JSON.parse(json.trim())
+    return {
+      name: String(v.name || ''),
+      input: v.input,
+      ok: !!v.ok,
+      output: String(v.output || ''),
+    }
+  } catch {
+    return null
+  }
+})
+
+const hasInput = computed(
+  () =>
+    tool.value != null &&
+    tool.value.input != null &&
+    typeof tool.value.input === 'object' &&
+    Object.keys(tool.value.input as object).length > 0,
+)
+
+const rendered = computed(() => renderMarkdown(props.content))
+const pretty = (v: unknown) => prettyJson(v)
 
 const manualText = ref('')
 const answered = ref(false)
@@ -94,6 +146,10 @@ function submitManual() {
   chosen.value = t
   answered.value = true
   emit('select', t)
+}
+
+function retry() {
+  if (tool.value) emit('retry', { name: tool.value.name, input: tool.value.input })
 }
 </script>
 
@@ -126,6 +182,11 @@ function submitManual() {
   color: var(--text-secondary);
   border: 1px solid var(--border-default);
 }
+.avatar.tool {
+  background: var(--bg-active);
+  color: var(--color-accent);
+  border: 1px solid var(--border-default);
+}
 
 .bubble {
   display: flex;
@@ -145,6 +206,46 @@ function submitManual() {
   border-color: var(--border-primary);
   border-top-right-radius: var(--radius-sm);
 }
+
+/* 工具卡片 */
+.tool-card {
+  width: 100%;
+  background: var(--bg-panel-secondary);
+  border-color: var(--border-primary);
+  border-top-left-radius: var(--radius-sm);
+  gap: var(--space-2);
+}
+.tool-head { display: flex; align-items: center; gap: var(--space-2); }
+.tool-name {
+  font-size: var(--text-sm); font-weight: 600;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+.tool-badge { font-size: var(--text-xs); padding: 1px 8px; border-radius: 999px; flex-shrink: 0; }
+.tool-badge.ok { background: rgba(63, 185, 80, 0.15); color: #3fb950; }
+.tool-badge.fail { background: rgba(248, 81, 73, 0.15); color: #f85149; }
+.tool-section { display: flex; flex-direction: column; gap: 4px; }
+.tool-label { font-size: var(--text-xs); color: var(--text-tertiary); letter-spacing: 0.04em; }
+.tool-json {
+  margin: 0;
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs); line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-word;
+}
+.tool-retry {
+  align-self: flex-start; margin-top: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  background: var(--color-primary); border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md); color: #fff; font-size: var(--text-xs); cursor: pointer;
+}
+.tool-retry:hover { background: var(--color-primary-hover); }
 
 /* 选择题卡片 */
 .question-card {
@@ -213,15 +314,49 @@ function submitManual() {
   color: var(--text-tertiary);
   letter-spacing: 0.04em;
 }
-.msg.user .role-label { text-align: right; }
 
 .content {
   font-size: var(--text-md);
   line-height: var(--leading-relaxed);
   color: var(--text-primary);
-  white-space: pre-wrap;
+  white-space: normal;
   word-break: break-word;
 }
+/* Markdown 子元素（v-html 注入，需用 :deep 穿透 scoped） */
+.content :deep(h1),
+.content :deep(h2),
+.content :deep(h3) { margin: 0.4em 0 0.3em; line-height: 1.3; }
+.content :deep(h1) { font-size: 1.25em; }
+.content :deep(h2) { font-size: 1.12em; }
+.content :deep(h3) { font-size: 1.02em; }
+.content :deep(p) { margin: 0.5em 0; }
+.content :deep(p:first-child) { margin-top: 0; }
+.content :deep(p:last-child) { margin-bottom: 0; }
+.content :deep(ul),
+.content :deep(ol) { margin: 0.5em 0; padding-left: 1.4em; }
+.content :deep(li) { margin: 0.2em 0; }
+.content :deep(a) { color: var(--color-accent); text-decoration: underline; }
+.content :deep(strong) { color: var(--text-primary); font-weight: 600; }
+.content :deep(blockquote) {
+  margin: 0.5em 0; padding-left: 0.8em;
+  border-left: 3px solid var(--border-default); color: var(--text-secondary);
+}
+.content :deep(code) {
+  background: var(--bg-base); padding: 0.1em 0.35em;
+  border-radius: var(--radius-sm); font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.content :deep(pre) {
+  background: var(--bg-base); border: 1px solid var(--border-default);
+  border-radius: var(--radius-md); padding: var(--space-3);
+  overflow-x: auto; margin: 0.5em 0;
+}
+.content :deep(pre code) { background: none; padding: 0; font-size: 0.85em; }
+.content :deep(table) { border-collapse: collapse; margin: 0.5em 0; width: 100%; }
+.content :deep(th),
+.content :deep(td) { border: 1px solid var(--border-default); padding: 0.3em 0.6em; text-align: left; }
+.content :deep(hr) { border: none; border-top: 1px solid var(--border-default); margin: 0.7em 0; }
+
 .thinking { color: var(--text-tertiary); font-style: italic; }
 .caret {
   display: inline-block;

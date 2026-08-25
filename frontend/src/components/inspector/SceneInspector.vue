@@ -12,7 +12,7 @@
       <div v-if="activeTab === 'characters'" class="section">
         <div class="section-label">出场角色</div>
         <div v-for="cid in scene.attributes?.characters_present || []" :key="cid" class="char-item">
-          <span class="char-dot">👤</span>
+          <User class="char-dot" :size="12" />
           <span>{{ cid }}</span>
         </div>
       </div>
@@ -22,6 +22,7 @@
 
 <script setup lang="ts">
 import InspectorPanel from './InspectorPanel.vue'
+import { User } from 'lucide-vue-next'
 import type { NarrativeNode } from '@/types'
 defineProps<{ scene: NarrativeNode }>()
 defineEmits(['close'])

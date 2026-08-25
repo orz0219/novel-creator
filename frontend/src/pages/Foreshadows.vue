@@ -19,17 +19,17 @@
         <div v-if="fs.description" class="fs-desc">{{ fs.description }}</div>
 
         <div class="fs-meta">
-          <div v-if="fs.planted_scene_id" class="fs-meta-row">
-            <span class="fs-meta-label">种植场景</span>
-            <span class="fs-meta-value">{{ fs.planted_scene_id }}</span>
+          <div v-if="fs.introduced_at" class="fs-meta-row">
+            <span class="fs-meta-label">引入于</span>
+            <span class="fs-meta-value">{{ fs.introduced_at }}</span>
           </div>
-          <div v-if="fs.revealed_scene_id" class="fs-meta-row">
-            <span class="fs-meta-label">揭示场景</span>
-            <span class="fs-meta-value">{{ fs.revealed_scene_id }}</span>
+          <div v-if="fs.expected_reveal_at" class="fs-meta-row">
+            <span class="fs-meta-label">预期揭示</span>
+            <span class="fs-meta-value">{{ fs.expected_reveal_at }}</span>
           </div>
-          <div v-if="fs.related_entity_ids && fs.related_entity_ids.length" class="fs-meta-row">
-            <span class="fs-meta-label">关联实体</span>
-            <span class="fs-meta-value">关联 {{ fs.related_entity_ids.length }} 个实体</span>
+          <div v-if="fs.actual_reveal_at" class="fs-meta-row">
+            <span class="fs-meta-label">实际揭示</span>
+            <span class="fs-meta-value">{{ fs.actual_reveal_at }}</span>
           </div>
         </div>
       </div>
@@ -78,16 +78,16 @@
           </select>
         </div>
         <div class="form-group">
-          <label class="form-label">种植场景 ID</label>
-          <input v-model="form.planted_scene_id" class="form-input" placeholder="种植场景 ID（可选）" />
+          <label class="form-label">引入章节/场景</label>
+          <input v-model="form.introduced_at" class="form-input" placeholder="引入时的章节/场景（可选）" />
         </div>
         <div class="form-group">
-          <label class="form-label">揭示场景 ID</label>
-          <input v-model="form.revealed_scene_id" class="form-input" placeholder="揭示场景 ID（可选）" />
+          <label class="form-label">预期揭示章节/场景</label>
+          <input v-model="form.expected_reveal_at" class="form-input" placeholder="预期揭示时的章节/场景（可选）" />
         </div>
         <div class="form-group">
-          <label class="form-label">关联实体 ID（逗号分隔）</label>
-          <input v-model="relatedInput" class="form-input" placeholder="实体 ID1, 实体 ID2（可选）" />
+          <label class="form-label">实际揭示章节/场景</label>
+          <input v-model="form.actual_reveal_at" class="form-input" placeholder="实际揭示时的章节/场景（可选）" />
         </div>
       </form>
       <template #footer>
@@ -140,25 +140,19 @@ const form = ref<{
   status: ForeshadowingStatus
   importance: ForeshadowingImportance
   hint_level: HintLevel
-  planted_scene_id: string
-  revealed_scene_id: string
+  introduced_at: string
+  expected_reveal_at: string
+  actual_reveal_at: string
 }>({
   name: '',
   description: '',
   status: 'Planned',
   importance: 'Normal',
   hint_level: 'Subtle',
-  planted_scene_id: '',
-  revealed_scene_id: '',
+  introduced_at: '',
+  expected_reveal_at: '',
+  actual_reveal_at: '',
 })
-const relatedInput = ref('')
-
-const relatedEntityIds = computed(() =>
-  relatedInput.value
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean),
-)
 
 function resetForm() {
   form.value = {
@@ -167,10 +161,10 @@ function resetForm() {
     status: 'Planned',
     importance: 'Normal',
     hint_level: 'Subtle',
-    planted_scene_id: '',
-    revealed_scene_id: '',
+    introduced_at: '',
+    expected_reveal_at: '',
+    actual_reveal_at: '',
   }
-  relatedInput.value = ''
 }
 
 function openCreate() {
@@ -189,10 +183,10 @@ function openEdit(fs: Foreshadowing) {
     status: fs.status,
     importance: fs.importance,
     hint_level: fs.hint_level,
-    planted_scene_id: fs.planted_scene_id ?? '',
-    revealed_scene_id: fs.revealed_scene_id ?? '',
+    introduced_at: fs.introduced_at ?? '',
+    expected_reveal_at: fs.expected_reveal_at ?? '',
+    actual_reveal_at: fs.actual_reveal_at ?? '',
   }
-  relatedInput.value = (fs.related_entity_ids ?? []).join(', ')
   showDialog.value = true
 }
 
@@ -209,9 +203,9 @@ async function handleSubmit() {
     status: form.value.status,
     importance: form.value.importance,
     hint_level: form.value.hint_level,
-    planted_scene_id: form.value.planted_scene_id.trim() || undefined,
-    revealed_scene_id: form.value.revealed_scene_id.trim() || undefined,
-    related_entity_ids: relatedEntityIds.value,
+    introduced_at: form.value.introduced_at.trim() || undefined,
+    expected_reveal_at: form.value.expected_reveal_at.trim() || undefined,
+    actual_reveal_at: form.value.actual_reveal_at.trim() || undefined,
   }
 
   if (editing.value && editingId.value) {

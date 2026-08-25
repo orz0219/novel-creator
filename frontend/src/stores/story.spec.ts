@@ -68,7 +68,6 @@ function makeForeshadow(id: string): Foreshadowing {
     status: "Active",
     importance: "Normal",
     hint_level: "Subtle",
-    related_entity_ids: [],
     created_at: "",
     updated_at: "",
   }

@@ -1,5 +1,5 @@
 <template>
-  <span class="status-badge" :class="status">
+  <span class="status-badge" :class="status.toLowerCase()">
     {{ label }}
   </span>
 </template>

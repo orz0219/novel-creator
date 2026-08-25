@@ -66,7 +66,15 @@ export interface Relation extends Timestamps {
 }
 
 // ---- Fact ----
-export type FactCertainty = 'Confirmed' | 'Likely' | 'Rumor' | 'Uncertain'
+// 后端真源 crates/domain/src/canon.rs:99-114（FactCertainty 枚举），序列化字符串见 as_str()
+export type FactCertainty =
+  | 'CANON'
+  | 'PROBABLE'
+  | 'RUMOR'
+  | 'BELIEF'
+  | 'SPECULATION'
+  | 'FALSE_BELIEF'
+  | 'UNKNOWN'
 
 export interface Fact extends Timestamps {
   id: string

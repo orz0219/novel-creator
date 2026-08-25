@@ -105,8 +105,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
     async fn generate(&self, request: LlmRequest) -> Result<LlmResponse> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         // 请求体只需构建一次，重试时复用。
+        let model = if request.model.is_empty() {
+            self.model.clone()
+        } else {
+            request.model.clone()
+        };
         let body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": request.messages,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
@@ -177,8 +182,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
     async fn stream_generate(&self, request: LlmRequest) -> Result<TokenStream> {
         use futures::StreamExt;
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let model = if request.model.is_empty() {
+            self.model.clone()
+        } else {
+            request.model.clone()
+        };
         let body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": request.messages,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,

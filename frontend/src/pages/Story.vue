@@ -12,7 +12,7 @@
     </div>
 
     <div v-else-if="!storyStore.tree.length" class="empty-state">
-      <span class="empty-icon">📖</span>
+      <BookOpen class="empty-icon" :size="40" />
       <span class="empty-text">暂无故事结构，点击上方按钮创建</span>
     </div>
 
@@ -138,6 +138,7 @@ import { useStoryStore } from '@/stores/story'
 import type { NarrativeNode, NarrativeNodeStatus, TreeNode } from '@/types'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import NeDialog from '@/components/ui/NeDialog.vue'
+import { BookOpen } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()

@@ -19,6 +19,9 @@ pub mod settings;
 pub mod agent;
 pub mod error;
 
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::{Router, routing::{get, post, put, delete}};
 use tower_http::cors::{CorsLayer, Any};
 use crate::state::AppState;
@@ -125,6 +128,13 @@ pub fn router(state: AppState) -> Router {
         .layer(cors)
 }
 
-async fn health_check() -> &'static str {
-    "OK"
+async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool).await {
+        Ok(_) => (StatusCode::OK, "OK").into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }

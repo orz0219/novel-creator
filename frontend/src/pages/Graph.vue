@@ -11,7 +11,7 @@
     </div>
 
     <div v-if="!loading && nodes.length === 0" class="empty-state">
-      <span class="empty-icon">🕸️</span>
+      <Network class="empty-icon" :size="40" />
       <span class="empty-text">暂无实体或可关系，请先在「人物 / 地点 / 势力」中添加数据</span>
     </div>
 
@@ -122,6 +122,7 @@ import { useRoute } from 'vue-router'
 import { useWorldStore } from '@/stores/world'
 import GraphControls from '@/components/graph/GraphControls.vue'
 import type { Entity, Relation } from '@/types/world'
+import { Network } from 'lucide-vue-next'
 
 const route = useRoute()
 const worldStore = useWorldStore()

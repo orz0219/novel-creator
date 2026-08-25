@@ -18,7 +18,7 @@
         class="control-btn filter"
         :class="{ active: activeFilter === filter.id }"
         @click="$emit('filter', filter.id)"
-      >{{ filter.icon }}</button>
+      ><component :is="filter.icon" :size="16" /></button>
     </div>
     <div class="control-info">
       <span class="zoom-level">{{ Math.round(zoom * 100) }}%</span>
@@ -27,6 +27,7 @@
 </template>
 
 <script setup lang="ts">
+import { Globe, User, MapPin, Swords, Calendar, GitBranch } from 'lucide-vue-next'
 defineProps<{
   zoom: number
   activeFilter: string
@@ -35,12 +36,12 @@ defineProps<{
 defineEmits(['zoom-in', 'zoom-out', 'zoom-reset', 'fit', 'center', 'filter'])
 
 const filters = [
-  { id: 'all', icon: '🌐' },
-  { id: 'Character', icon: '👤' },
-  { id: 'Location', icon: '📍' },
-  { id: 'Faction', icon: '⚔️' },
-  { id: 'Event', icon: '📅' },
-  { id: 'Thread', icon: '🧵' },
+  { id: 'all', icon: Globe },
+  { id: 'Character', icon: User },
+  { id: 'Location', icon: MapPin },
+  { id: 'Faction', icon: Swords },
+  { id: 'Event', icon: Calendar },
+  { id: 'Thread', icon: GitBranch },
 ]
 </script>
 

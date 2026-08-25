@@ -51,8 +51,12 @@ pub async fn execute_task(State(state): State<AppState>, Path(task_id): Path<Str
     let task_id = Uuid::parse_str(&task_id).map_err(|_| AppError(anyhow::anyhow!("Invalid task ID")))?;
     // 组装「场景 + 世界观」上下文，让生成真正贴合设定（而非空输入客套话）。
     let context = build_scene_context(&state.pool, task_id).await;
-    let output = generation_executor(&state).execute(task_id, context).await?;
-    Ok(Json(serde_json::json!({ "output": output })))
+    // 执行会把产出写回任务并生成提案；执行后重取完整任务返回（前端期望完整 GenerationTask）。
+    let _output = generation_executor(&state).execute(task_id, context).await?;
+    let service = GenerationService::new(Arc::new(DbGenerationRepositoryPort::new(state.pool.clone())));
+    let task = service.get_task(task_id).await?
+        .ok_or_else(|| AppError(anyhow::anyhow!("Generation task not found")))?;
+    Ok(Json(task))
 }
 
 /// 为生成任务组装「场景信息 + 世界观/角色」上下文文本。

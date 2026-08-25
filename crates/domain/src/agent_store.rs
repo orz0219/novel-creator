@@ -23,7 +23,8 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
     pub id: Uuid,
-    pub project_id: Option<Uuid>,
+    /// 所属项目（NOT NULL）：会话必须绑定到一个项目（对话-项目绑定，P2）。
+    pub project_id: Uuid,
     pub title: Option<String>,
     pub messages: Vec<ChatMessage>,
     /// 当前引导阶段（对应 GUIDE.md 8 步；P1 仅记录，Workflow 引擎在 P2/P3 驱动）。
@@ -33,7 +34,7 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    pub fn new(project_id: Option<Uuid>) -> Self {
+    pub fn new(project_id: Uuid) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
@@ -54,7 +55,8 @@ pub trait SessionStore: Send + Sync {
     async fn get(&self, id: Uuid) -> Result<Option<AgentSession>>;
     async fn update(&self, session: AgentSession) -> Result<()>;
     async fn delete(&self, id: Uuid) -> Result<()>;
-    async fn list(&self) -> Result<Vec<AgentSession>>;
+    /// 列出某项目下的全部会话（按项目隔离，用于历史侧栏）。
+    async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<AgentSession>>;
 }
 
 /// 一条记忆项。
@@ -66,10 +68,9 @@ pub struct MemoryItem {
     pub created_at: DateTime<Utc>,
 }
 
-/// 记忆端口（会话级：记忆绑定到某个会话，跨刷新保留）。
+/// 记忆端口（项目级：记忆绑定到某个项目，同一项目下多个会话共享，跨刷新保留）。
 #[async_trait]
 pub trait AgentMemory: Send + Sync {
-    async fn save(&self, session_id: Uuid, memory_type: &str, content: &str) -> Result<()>;
-    async fn list(&self, session_id: Uuid) -> Result<Vec<MemoryItem>>;
-    async fn get_by_type(&self, session_id: Uuid, memory_type: &str) -> Result<Vec<MemoryItem>>;
+    async fn save(&self, project_id: Uuid, memory_type: &str, content: &str) -> Result<()>;
+    async fn list(&self, project_id: Uuid) -> Result<Vec<MemoryItem>>;
 }

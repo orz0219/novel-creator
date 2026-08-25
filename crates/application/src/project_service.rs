@@ -9,14 +9,18 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::world_service::WorldService;
+
 /// Project Service - 项目服务
 pub struct ProjectService {
     repo: Arc<dyn ProjectRepositoryPort>,
+    /// 主世界服务：建项目时自动 ensure 一个主世界，供实体 / 规则按项目物理隔离。
+    world: Arc<WorldService>,
 }
 
 impl ProjectService {
-    pub fn new(repo: Arc<dyn ProjectRepositoryPort>) -> Self {
-        Self { repo }
+    pub fn new(repo: Arc<dyn ProjectRepositoryPort>, world: Arc<WorldService>) -> Self {
+        Self { repo, world }
     }
 
     pub async fn list_projects(&self) -> Result<Vec<Value>> {
@@ -33,7 +37,15 @@ impl ProjectService {
         description: Option<&str>,
         language: Option<&str>,
     ) -> Result<Value> {
-        self.repo.create_project(name, description, language).await
+        let v = self.repo.create_project(name, description, language).await?;
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| anyhow::anyhow!("创建项目后未返回有效 id"))?;
+        // 自动 ensure 主世界，使该项目的实体 / 规则工具可按要求按 project_id 物理隔离。
+        self.world.ensure_main_world(id, name).await?;
+        Ok(v)
     }
 
     pub async fn update_project(

@@ -32,14 +32,14 @@ export interface ExecuteToolResponse {
 }
 
 export interface ChatMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'tool'
   content: string
   created_at?: string
 }
 
 export interface AgentSession {
   id: string
-  project_id: string | null
+  project_id: string
   title: string | null
   messages: ChatMessage[]
   current_step: string
@@ -57,11 +57,11 @@ export interface PromptView {
   is_customized: boolean
 }
 
-export async function createSession(projectId?: string): Promise<CreateSessionResponse> {
+export async function createSession(projectId: string): Promise<CreateSessionResponse> {
   const resp = await fetch(BASE + '/session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project_id: projectId ?? null }),
+    body: JSON.stringify({ project_id: projectId }),
   })
   if (!resp.ok) throw new Error(await errorText(resp))
   return resp.json()
@@ -73,9 +73,9 @@ export async function getSession(id: string): Promise<AgentSession> {
   return resp.json()
 }
 
-/** 列出全部会话（历史侧栏）。 */
-export async function listSessions(): Promise<AgentSession[]> {
-  const resp = await fetch(BASE + '/sessions')
+/** 列出某项目下的会话（历史侧栏，按项目隔离）。 */
+export async function listSessions(projectId: string): Promise<AgentSession[]> {
+  const resp = await fetch(BASE + '/sessions?project_id=' + encodeURIComponent(projectId))
   if (!resp.ok) throw new Error(await errorText(resp))
   return resp.json()
 }
@@ -102,11 +102,15 @@ export async function listTools(): Promise<ListToolsResponse> {
   return resp.json()
 }
 
-export async function executeTool(name: string, input: unknown): Promise<ExecuteToolResponse> {
+export async function executeTool(
+  name: string,
+  input: unknown,
+  projectId: string,
+): Promise<ExecuteToolResponse> {
   const resp = await fetch(BASE + '/tool/execute', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, input }),
+    body: JSON.stringify({ name, input, project_id: projectId }),
   })
   if (!resp.ok) throw new Error(await errorText(resp))
   return resp.json()
@@ -144,6 +148,7 @@ export interface ChatStreamHandlers {
   onDone?: () => void
   onError?: (data: string) => void
   onQuestion?: (data: { question: string; options: string[] }) => void
+  onTool?: (data: { name: string; input: unknown; ok: boolean; output: string }) => void
 }
 
 function parseSSEBlock(block: string): { event?: string; data?: string } {
@@ -189,6 +194,12 @@ export async function streamChat(
     else if (ev.event === 'question') {
       try {
         handlers.onQuestion?.(JSON.parse(ev.data))
+      } catch {
+        // 解析失败忽略
+      }
+    } else if (ev.event === 'tool') {
+      try {
+        handlers.onTool?.(JSON.parse(ev.data))
       } catch {
         // 解析失败忽略
       }
