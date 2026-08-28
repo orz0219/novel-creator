@@ -55,6 +55,8 @@ function makeStoryline(id: string): Storyline {
     name: `线-${id}`,
     status: "Active",
     importance: "Normal",
+    tone: "light",
+    visibility: "visible",
     created_at: "",
     updated_at: "",
   }

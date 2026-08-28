@@ -1,11 +1,12 @@
 import { defineStore } from "pinia"
 import { ref, computed } from "vue"
-import type { NarrativeNode, NarrativeNodeType, NarrativeNodeStatus, Storyline, Foreshadowing, TreeNode } from "@/types"
+import type { NarrativeNode, NarrativeNodeType, NarrativeNodeStatus, Storyline, StorylineRelation, Foreshadowing, TreeNode } from "@/types"
 import { narrativeApi, storylineApi, foreshadowApi } from "@/api/story"
 
 export const useStoryStore = defineStore("story", () => {
   const nodes = ref<NarrativeNode[]>([])
   const storylines = ref<Storyline[]>([])
+  const storylineRelations = ref<StorylineRelation[]>([])  // parent → child 挂载关系
   const foreshadows = ref<Foreshadowing[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -42,13 +43,20 @@ export const useStoryStore = defineStore("story", () => {
     }
   }
 
-  // Fetch storylines
+  // Fetch storylines + 挂载关系
   async function fetchStorylines(projectId: string) {
     try {
-      storylines.value = await storylineApi.list(projectId)
+      // 并行拉两条：storyline 列表 + 关系列表
+      const [sList, rels] = await Promise.all([
+        storylineApi.list(projectId),
+        storylineApi.listRelations(projectId).catch(() => []),
+      ])
+      storylines.value = sList
+      storylineRelations.value = rels
     } catch (e: any) {
       error.value = e.message
       storylines.value = []
+      storylineRelations.value = []
     }
   }
 
@@ -128,7 +136,7 @@ export const useStoryStore = defineStore("story", () => {
   )
 
   return {
-    nodes, storylines, foreshadows, loading, error, selectedNodeId, selectedNode, tree,
+    nodes, storylines, storylineRelations, foreshadows, loading, error, selectedNodeId, selectedNode, tree,
     fetchNodes, fetchStorylines, fetchForeshadows,
     createNode, updateNode, deleteNode,
     createStoryline, updateStoryline, deleteStoryline,

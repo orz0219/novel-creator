@@ -18,6 +18,12 @@ pub struct Project {
     pub world_setting: Option<String>,
     /// 金手指/系统设定
     pub system_setting: Option<String>,
+    /// 故事脑洞/前提（一句话核心反常设定，如"我捡了一块钱怎么也花不完"）
+    ///
+    /// 与 genre 同层级：项目级元数据，世界观展开前由 Agent 引导用户与 AI
+    /// 持续沟通打磨后确认落库。后续所有世界观/角色/叙事生成都受 premise 约束，
+    /// 作为 prompt 注入的最强变量。
+    pub premise: Option<String>,
     /// 默认 LLM 模型
     pub default_model: Option<String>,
     /// 默认写作风格

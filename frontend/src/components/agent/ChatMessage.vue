@@ -53,11 +53,21 @@
       <div v-if="answered" class="answered">已回答：{{ chosen }}</div>
     </div>
 
-    <!-- 普通文本气泡（Markdown 渲染） -->
-    <div v-else class="bubble" :class="{ streaming }">
-      <div class="content" v-html="rendered"></div>
+    <!-- 普通文本气泡
+         - formatted=true（默认，历史消息 / 流式完成后）：v-html 渲染 markdown
+         - formatted=false（流式中）：v-text 纯文本，避免 marked 解析不完整 markdown
+         简化版：不再看 streaming 字段（LLM 一口气吐完时切换不流畅），改用 formatted
+    -->
+    <div v-else class="bubble" :class="{ streaming, 'is-raw': !formatted }">
+      <div v-if="formatted" class="content markdown-body" v-html="rendered"></div>
+      <div v-else class="content markdown-body content-raw">{{ content }}<span v-if="streaming" class="caret"></span></div>
       <span v-if="!content && streaming" class="thinking">正在思考…</span>
-      <span v-if="streaming && content" class="caret"></span>
+      <!-- 用户手动触发 markdown 渲染（流式完成后用，但 onDone 还没触发 / 或用户想立即格式化） -->
+      <div v-if="!formatted && !streaming" class="format-bar">
+        <button class="format-btn" @click="emit('format')" title="渲染 markdown 排版">
+          ✨ 排版
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -71,11 +81,15 @@ const props = defineProps<{
   role: 'user' | 'assistant' | 'tool'
   content: string
   streaming?: boolean
+  /** 消息是否已"格式化"（流式完成后由 store 置 true / 用户手动点 "排版" 也置 true） */
+  formatted?: boolean
 }>()
 
 const emit = defineEmits<{
   select: [text: string]
   retry: [payload: { name: string; input: unknown }]
+  /** 用户手动点 "格式化" 按钮（让父组件把消息标 formatted=true） */
+  format: []
 }>()
 
 const ASK = '<<ASK_QUESTION>>'
@@ -322,6 +336,11 @@ function retry() {
   white-space: normal;
   word-break: break-word;
 }
+/* 流式时的纯文本容器：保留换行 + 让用户能实时看到加粗等字符原样（流完才渲染） */
+.content.content-raw {
+  white-space: pre-wrap;
+  /* 流式不渲染 markdown，所以 **、_、# 都原样显示——这是预期行为 */
+}
 /* Markdown 子元素（v-html 注入，需用 :deep 穿透 scoped） */
 .content :deep(h1),
 .content :deep(h2),
@@ -336,7 +355,11 @@ function retry() {
 .content :deep(ol) { margin: 0.5em 0; padding-left: 1.4em; }
 .content :deep(li) { margin: 0.2em 0; }
 .content :deep(a) { color: var(--color-accent); text-decoration: underline; }
-.content :deep(strong) { color: var(--text-primary); font-weight: 600; }
+.content :deep(strong) {
+  /* 朱砂红字 + 加粗 700（无背景，让用户只看字色对比） */
+  color: var(--color-primary);
+  font-weight: 700;
+}
 .content :deep(blockquote) {
   margin: 0.5em 0; padding-left: 0.8em;
   border-left: 3px solid var(--border-default); color: var(--text-secondary);
@@ -366,6 +389,25 @@ function retry() {
   vertical-align: text-bottom;
   animation: blink 1s step-end infinite;
 }
+
+/* 手动"排版"按钮（流式未触发 onDone 时给用户的兜底） */
+.format-bar {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+.format-btn {
+  font-size: 11px;
+  padding: 2px 10px;
+  background: transparent;
+  border: 1px solid var(--border-emphasis);
+  border-radius: 10px;
+  color: var(--color-primary);
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.format-btn:hover { background: var(--color-primary-subtle); }
 
 @keyframes blink { 50% { opacity: 0; } }
 @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }

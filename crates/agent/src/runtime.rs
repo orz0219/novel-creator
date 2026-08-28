@@ -572,6 +572,12 @@ fn parse_ask_question(s: &str) -> Option<(String, Vec<String>)> {
 ///
 /// 复用 `extract_json_object` 容忍多余字符。`name` 必填；`input` 缺省为空对象；
 /// `input` 非对象则报错（与 `execute_tool` 的约束一致）。
+///
+/// **input 兜底（防 LLM 把 JSON schema 原文当 input 传）**：
+/// LLM 偶尔会看到工具的 input_schema（包含 `properties` 字段），误以为应该
+/// 把所有字段嵌套在 `properties` 里。检测到 input 形如
+/// `{ "type": "object", "properties": {...}, "required": [...] }` 时，
+/// 自动 unwrap 成 `{ ...properties }` 形式，并保留 project_id 注入。
 fn parse_tool_call(s: &str) -> Result<(String, serde_json::Value)> {
     let json = extract_json_object(s)
         .ok_or_else(|| anyhow::anyhow!("工具调用 JSON 解析失败"))?;
@@ -583,10 +589,66 @@ fn parse_tool_call(s: &str) -> Result<(String, serde_json::Value)> {
         .ok_or_else(|| anyhow::anyhow!("工具调用缺少 name 字段"))?
         .to_string();
     let input = v.get("input").cloned().unwrap_or(serde_json::json!({}));
+    let input = unwrap_schema_shaped_input(input);
     if !input.is_object() {
         anyhow::bail!("工具调用 input 必须为 JSON 对象");
     }
     Ok((name, input))
+}
+
+/// 检测 input 是不是 LLM 把 JSON schema 原文当 input 传。
+/// 形如 `{ "type": "object", "properties": { ...字段 }, "required": [...] }` → 自动取出 properties。
+fn unwrap_schema_shaped_input(input: serde_json::Value) -> serde_json::Value {
+    let obj = match input.as_object() {
+        Some(o) => o,
+        None => return input,
+    };
+    // schema 形态：含 type="object" + properties（且其他字段都属 schema 关键字）
+    let is_schema_shape = obj.get("type").and_then(|v| v.as_str()) == Some("object")
+        && obj.contains_key("properties")
+        && obj.keys().all(|k| matches!(k.as_str(), "type" | "properties" | "required" | "additionalProperties" | "title" | "description"));
+    if !is_schema_shape {
+        return input;
+    }
+    // unwrap：取 properties 字段
+    match obj.get("properties") {
+        Some(p) if p.is_object() => p.clone(),
+        _ => input,
+    }
+}
+
+#[cfg(test)]
+mod tests_parse_tool_call {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_normal_input_passes_through() {
+        // 普通业务 input：{ premise: "..." } → 原样
+        let input = json!({"premise": "hello"});
+        let out = unwrap_schema_shaped_input(input.clone());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn test_schema_shaped_input_gets_unwrapped() {
+        // LLM 把 schema 原文当 input 传
+        let schema = json!({
+            "type": "object",
+            "properties": {"premise": "hello world"},
+            "required": ["premise"]
+        });
+        let out = unwrap_schema_shaped_input(schema);
+        assert_eq!(out, json!({"premise": "hello world"}));
+    }
+
+    #[test]
+    fn test_normal_object_with_type_field_not_unwrapped() {
+        // 业务字段里恰好有 "type" 字段（不应误判）
+        let v = json!({"type": "Faction", "name": "x"});
+        let out = unwrap_schema_shaped_input(v.clone());
+        assert_eq!(out, v);
+    }
 }
 
 /// 从历史回读 `<<TOOL_RESULT>>...<<END>>` 标记，转换为模型可读文本（避免把标记原样喂给模型）。

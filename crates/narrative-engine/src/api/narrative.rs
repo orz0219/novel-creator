@@ -23,7 +23,17 @@ pub struct CreateNodeInput { pub node_type: String, pub parent_id: Option<String
 #[derive(Deserialize)]
 pub struct UpdateNodeInput { pub title: Option<String>, pub description: Option<String>, pub content: Option<String>, pub status: Option<String> }
 #[derive(Deserialize)]
-pub struct CreateStorylineInput { pub name: String, pub description: Option<String>, pub importance: Option<String> }
+pub struct CreateStorylineInput {
+    pub name: String,
+    pub description: Option<String>,
+    pub importance: Option<String>,
+    /// 明/暗线（默认 light）
+    pub tone: Option<String>,
+    /// 可见性（默认 visible；暗线一般 hidden）
+    pub visibility: Option<String>,
+    /// 挂载到哪条 story line 下（None 表示独立 / 主线）
+    pub parent_id: Option<String>,
+}
 #[derive(Deserialize)]
 pub struct CreateForeshadowInput { pub name: String, pub description: Option<String>, pub importance: Option<String>, pub hint_level: Option<String> }
 
@@ -103,10 +113,33 @@ pub async fn list_storylines(State(state): State<AppState>, Path(project_id): Pa
     Ok(Json(serde_json::json!(storylines)))
 }
 
+pub async fn list_storyline_relations(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
+    let relations = StorylineService::new(Arc::new(DbStorylineRepositoryPort::new(state.pool.clone())))
+        .list_storyline_relations(project_id)
+        .await?;
+    Ok(Json(serde_json::json!(relations)))
+}
+
 pub async fn create_storyline(State(state): State<AppState>, Path(project_id): Path<String>, Json(input): Json<CreateStorylineInput>) -> Result<Json<serde_json::Value>, AppError> {
     let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
+    let parent_uuid = match &input.parent_id {
+        Some(s) if !s.is_empty() => Some(Uuid::parse_str(s).map_err(|_| AppError(anyhow::anyhow!("Invalid parent_id")))?),
+        _ => None,
+    };
     let storyline = StorylineService::new(Arc::new(DbStorylineRepositoryPort::new(state.pool.clone())))
-        .create_storyline(project_id, &input.name, input.description.as_deref(), input.importance.as_deref().unwrap_or("Normal"))
+        .create_storyline(
+            project_id,
+            &input.name,
+            input.description.as_deref(),
+            input.importance.as_deref().unwrap_or("Normal"),
+            input.tone.as_deref().unwrap_or("light"),
+            input.visibility.as_deref().unwrap_or("visible"),
+            parent_uuid,
+        )
         .await?;
     Ok(Json(storyline))
 }
@@ -114,7 +147,13 @@ pub async fn create_storyline(State(state): State<AppState>, Path(project_id): P
 pub async fn update_storyline(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<CreateStorylineInput>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid storyline ID")))?;
     let storyline = StorylineService::new(Arc::new(DbStorylineRepositoryPort::new(state.pool.clone())))
-        .update_storyline(id, &input.name, input.description.as_deref())
+        .update_storyline(
+            id,
+            &input.name,
+            input.description.as_deref(),
+            input.tone.as_deref(),
+            input.visibility.as_deref(),
+        )
         .await?;
     Ok(Json(storyline))
 }

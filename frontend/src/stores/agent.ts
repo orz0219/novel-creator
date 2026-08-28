@@ -7,6 +7,13 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'tool'
   content: string
   streaming?: boolean
+  /**
+   * 消息是否已"格式化"（流式完成）：
+   * - true: 渲染 markdown
+   * - false: 纯文本（流式中或刚收到时）
+   * 历史消息（restoreSession）默认 true
+   */
+  formatted?: boolean
 }
 
 export const useAgentStore = defineStore('agent', () => {
@@ -74,6 +81,7 @@ export const useAgentStore = defineStore('agent', () => {
     messages.value = s.messages.map((m) => ({
       role: m.role as ChatMessage['role'],
       content: m.content,
+      formatted: true, // 历史消息直接按 markdown 渲染
     }))
     error.value = null
     status.value = 'idle'
@@ -111,6 +119,12 @@ export const useAgentStore = defineStore('agent', () => {
     sessions.value = sessions.value.map((s) => (s.id === id ? { ...s, title: t } : s))
   }
 
+  /** 用户手动点 "排版" 按钮：把指定消息标 formatted=true 触发 markdown 渲染 */
+  function markFormatted(index: number) {
+    if (index < 0 || index >= messages.value.length) return
+    messages.value[index] = { ...messages.value[index], formatted: true }
+  }
+
   async function ensureSession(projectId: string) {
     // 当前会话不属于本项目时也重新创建，避免串项目
     if (!sessionId.value || !sessions.value.some((s) => s.id === sessionId.value)) {
@@ -137,7 +151,7 @@ export const useAgentStore = defineStore('agent', () => {
       if (n > 0 && messages.value[n - 1].role === 'assistant' && messages.value[n - 1].streaming) {
         return n - 1
       }
-      messages.value.push({ role: 'assistant', content: '', streaming: true })
+      messages.value.push({ role: 'assistant', content: '', streaming: true, formatted: false })
       return messages.value.length - 1
     }
     // 收尾当前文本气泡（关闭 streaming），并复位索引
@@ -188,6 +202,14 @@ export const useAgentStore = defineStore('agent', () => {
         onDone: () => {
           thinking.value = false
           finalizeText()
+          // 把刚刚 streaming 的消息标 formatted=true（让 ChatMessage 切到 v-html）。
+          // 关键：用新对象替换整条消息才能触发 Vue 响应式（直接改属性追踪不到）。
+          for (let i = messages.value.length - 1; i >= 0; i--) {
+            if (messages.value[i].role === 'assistant' && !messages.value[i].formatted) {
+              messages.value[i] = { ...messages.value[i], formatted: true }
+              break
+            }
+          }
           status.value = 'idle'
         },
         onError: (e) => {
@@ -236,6 +258,7 @@ export const useAgentStore = defineStore('agent', () => {
     selectSession,
     deleteSession,
     renameSession,
+    markFormatted,
     ensureSession,
     sendMessage,
     executeTool,

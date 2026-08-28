@@ -54,8 +54,9 @@ impl ProjectService {
         name: Option<&str>,
         description: Option<&str>,
         status: Option<&str>,
+        premise: Option<&str>,
     ) -> Result<Value> {
-        self.repo.update_project(id, name, description, status).await
+        self.repo.update_project(id, name, description, status, premise).await
     }
 
     pub async fn delete_project(&self, id: Uuid) -> Result<()> {

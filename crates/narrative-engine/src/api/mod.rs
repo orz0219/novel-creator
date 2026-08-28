@@ -71,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/narrative/{id}", get(narrative::get_node).put(narrative::update_node).delete(narrative::delete_node))
         // Storylines
         .route("/api/v1/projects/{id}/storylines", get(narrative::list_storylines).post(narrative::create_storyline))
+        .route("/api/v1/projects/{id}/storyline-relations", get(narrative::list_storyline_relations))
         .route("/api/v1/storylines/{id}", put(narrative::update_storyline).delete(narrative::delete_storyline))
         // Foreshadows
         .route("/api/v1/projects/{id}/foreshadows", get(narrative::list_foreshadows).post(narrative::create_foreshadow))
@@ -124,6 +125,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agent/chat", post(agent::chat))
         .route("/api/v1/agent/tool/execute", post(agent::execute_tool))
         .route("/api/v1/agent/prompt", get(agent::get_prompt).put(agent::save_prompt).delete(agent::delete_prompt))
+        // 引导推进（用户点按钮触发，agent 不应主动调）
+        .route("/api/v1/agent/guide/confirm", post(agent::confirm_guide_step))
         .with_state(state)
         .layer(cors)
 }

@@ -1,6 +1,6 @@
 // Story / Narrative API
 import { api } from './client'
-import type { NarrativeNode, Storyline, Foreshadowing } from '@/types'
+import type { NarrativeNode, Storyline, StorylineRelation, Foreshadowing } from '@/types'
 
 export const narrativeApi = {
   listNodes: (projectId: string) => api.get<NarrativeNode[]>(`/projects/${projectId}/narrative`),
@@ -15,6 +15,8 @@ export const storylineApi = {
   create: (projectId: string, data: Partial<Storyline>) => api.post<Storyline>(`/projects/${projectId}/storylines`, data),
   update: (id: string, data: Partial<Storyline>) => api.put<Storyline>(`/storylines/${id}`, data),
   delete: (id: string) => api.delete<void>(`/storylines/${id}`),
+  /** 列出所有挂载关系（parent → child） */
+  listRelations: (projectId: string) => api.get<StorylineRelation[]>(`/projects/${projectId}/storyline-relations`),
 }
 
 export const foreshadowApi = {

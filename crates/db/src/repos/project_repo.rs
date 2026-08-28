@@ -43,6 +43,7 @@ impl ProjectRepo {
             language: None,
             world_setting: None,
             system_setting: None,
+            premise: None,
             default_model: None,
             default_style: None,
             default_params: serde_json::json!({}),
@@ -55,7 +56,7 @@ impl ProjectRepo {
 
     pub async fn get_by_id(&self, id: Uuid) -> Result<Option<Project>> {
         let row = sqlx::query_as::<_, ProjectRow>(
-            "SELECT id, name, description, language, world_setting, system_setting, \
+            "SELECT id, name, description, language, world_setting, system_setting, premise, \
              default_model, default_style, default_params, config, status, created_at, updated_at \
              FROM project WHERE id = $1",
         )
@@ -69,7 +70,7 @@ impl ProjectRepo {
 
     pub async fn list_all(&self) -> Result<Vec<Project>> {
         let rows = sqlx::query_as::<_, ProjectRow>(
-            "SELECT id, name, description, language, world_setting, system_setting, \
+            "SELECT id, name, description, language, world_setting, system_setting, premise, \
              default_model, default_style, default_params, config, status, created_at, updated_at \
              FROM project ORDER BY created_at DESC",
         )
@@ -118,6 +119,7 @@ struct ProjectRow {
     language: Option<String>,
     world_setting: Option<String>,
     system_setting: Option<String>,
+    premise: Option<String>,
     default_model: Option<String>,
     default_style: Option<String>,
     default_params: Option<serde_json::Value>,
@@ -136,6 +138,7 @@ impl From<ProjectRow> for Project {
             language: r.language,
             world_setting: r.world_setting,
             system_setting: r.system_setting,
+            premise: r.premise,
             default_model: r.default_model,
             default_style: r.default_style,
             default_params: r.default_params.unwrap_or_default(),

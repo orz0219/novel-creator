@@ -5,7 +5,6 @@
       <header class="chat-header">
         <div class="chat-id">
           <div class="chat-title">{{ projectName || '创作引导' }}</div>
-          <div class="chat-step" v-if="currentStep">{{ currentStep }}</div>
         </div>
         <div class="chat-status">
           <span class="dot" :class="statusDot"></span>{{ statusText }}
@@ -17,6 +16,13 @@
           </button>
         </div>
       </header>
+
+      <!-- 6 步进度条 -->
+      <StepIndicator
+        :current="guideStep"
+        :steps="guideSteps"
+        :loading="store.status === 'streaming'"
+      />
 
       <div class="messages" ref="messagesEl">
         <div class="msg-col">
@@ -37,9 +43,23 @@
             :role="m.role"
             :content="m.content"
             :streaming="m.streaming"
+            :formatted="m.formatted"
             @select="onSelect"
             @retry="onRetry"
+            @format="onFormat(i)"
           />
+
+          <!-- Thinking 指示器：用户发完消息 + LLM 还没返回第一 token 时显示
+               越简单越好：一个小气泡 + 三个跳动的点 -->
+          <div v-if="store.thinking" class="thinking-bubble">
+            <span class="thinking-avatar">导</span>
+            <div class="thinking-content">
+              <span class="thinking-text">正在思考</span>
+              <span class="thinking-dots">
+                <span></span><span></span><span></span>
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -53,14 +73,24 @@
           placeholder="描述你的创作想法，Enter 发送，Shift+Enter 换行"
           @keydown="onKeydown"
         ></textarea>
-        <button
-          class="send-btn"
-          :class="{ primary: canSend }"
-          :disabled="!canSend"
-          @click="send(inputText)"
-        >
-          <Send :size="16" /><span>发送</span>
-        </button>
+        <div class="composer-toolbar">
+          <ConfirmAdvance
+            class="composer-advance"
+            :current-title="currentGuideTitle"
+            :next-title="nextGuideTitle"
+            :project-id="projectId"
+            :flesh-steps="fleshStatuses"
+            @advanced="onAdvanced"
+          />
+          <button
+            class="send-btn"
+            :class="{ primary: canSend }"
+            :disabled="!canSend"
+            @click="send(inputText)"
+          >
+            <Send :size="16" /><span>发送</span>
+          </button>
+        </div>
       </div>
     </section>
 
@@ -111,8 +141,13 @@ import {
 import { useAgentStore } from '@/stores/agent'
 import { useProjectStore } from '@/stores/project'
 import type { AgentSession } from '@/api/agent'
+import { characterApi } from '@/api/character'
+import { locationApi } from '@/api/location'
+import { worldApi } from '@/api/world'
 import ChatMessage from '@/components/agent/ChatMessage.vue'
 import PromptEditor from '@/components/agent/PromptEditor.vue'
+import StepIndicator from '@/components/agent/StepIndicator.vue'
+import ConfirmAdvance, { type FleshStep } from '@/components/agent/ConfirmAdvance.vue'
 
 const store = useAgentStore()
 const projectStore = useProjectStore()
@@ -136,6 +171,110 @@ const suggestions = [
 const projectName = computed(() => projectStore.currentProject?.name ?? '')
 const activeSession = computed(() => store.sessions.find((s) => s.id === store.sessionId))
 const currentStep = computed(() => activeSession.value?.current_step ?? '')
+
+// ---------- 10 步引导（5 骨架 + 4 血肉 + 1 占位） ----------
+const guideSteps = [
+  // 骨架
+  { key: 'premise',         title: '脑洞',   group: 'skeleton' as const },
+  { key: 'world',           title: '世界观', group: 'skeleton' as const },
+  // 血肉
+  { key: 'world.map',       title: '地图',   group: 'flesh' as const },
+  { key: 'world.factions',  title: '势力',   group: 'flesh' as const },
+  { key: 'world.items',     title: '道具',   group: 'flesh' as const },
+  // 骨架
+  { key: 'golden_finger',   title: '金手指', group: 'skeleton' as const },
+  { key: 'protagonist',     title: '主角',   group: 'skeleton' as const },
+  // 血肉
+  { key: 'characters.supporting', title: '配角', group: 'flesh' as const },
+  // 骨架
+  { key: 'storylines.main',      title: '故事线', group: 'skeleton' as const },
+  // 血肉
+  { key: 'storylines.branches',   title: '副线',   group: 'flesh' as const },
+  // 骨架
+  { key: 'beats',                title: '细纲',   group: 'skeleton' as const },
+]
+// 当前阶段：优先读 project.config.current_step（项目级，多 session 共享）；
+// 兜底用 session.current_step；都没有则默认 'premise'。
+const guideStep = computed(() => {
+  // 优先：project.config.current_step（项目级，多 session 共享）
+  const fromConfig = (projectStore.currentProject?.config as any)?.current_step as string | undefined
+  if (fromConfig) return fromConfig
+  // 兜底：session.current_step——但后端默认是中文'项目初始化'，
+  // 不在 guideSteps 里，所以只在它能匹配时用
+  if (currentStep.value && guideSteps.some((s) => s.key === currentStep.value)) {
+    return currentStep.value
+  }
+  return 'premise'
+})
+const guideIndex = computed(() => guideSteps.findIndex((s) => s.key === guideStep.value))
+const currentGuideTitle = computed(
+  () => guideSteps[guideIndex.value]?.title ?? guideStep.value,
+)
+const nextGuideTitle = computed(
+  () => guideSteps[guideIndex.value + 1]?.title ?? '',
+)
+
+// ---------- 血肉 step 完成度（驱动小选择器） ----------
+const fleshStatuses = ref<FleshStep[]>([
+  { key: 'world.map',              title: '地图', done: false },
+  { key: 'world.factions',         title: '势力', done: false },
+  { key: 'world.items',            title: '道具', done: false },
+  { key: 'characters.supporting',  title: '配角', done: false },
+])
+
+/** 从后端拉 4 类血肉的实际数量，更新 fleshStatuses.done。
+ *  注：4 个 API 失败时静默 catch——某些 entity 端点可能临时 500
+ *  （如 /entities?type=* 偶发 500 已知），不能因此阻塞小选择器渲染；
+ *  失败则保持上次状态（不更新 done）。
+ */
+async function refreshFleshStatus() {
+  const pid = projectId.value
+  if (!pid) return
+  // 拿主 world_id
+  let wid: string | null = null
+  try {
+    const world = await worldApi.get(pid)
+    if (world) wid = world.id
+  } catch {
+    return // world 拿不到就不更新
+  }
+  if (!wid) return
+
+  // 并行 4 个查询——任一失败不阻塞其它
+  const [locations, factions, items, characters] = await Promise.all([
+    locationApi.list(wid).catch(() => null),
+    worldApi.listEntities(wid, 'Faction').catch(() => null),
+    worldApi.listEntities(wid, 'Item').catch(() => null),
+    characterApi.list(wid).catch(() => null),
+  ])
+
+  // 哪个查到了就更新，没查到的保留旧值
+  const cur = fleshStatuses.value
+  fleshStatuses.value = [
+    {
+      key: 'world.map',
+      title: '地图',
+      done: locations != null ? locations.length > 0 : cur[0].done,
+    },
+    {
+      key: 'world.factions',
+      title: '势力',
+      done: factions != null ? factions.length > 0 : cur[1].done,
+    },
+    {
+      key: 'world.items',
+      title: '道具',
+      done: items != null ? items.length > 0 : cur[2].done,
+    },
+    {
+      key: 'characters.supporting',
+      title: '配角',
+      done: characters != null ? Math.max(0, characters.length - 1) > 0 : cur[3].done,
+    },
+  ]
+}
+
+// 触发条件已内联到 ConfirmAdvance 中（按血肉完成度 + store 状态自行判断）
 
 const statusText = computed(() => {
   if (store.status === 'streaming') return '生成中'
@@ -217,6 +356,31 @@ async function onRetry(payload: { name: string; input: unknown }) {
   }
 }
 
+// 推进成功：刷新项目 + 会话，让 step indicator 反映新阶段
+async function onAdvanced() {
+  // 重拉项目（project.config.current_step 已变更）
+  try {
+    await projectStore.fetchProject(projectId.value)
+  } catch {
+    // ignore
+  }
+  if (store.sessionId) {
+    try {
+      await store.restoreSession(store.sessionId)
+    } catch {
+      // ignore
+    }
+  }
+  await store.loadSessions(projectId.value)
+  // 血肉完成度也要刷新（推进后可能新建了 entity）
+  void refreshFleshStatus()
+}
+
+// 用户手动点 "排版" 按钮：把第 i 条消息标 formatted=true
+function onFormat(index: number) {
+  store.markFormatted(index)
+}
+
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -249,6 +413,8 @@ async function activateProject(pid: string) {
       // 后端不可用时由 error 状态展示
     }
   }
+  // 拉血肉完成度（小选择器驱动）
+  void refreshFleshStatus()
   scrollToBottom()
 }
 
@@ -400,13 +566,77 @@ watch(
   font-size: var(--text-xs);
 }
 
-.composer { display: flex; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-top: 1px solid var(--border-default); background: var(--bg-panel); align-items: flex-end; }
+.composer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border-default);
+  background: var(--bg-panel);
+}
+
+/* 工具栏：左推进 / 右发送，对称 */
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.composer-advance { display: inline-flex; }
+
+/* Thinking 指示器（LLM 还没返回第一 token 时） */
+.thinking-bubble {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: 8px 0;
+  opacity: 0.7;
+}
+.thinking-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--color-primary-subtle);
+  color: var(--color-primary-text);
+  border: 1px solid var(--border-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-serif);
+  font-weight: 700;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.thinking-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+.thinking-dots { display: inline-flex; gap: 2px; }
+.thinking-dots span {
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes thinking-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
 .composer-input {
-  flex: 1; padding: var(--space-3);
+  width: 100%;
+  padding: var(--space-3);
   background: var(--bg-base); border: 1px solid var(--border-default);
   border-radius: var(--radius-md); color: var(--text-primary);
   font-size: var(--text-sm); font-family: inherit; outline: none; resize: none;
   transition: border-color var(--transition-fast); line-height: var(--leading-normal);
+  box-sizing: border-box;
 }
 .composer-input:focus { border-color: var(--color-primary); }
 .send-btn {

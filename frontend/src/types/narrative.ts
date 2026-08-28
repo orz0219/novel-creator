@@ -86,6 +86,10 @@ export interface BeatAttributes {
 // ---- Storyline ----
 export type StorylineStatus = 'Planned' | 'Active' | 'Resolved' | 'Abandoned'
 export type StorylineImportance = 'Main' | 'Important' | 'Normal' | 'Minor'
+/** 明/暗线 */
+export type StorylineTone = 'light' | 'dark'
+/** 可见性（暗线一般 hidden） */
+export type StorylineVisibility = 'visible' | 'hidden'
 
 export interface Storyline extends Timestamps {
   id: string
@@ -94,8 +98,19 @@ export interface Storyline extends Timestamps {
   description?: string
   status: StorylineStatus
   importance: StorylineImportance
+  tone: StorylineTone
+  visibility: StorylineVisibility
   created_volume_id?: string
   resolved_volume_id?: string
+}
+
+/** 副线挂载关系：child 挂在 parent 下 */
+export interface StorylineRelation {
+  id: string
+  project_id: string
+  parent_id: string
+  child_id: string
+  created_at: string
 }
 
 // ---- Foreshadowing ----

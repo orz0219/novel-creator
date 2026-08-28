@@ -89,6 +89,7 @@ impl CharacterProfileRepo {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)] // 部分字段保留以便后续扩展 / SQL 完整性
 struct CharacterProfileRow {
     id: Uuid,
     entity_id: Uuid,
@@ -319,6 +320,7 @@ impl CharacterDriveRepo {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)] // 字段保留以便后续扩展（entity_id/created_at/updated_at 暂时未读）
 struct CharacterDriveRow {
     id: Uuid,
     entity_id: Uuid,
@@ -647,6 +649,7 @@ impl CharacterCapabilityRepo {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)] // 字段保留以便后续扩展
 struct CharacterCapabilityRow {
     id: Uuid,
     entity_id: Uuid,
@@ -731,6 +734,7 @@ impl CharacterArcRepo {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)] // 字段保留以便后续扩展
 struct CharacterArcRow {
     id: Uuid,
     entity_id: Uuid,
@@ -824,6 +828,7 @@ impl CharacterExtensionRepo {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)] // 字段保留以便后续扩展
 struct CharacterExtensionRow {
     id: Uuid,
     entity_id: Uuid,

@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     }
 
     // Seed entity types (idempotent using ON CONFLICT)
-    let entity_types = ["Character", "Location", "Faction", "Item", "Creature", "Organization"];
+    let entity_types = ["Character", "Location", "Faction", "Item", "Creature", "Organization", "golden_finger"];
     for et in &entity_types {
         let result = sqlx::query(
             "INSERT INTO entity_type (id, name, description) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING"

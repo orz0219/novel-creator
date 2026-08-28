@@ -48,31 +48,63 @@ impl StorylineService {
         self.repo.list_storylines(project_id).await
     }
 
-    /// 创建剧情线（默认 status = Planned）。
+    /// 创建剧情线（含可选挂载：parent_id 不为空则建挂载关系）
     pub async fn create_storyline(
         &self,
         project_id: Uuid,
         name: &str,
         description: Option<&str>,
         importance: &str,
+        tone: &str,
+        visibility: &str,
+        parent_id: Option<Uuid>,
     ) -> Result<Value> {
+        // 业务规则：每项目 1 条 Main 主线（强约束，DB 不加 UNIQUE 保留灵活）
+        if importance == "Main" {
+            let existing = self
+                .repo
+                .list_storylines(project_id)
+                .await?
+                .into_iter()
+                .any(|s| {
+                    s.get("importance")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s == "Main")
+                        .unwrap_or(false)
+                });
+            if existing {
+                anyhow::bail!("该项目已存在 Main 主线，每项目只能有 1 条主线");
+            }
+        }
         self.repo
-            .create_storyline(project_id, name, description, importance)
+            .create_storyline(project_id, name, description, importance, tone, visibility, parent_id)
             .await
     }
 
-    /// 更新剧情线名称/描述。
+    /// 更新剧情线（含 tone/visibility）
     pub async fn update_storyline(
         &self,
         id: Uuid,
         name: &str,
         description: Option<&str>,
+        tone: Option<&str>,
+        visibility: Option<&str>,
     ) -> Result<Value> {
-        self.repo.update_storyline(id, name, description).await
+        self.repo
+            .update_storyline(id, name, description, tone, visibility)
+            .await
     }
 
     /// 删除剧情线（按 id）。
     pub async fn delete_storyline(&self, id: Uuid) -> Result<()> {
         self.repo.delete_storyline(id).await
+    }
+
+    /// 列出所有挂载关系
+    pub async fn list_storyline_relations(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<Value>> {
+        self.repo.list_storyline_relations(project_id).await
     }
 }

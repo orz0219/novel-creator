@@ -22,6 +22,7 @@ use application::foreshadow_service::ForeshadowService;
 use application::history_service::HistoryService;
 use application::mutation::MutationCommitter;
 use application::narrative_service::NarrativeService;
+use application::project_service::ProjectService;
 use application::rule_service::RuleService;
 use application::snapshot_service::SnapshotService;
 use application::storyline_service::StorylineService;
@@ -29,7 +30,7 @@ use application::world_service::WorldService;
 use async_trait::async_trait;
 use db::application_ports::{
     DbEntityRepositoryPort, DbForeshadowRepositoryPort, DbHistoryRepositoryPort, DbNarrativeRepositoryPort,
-    DbNarrativeStateWritePort, DbRuleRepositoryPort, DbSnapshotRepositoryPort,
+    DbNarrativeStateWritePort, DbProjectRepositoryPort, DbRuleRepositoryPort, DbSnapshotRepositoryPort,
     DbStorylineRepositoryPort, DbWorldRepositoryPort,
 };
 use db::mutation_committer::DbMutationCommitter;
@@ -479,7 +480,12 @@ fn storyline_name(a: StorylineAction) -> &'static str {
 
 fn storyline_description(a: StorylineAction) -> String {
     match a {
-        StorylineAction::CreateStoryline => "创建跨卷剧情线（默认状态 Planned）。".into(),
+        StorylineAction::CreateStoryline => "创建跨卷剧情线（默认 status=Planned）。\n\
+            importance='Main' = 主线（每项目 1 条）；\n\
+            importance='Normal'/'Important'/'Minor' = 副线；\n\
+            tone='light' = 明线（用户可见）；tone='dark' = 暗线（伏笔/钩子）；\n\
+            visibility='hidden' 一般配合 tone='dark' 用；\n\
+            parent_id=挂到某条 storyline 下，副线必须挂到主线或其他副线。".into(),
         StorylineAction::ReviseStoryline => "修改剧情线名称 / 描述。这会修改已有产物。".into(),
         StorylineAction::RetireStoryline => "删除一条剧情线。删除前请先用 list_storylines 确认目标 id。".into(),
         StorylineAction::ListStorylines => "列出某项目的全部剧情线，用于检索上下文。".into(),
@@ -493,7 +499,10 @@ fn storyline_schema(a: StorylineAction) -> Value {
             "properties": {
                 "name": { "type": "string" },
                 "description": { "type": "string" },
-                "importance": { "type": "string", "description": "可选：Normal / High / Critical" }
+                "importance": { "type": "string", "description": "可选：Main(主线) / Important / Normal / Minor" },
+                "tone": { "type": "string", "description": "明/暗线：light(明) / dark(暗)" },
+                "visibility": { "type": "string", "description": "可见性：visible / hidden（暗线一般 hidden）" },
+                "parent_id": { "type": "string", "description": "挂载到哪条 storyline 下（None 表示独立）" }
             },
             "required": ["name"]
         }),
@@ -536,15 +545,36 @@ impl AgentTool for StorylineTool {
             StorylineAction::CreateStoryline => {
                 let project_id = parse_uuid(&input, "project_id")?;
                 let name = opt_str(&input, "name").ok_or_else(|| anyhow::anyhow!("name 缺失"))?;
+                let parent_uuid = match input.get("parent_id").and_then(|v| v.as_str()) {
+                    Some(s) if !s.is_empty() => Some(Uuid::parse_str(s).map_err(|e| anyhow::anyhow!("parent_id 非法: {}", e))?),
+                    _ => None,
+                };
                 let s = self
                     .service
-                    .create_storyline(project_id, name, opt_str(&input, "description"), opt_str(&input, "importance").unwrap_or("Normal"))
+                    .create_storyline(
+                        project_id,
+                        name,
+                        opt_str(&input, "description"),
+                        opt_str(&input, "importance").unwrap_or("Normal"),
+                        opt_str(&input, "tone").unwrap_or("light"),
+                        opt_str(&input, "visibility").unwrap_or("visible"),
+                        parent_uuid,
+                    )
                     .await?;
                 Ok(json!({ "ok": true, "action": "create_storyline", "data": s }))
             }
             StorylineAction::ReviseStoryline => {
                 let id = parse_uuid(&input, "id")?;
-                let s = self.service.update_storyline(id, opt_str(&input, "name").ok_or_else(|| anyhow::anyhow!("name 缺失"))?, opt_str(&input, "description")).await?;
+                let s = self
+                    .service
+                    .update_storyline(
+                        id,
+                        opt_str(&input, "name").ok_or_else(|| anyhow::anyhow!("name 缺失"))?,
+                        opt_str(&input, "description"),
+                        opt_str(&input, "tone"),
+                        opt_str(&input, "visibility"),
+                    )
+                    .await?;
                 Ok(json!({ "ok": true, "action": "revise_storyline", "data": s }))
             }
             StorylineAction::RetireStoryline => {
@@ -1031,6 +1061,138 @@ impl AgentTool for WorldTool {
 }
 
 // ============================================================
+// Project 聚合（项目级元数据：premise 等）
+// ============================================================
+//
+// premise 是项目级元数据，与 genre 同性质；存放在 `project` 表而非 `world.config`，
+// 原因：premise 在 world 尚未存在时就需要有，且未来多 world 共享同一 premise。
+//
+// 不走 MutationCommitter（项目元数据不在 Canon 概念内），直接走 ProjectService。
+// 见 docs/ROADMAP.md「项目级脑洞字段」设计与 P2 工具清单。
+
+#[derive(Clone, Copy)]
+pub enum ProjectAction {
+    /// 读取项目（含 premise）。用以让 Agent 在重载对话时取回上次的脑洞版本。
+    GetProject,
+    /// 修改项目元数据（name / description / premise）。premise 是脑洞写入点。
+    UpdateProject,
+    /// 列出项目（用于跨项目导航；本工具主要服务于 Agent 提示词中"当前项目"上下文）。
+    ListProjects,
+}
+
+pub struct ProjectTool {
+    action: ProjectAction,
+    service: Arc<ProjectService>,
+}
+
+impl ProjectTool {
+    pub fn new(action: ProjectAction, service: Arc<ProjectService>) -> Self {
+        Self { action, service }
+    }
+}
+
+pub fn register_project_tools(registry: &ToolRegistry, service: Arc<ProjectService>) {
+    for a in [
+        ProjectAction::GetProject,
+        ProjectAction::UpdateProject,
+        ProjectAction::ListProjects,
+    ] {
+        registry.register(Arc::new(ProjectTool::new(a, service.clone())));
+    }
+}
+
+fn project_name(a: ProjectAction) -> &'static str {
+    match a {
+        ProjectAction::GetProject => "get_project",
+        ProjectAction::UpdateProject => "update_project",
+        ProjectAction::ListProjects => "list_projects",
+    }
+}
+
+fn project_description(a: ProjectAction) -> String {
+    match a {
+        ProjectAction::GetProject => "读取项目元数据（含 premise / 脑洞）。".into(),
+        ProjectAction::UpdateProject => "修改项目元数据。premise 字段是故事脑洞/前提的写入点，\
+            用于在用户与 Agent 持续沟通打磨后由用户确认落库；写入后作为后续所有世界观、\
+            角色、叙事生成的最强 prompt 约束。注意：premise 应在用户明确同意后才写入，\
+            Agent 不要主动覆盖用户已确认的脑洞。"
+            .into(),
+        ProjectAction::ListProjects => "列出所有项目（含 premise）。".into(),
+    }
+}
+
+fn project_schema(a: ProjectAction) -> Value {
+    match a {
+        ProjectAction::GetProject => json!({
+            "type": "object",
+            "properties": {
+                "project_id": { "type": "string" }
+            },
+            "required": ["project_id"]
+        }),
+        ProjectAction::UpdateProject => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "description": { "type": "string" },
+                "premise": { "type": "string" }
+            },
+            "required": []
+        }),
+        ProjectAction::ListProjects => json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    }
+}
+
+#[async_trait]
+impl AgentTool for ProjectTool {
+    fn name(&self) -> String {
+        project_name(self.action).to_string()
+    }
+    fn description(&self) -> String {
+        project_description(self.action)
+    }
+    fn input_schema(&self) -> Value {
+        project_schema(self.action)
+    }
+
+    async fn execute(&self, input: Value) -> Result<Value> {
+        match self.action {
+            ProjectAction::GetProject => {
+                let project_id = parse_uuid(&input, "project_id")?;
+                let p = self
+                    .service
+                    .get_project(project_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("项目不存在: {}", project_id))?;
+                Ok(json!({ "ok": true, "action": "get_project", "data": p }))
+            }
+            ProjectAction::UpdateProject => {
+                let project_id = parse_uuid(&input, "project_id")?;
+                let p = self
+                    .service
+                    .update_project(
+                        project_id,
+                        opt_str(&input, "name"),
+                        opt_str(&input, "description"),
+                        None,
+                        opt_str(&input, "premise"),
+                    )
+                    .await?;
+                Ok(json!({ "ok": true, "action": "update_project", "data": p }))
+            }
+            ProjectAction::ListProjects => {
+                let ps = self.service.list_projects().await?;
+                Ok(json!({ "ok": true, "action": "list_projects", "data": ps }))
+            }
+        }
+    }
+}
+
+// ============================================================
 // History 聚合（仅创建与读取；历史不可篡改，不提供修改 / 删除）
 // ============================================================
 
@@ -1201,8 +1363,247 @@ pub fn register_all_domain_tools(registry: &ToolRegistry, pool: &PgPool) {
     register_snapshot_tools(registry, snapshot);
 
     let world = Arc::new(WorldService::new(Arc::new(DbWorldRepositoryPort::new(pool.clone()))));
-    register_world_tools(registry, world);
+    register_world_tools(registry, world.clone());
+
+    let project = Arc::new(ProjectService::new(
+        Arc::new(DbProjectRepositoryPort::new(pool.clone())),
+        world,
+    ));
+    register_project_tools(registry, project);
 
     let history = Arc::new(HistoryService::new(Arc::new(DbHistoryRepositoryPort::new(pool.clone()))));
     register_history_tools(registry, history);
+
+    // 引导推进工具（confirm_step）：纯 pool + agent::guide::validate_step，
+    // 不依赖任何 service（避免把"推进阶段"耦合到任何具体业务层）。
+    register_guide_tools(registry, pool.clone());
+}
+
+// ============================================================
+// Guide（引导推进）工具
+// ============================================================
+//
+// 单一动作 confirm_step：用户在前端点"确认推进"按钮触发（不是 agent 调用）。
+// 工具内部从 DB 查 MinCompleteSnapshot → 调 agent::guide::validate_step
+// → 校验通过则把 project.config.current_step 推进到 next；失败则返回结构化报告。
+//
+// 这个工具是「引导阶段」的事实落点；与所有 service 解耦以避免引入循环依赖。
+
+use agent::guide::{validate_step, MinCompleteSnapshot, ValidationReport};
+use anyhow::Context;
+
+pub struct GuideTool {
+    pool: PgPool,
+}
+
+impl GuideTool {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+pub fn register_guide_tools(registry: &ToolRegistry, pool: PgPool) {
+    registry.register(Arc::new(GuideTool::new(pool)));
+}
+
+#[async_trait]
+impl AgentTool for GuideTool {
+    fn name(&self) -> String {
+        "confirm_step".to_string()
+    }
+    fn description(&self) -> String {
+        "【仅前端用户点按钮时触发，agent 永远不要主动调】\
+         校验当前引导步骤（或指定目标步骤）的最小完整度：满足则把 project.config.current_step \
+         推进到目标步骤，不满足则返回结构化错误（包含还差什么）。\n\
+         target_step 可选：不传则推进到当前 step 的 next（默认行为）；\
+         传入则跳转到指定 step（用于血肉小选择器：用户在血肉 step 之间自由选择下一个）。"
+            .into()
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": { "type": "string" },
+                "target_step": { "type": "string", "description": "可选：跳转到指定 step key（血肉之间自由顺序用）" }
+            },
+            "required": ["project_id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let project_id = parse_uuid(&input, "project_id")?;
+
+        // 1. 取 project（含 premise、config.current_step）
+        let project_row: Option<(String, Option<String>, Value)> = sqlx::query_as(
+            "SELECT id::text, premise, COALESCE(config, '{}'::jsonb) FROM project WHERE id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to load project")?;
+        let (pid, premise, config) = project_row.ok_or_else(|| {
+            anyhow::anyhow!("项目不存在: {}", project_id)
+        })?;
+        let _ = pid;
+
+        // 2. 拿主 world
+        let world_row: Option<(Uuid, Option<String>)> = sqlx::query_as(
+            "SELECT id, description FROM world WHERE project_id = $1 AND is_main = true LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to load main world")?;
+
+        // 3. 组装 snapshot
+        let mut snapshot = MinCompleteSnapshot::default();
+        snapshot.project_premise = premise;
+
+        if let Some((world_id, world_desc)) = world_row {
+            snapshot.world_description = world_desc;
+            // 查 canon_rule 条数（canon_rule 表无 status 列，按物理存在计数）
+            let (rule_count,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM canon_rule WHERE world_id = $1",
+            )
+            .bind(world_id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or((0,));
+            snapshot.world_rule_entity_count = rule_count;
+        }
+
+        // 4. 查 entity 数量（按 entity_type.name 筛）
+        //    5 步工作流需要 5 类：Location / Faction / Item / Character / golden_finger
+        for (kind_name, counter) in &[
+            ("Location", "location_entity_count"),
+            ("Faction", "faction_entity_count"),
+            ("Item", "item_entity_count"),
+            ("Character", "character_entity_count"),
+            ("golden_finger", "golden_finger_entity_count"),
+        ] {
+            let (n,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM entity e \
+                 JOIN entity_type et ON et.id = e.entity_type_id \
+                 WHERE e.project_id = $1 AND et.name = $2 \
+                 AND e.status != 'Deleted'",
+            )
+            .bind(project_id)
+            .bind(*kind_name)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or((0,));
+            match *counter {
+                "location_entity_count" => snapshot.location_entity_count = n,
+                "faction_entity_count" => snapshot.faction_entity_count = n,
+                "item_entity_count" => snapshot.item_entity_count = n,
+                "character_entity_count" => snapshot.character_entity_count = n,
+                "golden_finger_entity_count" => snapshot.golden_finger_entity_count = n,
+                _ => {}
+            }
+        }
+
+        // 5. 查 golden_finger 是否有 relation 到主角（possesses 关系）
+        //    简化：只要存在 任意 relation 连接 golden_finger entity 和 character entity 即认为"已连"
+        let (has_rel,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM relation r \
+             JOIN entity src ON src.id = r.source_entity_id \
+             JOIN entity_type src_et ON src_et.id = src.entity_type_id \
+             JOIN entity dst ON dst.id = r.target_entity_id \
+             JOIN entity_type dst_et ON dst_et.id = dst.entity_type_id \
+             WHERE r.project_id = $1 \
+             AND ((src_et.name = 'golden_finger' AND dst_et.name = 'Character') \
+               OR (src_et.name = 'Character' AND dst_et.name = 'golden_finger'))",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or((0,));
+        snapshot.golden_finger_has_relation_to_protagonist = has_rel > 0;
+
+        // 6. character_entity_count 已在步骤 4 填好（与 Location/Faction/Item 一起按 entity_type 查）
+        //    这里不需要再查。注意：'character_entity_count' 包含主角 + 所有配角。
+
+        // 7. 查 storylines（storyline 用 importance='Main' 区分主线；
+        //    状态不过滤——新创建的 storyline 默认 Planned，物理存在即视为有产物）
+        let storyline_rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT id::text, name, COALESCE(importance, 'Normal') FROM storyline \
+             WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        snapshot.storyline_total_count = storyline_rows.len() as i64;
+        // 主线判定：importance = 'Main'（业务约定；非 Main 即副线）
+        let main_count = storyline_rows
+            .iter()
+            .filter(|(_, _, importance)| importance == "Main")
+            .count() as i64;
+        snapshot.main_storyline_count = main_count;
+        // 副线数 = 总数 - 主线数
+        snapshot.sub_storyline_count = (snapshot.storyline_total_count - main_count).max(0);
+
+        // 8. 查挂载数（副线中 parent_id 非空 + 父节点存在 = "已挂载"）
+        let attached_count: i64 = sqlx::query_as(
+            "SELECT COUNT(*) FROM storyline_relation r \
+             WHERE r.project_id = $1 \
+             AND EXISTS (SELECT 1 FROM storyline c WHERE c.id = r.child_id AND c.importance != 'Main')",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await
+        .map(|(n,): (i64,)| n)
+        .unwrap_or(0);
+        snapshot.attached_storyline_count = attached_count;
+
+        // 8. 决定 current_step（优先 config.current_step，否则 premise 状态决定）
+        let stored_step = config
+            .get("current_step")
+            .and_then(|v| v.as_str())
+            .unwrap_or(agent::guide::INITIAL_STEP)
+            .to_string();
+
+        // 可选 target_step：用户从血肉小选择器点过来时传入；
+        // 不传则按 stored_step 校验 + 推进到 next
+        let target_step = input
+            .get("target_step")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // 校验目标 step：默认是当前 step；带 target_step 时跳到目标 step 校验
+        let step_to_validate = target_step.clone().unwrap_or_else(|| stored_step.clone());
+
+        // 9. 校验
+        let mut report: ValidationReport = validate_step(&step_to_validate, &snapshot);
+
+        // 10. 通过则推进
+        if report.passed {
+            // 推进目标：默认 = report.next_step（用当前 step 算的）；带 target_step = target_step 本身
+            let new_step = if target_step.is_some() {
+                target_step.as_ref().unwrap().clone()
+            } else {
+                report.next_step.clone().unwrap_or_default()
+            };
+
+            if !new_step.is_empty() {
+                // 用 jsonb_set 写入新 step（保留 config 其他键）
+                sqlx::query(
+                    "UPDATE project SET config = jsonb_set(COALESCE(config, '{}'::jsonb), '{current_step}', to_jsonb($1::text)), updated_at = NOW() WHERE id = $2",
+                )
+                .bind(&new_step)
+                .bind(project_id)
+                .execute(&self.pool)
+                .await
+                .context("Failed to update project.config.current_step")?;
+                // 修正 report 的 current_step / next_step 让前端看到正确的状态
+                report.current_step = new_step.clone();
+                report.next_step = agent::guide::next_step_key(&new_step).map(|s| s.to_string());
+                if let Some(next) = &report.next_step {
+                    report.next_title = agent::guide::find_step(next).map(|s| s.title.to_string());
+                }
+            }
+        }
+
+        Ok(serde_json::to_value(&report)?)
+    }
 }

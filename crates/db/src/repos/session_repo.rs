@@ -174,6 +174,7 @@ impl SessionRow {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)] // id/seq 暂时未读，保留以便后续 audit
 struct MessageRow {
     id: Uuid,
     session_id: Uuid,

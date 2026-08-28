@@ -35,6 +35,8 @@ pub struct CreateProjectInput {
 pub struct UpdateProjectInput {
     pub name: Option<String>,
     pub description: Option<String>,
+    /// 故事脑洞/前提（Agent 引导用户确认后由工具写入）。
+    pub premise: Option<String>,
 }
 
 pub async fn list_projects(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
@@ -61,7 +63,13 @@ pub async fn create_project(State(state): State<AppState>, Json(input): Json<Cre
 pub async fn update_project(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<UpdateProjectInput>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
     let project = service(&state)
-        .update_project(id, input.name.as_deref(), input.description.as_deref(), None)
+        .update_project(
+            id,
+            input.name.as_deref(),
+            input.description.as_deref(),
+            None,
+            input.premise.as_deref(),
+        )
         .await?;
     Ok(Json(project))
 }

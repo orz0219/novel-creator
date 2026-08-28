@@ -604,9 +604,9 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
     }
 
     async fn list_storylines(&self, project_id: Uuid) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, Option<String>, String, String, String, String)> =
+        let rows: Vec<(String, String, Option<String>, String, String, String, String, String, String)> =
             sqlx::query_as(
-                "SELECT id::text, name, description, status, importance, created_at::text, updated_at::text FROM storyline WHERE project_id=$1",
+                "SELECT id::text, name, description, status, importance, COALESCE(tone,'light'), COALESCE(visibility,'visible'), created_at::text, updated_at::text FROM storyline WHERE project_id=$1 ORDER BY importance, name",
             )
             .bind(project_id)
             .fetch_all(&self.pool)
@@ -614,10 +614,11 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
             .context("Failed to list storylines")?;
         Ok(rows
             .into_iter()
-            .map(|(id, name, desc, st, imp, cr, up)| {
+            .map(|(id, name, desc, st, imp, tone, vis, cr, up)| {
                 serde_json::json!({
                     "id": id, "project_id": project_id.to_string(), "name": name,
                     "description": desc, "status": st, "importance": imp,
+                    "tone": tone, "visibility": vis,
                     "created_at": cr, "updated_at": up
                 })
             })
@@ -630,23 +631,53 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
         name: &str,
         description: Option<&str>,
         importance: &str,
+        tone: &str,
+        visibility: &str,
+        parent_id: Option<Uuid>,
     ) -> Result<Value> {
+        // 业务规则：
+        //   - Main 主线必须 parent_id=None
+        //   - Normal 副线 parent_id 可选（None 表示独立于任何 story line）
+        //   - DB 唯一约束：UNIQUE(parent_id, child_id) 在 storyline_relation 表上
+        if importance == "Main" && parent_id.is_some() {
+            anyhow::bail!("Main 主线不能挂到其他 story line 下");
+        }
         let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO storyline (id, project_id, name, description, status, importance) VALUES ($1,$2,$3,$4,'Planned',$5)",
+            "INSERT INTO storyline (id, project_id, name, description, status, importance, tone, visibility) VALUES ($1,$2,$3,$4,'Planned',$5,$6,$7)",
         )
         .bind(&id)
         .bind(project_id)
         .bind(name)
         .bind(description)
         .bind(importance)
+        .bind(tone)
+        .bind(visibility)
         .execute(&self.pool)
         .await
         .context("Failed to create storyline")?;
+
+        // 如果传了 parent_id，建挂载关系
+        if let Some(pid) = parent_id {
+            sqlx::query(
+                "INSERT INTO storyline_relation (project_id, parent_id, child_id) VALUES ($1, $2, $3)",
+            )
+            .bind(project_id)
+            .bind(pid)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to create storyline_relation")?;
+        }
+
         Ok(serde_json::json!({
             "id": id.to_string(),
             "project_id": project_id.to_string(),
             "name": name,
+            "importance": importance,
+            "tone": tone,
+            "visibility": visibility,
+            "parent_id": parent_id.map(|x| x.to_string()),
             "status": "Planned"
         }))
     }
@@ -656,17 +687,23 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
         id: Uuid,
         name: &str,
         description: Option<&str>,
+        tone: Option<&str>,
+        visibility: Option<&str>,
     ) -> Result<Value> {
-        sqlx::query(
-            "UPDATE storyline SET name=$1, description=$2, updated_at=NOW() WHERE id=$3 AND project_id = (SELECT project_id FROM storyline WHERE id = $4)",
-        )
-        .bind(name)
-        .bind(description)
-        .bind(id)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .context("Failed to update storyline")?;
+        // 动态 SET 拼接（仅在 tone/visibility 提供时更新）
+        let mut sql = String::from("UPDATE storyline SET name=$1, description=$2, updated_at=NOW()");
+        if tone.is_some() { sql.push_str(", tone=$5"); }
+        if visibility.is_some() { sql.push_str(", visibility=$6"); }
+        sql.push_str(" WHERE id=$3 AND project_id = (SELECT project_id FROM storyline WHERE id = $4)");
+
+        let mut q = sqlx::query(&sql)
+            .bind(name)
+            .bind(description)
+            .bind(id)
+            .bind(id);
+        if let Some(t) = tone { q = q.bind(t); }
+        if let Some(v) = visibility { q = q.bind(v); }
+        q.execute(&self.pool).await.context("Failed to update storyline")?;
         Ok(serde_json::json!({ "id": id.to_string(), "updated": true }))
     }
 
@@ -677,6 +714,30 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
             .await
             .context("Failed to delete storyline")?;
         Ok(())
+    }
+
+    async fn list_storyline_relations(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<Value>> {
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT id::text, parent_id::text, child_id::text, created_at::text \
+             FROM storyline_relation WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list storyline_relations")?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, parent, child, cr)| {
+                serde_json::json!({
+                    "id": id, "project_id": project_id.to_string(),
+                    "parent_id": parent, "child_id": child,
+                    "created_at": cr
+                })
+            })
+            .collect())
     }
 }
 
@@ -1162,9 +1223,9 @@ impl DbProjectRepositoryPort {
 #[async_trait]
 impl ProjectRepositoryPort for DbProjectRepositoryPort {
     async fn list_projects(&self) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, Option<String>, Option<String>, String, String, String, String)> =
+        let rows: Vec<(String, String, Option<String>, Option<String>, String, String, String, String, Option<String>)> =
             sqlx::query_as(
-                "SELECT id::text, name, description, language, COALESCE(status, 'Concept'), COALESCE(config::text, '{}'), created_at::text, updated_at::text FROM project ORDER BY updated_at DESC",
+                "SELECT id::text, name, description, language, COALESCE(status, 'Concept'), COALESCE(config::text, '{}'), created_at::text, updated_at::text, premise FROM project ORDER BY updated_at DESC",
             )
             .fetch_all(&self.pool)
             .await
@@ -1172,33 +1233,35 @@ impl ProjectRepositoryPort for DbProjectRepositoryPort {
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, desc, lang, status, config, created, updated)| {
+            .map(|(id, name, desc, lang, status, config, created, updated, premise)| {
                 serde_json::json!({
                     "id": id, "name": name, "description": desc, "language": lang,
                     "status": status,
                     "config": serde_json::from_str::<Value>(&config).unwrap_or_default(),
-                    "default_params": {}, "created_at": created, "updated_at": updated
+                    "default_params": {}, "created_at": created, "updated_at": updated,
+                    "premise": premise
                 })
             })
             .collect())
     }
 
     async fn get_project(&self, id: Uuid) -> Result<Option<Value>> {
-        let row: Option<(String, String, Option<String>, Option<String>, String, String, String, String)> =
+        let row: Option<(String, String, Option<String>, Option<String>, String, String, String, String, Option<String>)> =
             sqlx::query_as(
-                "SELECT id::text, name, description, language, COALESCE(status, 'Concept'), COALESCE(config::text, '{}'), created_at::text, updated_at::text FROM project WHERE id = $1",
+                "SELECT id::text, name, description, language, COALESCE(status, 'Concept'), COALESCE(config::text, '{}'), created_at::text, updated_at::text, premise FROM project WHERE id = $1",
             )
             .bind(id)
             .fetch_optional(&self.pool)
             .await
             .context("Failed to get project")?;
 
-        Ok(row.map(|(id, name, desc, lang, status, config, created, updated)| {
+        Ok(row.map(|(id, name, desc, lang, status, config, created, updated, premise)| {
             serde_json::json!({
                 "id": id, "name": name, "description": desc, "language": lang,
                 "status": status,
                 "config": serde_json::from_str::<Value>(&config).unwrap_or_default(),
-                "default_params": {}, "created_at": created, "updated_at": updated
+                "default_params": {}, "created_at": created, "updated_at": updated,
+                "premise": premise
             })
         }))
     }
@@ -1245,6 +1308,7 @@ impl ProjectRepositoryPort for DbProjectRepositoryPort {
         name: Option<&str>,
         description: Option<&str>,
         status: Option<&str>,
+        premise: Option<&str>,
     ) -> Result<Value> {
         if let Some(name) = name {
             sqlx::query("UPDATE project SET name = $1, updated_at = NOW() WHERE id = $2")
@@ -1263,6 +1327,13 @@ impl ProjectRepositoryPort for DbProjectRepositoryPort {
         if let Some(status) = status {
             sqlx::query("UPDATE project SET status = $1, updated_at = NOW() WHERE id = $2")
                 .bind(status)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        if let Some(premise) = premise {
+            sqlx::query("UPDATE project SET premise = $1, updated_at = NOW() WHERE id = $2")
+                .bind(premise)
                 .bind(id)
                 .execute(&self.pool)
                 .await?;
@@ -1866,7 +1937,9 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         world_id: Uuid,
         entity_type: Option<&str>,
     ) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, String, Option<String>, Option<String>, String, i32, String, String)> =
+        // attributes 可能是 NULL（直接 SQL 插的 entity 没设 attributes）：
+        // 改成 Option<String> + 用 unwrap_or("{}") 兜底
+        let rows: Vec<(String, String, String, Option<String>, Option<String>, Option<String>, i32, String, String)> =
             if let Some(t) = entity_type {
                 sqlx::query_as(
                     "SELECT e.id::text, e.name, et.name, e.summary, e.description, e.attributes::text, e.version, e.created_at::text, e.updated_at::text FROM entity e JOIN entity_type et ON e.entity_type_id = et.id WHERE e.world_id = $1 AND et.name = $2 AND e.status != 'Deleted' ORDER BY e.name",
@@ -1893,7 +1966,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
                 serde_json::json!({
                     "id": id, "world_id": wid, "entity_type_id": etype, "name": name,
                     "summary": summary, "description": desc,
-                    "attributes": Self::parse_json(&attrs), "version": ver,
+                    "attributes": Self::parse_json(attrs.as_deref().unwrap_or("{}")), "version": ver,
                     "created_by": "user", "created_at": created, "updated_at": updated
                 })
             })

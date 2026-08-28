@@ -10,7 +10,6 @@ use futures::Stream;
 use domain::ports::LlmPort;
 
 use crate::llm::client::LlmClient;
-use crate::llm::provider::TokenStream;
 use crate::llm::types::{LlmRequest, Message};
 
 /// 基于 infrastructure LlmClient 的 LlmPort 实现。

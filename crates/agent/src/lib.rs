@@ -24,6 +24,7 @@ pub mod memory;
 pub mod prompt;
 pub mod runtime;
 pub mod prompt_store;
+pub mod guide;
 
 pub use runtime::AgentRuntime;
 pub use runtime::AgentStreamEvent;

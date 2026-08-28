@@ -116,6 +116,32 @@ export async function executeTool(
   return resp.json()
 }
 
+/** confirm_step 的返回结构（来自后端 guide::ValidationReport 的 JSON 序列化） */
+export interface ConfirmStepResult {
+  passed: boolean
+  current_step: string
+  current_title: string
+  next_step?: string
+  next_title?: string
+  missing?: Array<{ kind: string; detail: string }>
+}
+
+/** 推进当前引导阶段到下一步（用户在前端点"确认推进"按钮触发）。
+ *  `targetStep` 可选：传入则跳到指定 step（血肉小选择器用）。
+ */
+export async function confirmGuideStep(
+  projectId: string,
+  targetStep?: string,
+): Promise<ConfirmStepResult> {
+  const resp = await fetch(BASE + '/guide/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: projectId, target_step: targetStep }),
+  })
+  if (!resp.ok) throw new Error(await errorText(resp))
+  return resp.json()
+}
+
 /** 读取当前生效提示词视图（含内置默认与是否自定义）。 */
 export async function getPrompt(scope = 'global'): Promise<PromptView> {
   const resp = await fetch(`${BASE}/prompt?scope=${encodeURIComponent(scope)}`)

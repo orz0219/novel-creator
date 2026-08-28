@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use domain::{Storyline, StorylineImportance, StorylineScene, StorylineStatus};
+use domain::{Storyline, StorylineImportance, StorylineScene, StorylineStatus, StorylineTone, StorylineVisibility};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -54,6 +54,8 @@ impl StorylineRepo {
             description: description.map(|s| s.to_string()),
             status: StorylineStatus::Active,
             importance,
+            tone: StorylineTone::Light,
+            visibility: StorylineVisibility::Visible,
             created_volume_id: None,
             resolved_volume_id: None,
             created_at: now,
@@ -64,7 +66,7 @@ impl StorylineRepo {
     /// 按 ID 获取剧情线
     pub async fn get_by_id(&self, id: Uuid) -> Result<Option<Storyline>> {
         let row = sqlx::query_as::<_, StorylineRow>(
-            "SELECT id, project_id, name, description, status, importance, created_volume_id, resolved_volume_id, created_at, updated_at \
+            "SELECT id, project_id, name, description, status, importance, COALESCE(tone,'light'), COALESCE(visibility,'visible'), created_volume_id, resolved_volume_id, created_at, updated_at \
              FROM storyline WHERE id = $1",
         )
         .bind(id)
@@ -78,7 +80,7 @@ impl StorylineRepo {
     /// 列出项目中的所有剧情线
     pub async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Storyline>> {
         let rows = sqlx::query_as::<_, StorylineRow>(
-            "SELECT id, project_id, name, description, status, importance, created_volume_id, resolved_volume_id, created_at, updated_at \
+            "SELECT id, project_id, name, description, status, importance, COALESCE(tone,'light'), COALESCE(visibility,'visible'), created_volume_id, resolved_volume_id, created_at, updated_at \
              FROM storyline WHERE project_id = $1 ORDER BY created_at",
         )
         .bind(project_id)
@@ -152,6 +154,9 @@ struct StorylineRow {
     description: Option<String>,
     status: String,
     importance: String,
+    /// DB 列是 VARCHAR；用 String 存，构造时再 parse
+    tone: String,
+    visibility: String,
     created_volume_id: Option<Uuid>,
     resolved_volume_id: Option<Uuid>,
     created_at: DateTime<Utc>,
@@ -182,6 +187,8 @@ impl From<StorylineRow> for Storyline {
             description: r.description,
             status,
             importance,
+            tone: StorylineTone::parse(&r.tone).unwrap_or(StorylineTone::Light),
+            visibility: StorylineVisibility::parse(&r.visibility).unwrap_or(StorylineVisibility::Visible),
             created_volume_id: r.created_volume_id,
             resolved_volume_id: r.resolved_volume_id,
             created_at: r.created_at,

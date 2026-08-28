@@ -23,7 +23,7 @@ use crate::narrative::NarrativeNode;
 use crate::state::{CurrentState, ResourceState};
 use crate::storyline::Storyline;
 use crate::validation::{
-    CommitResponse, IssueSeverity, ProposedChange, ProposedChangeStatus, ProposedChangeType,
+    IssueSeverity, ProposedChange, ProposedChangeStatus, ProposedChangeType,
     ValidationIssueType, ValidationRun,
 };
 use crate::world::World;
@@ -330,22 +330,35 @@ pub trait StorylineRepositoryPort: Send + Sync {
     /// 列出项目全部剧情线（host 层 list_storylines 语义）。
     async fn list_storylines(&self, project_id: Uuid) -> Result<Vec<serde_json::Value>>;
     /// 创建剧情线（默认 status = Planned）。
+    ///
+    /// `parent_id` 可选：传 Some(uuid) 表示这条副线挂到哪条 story line 下。
+    /// 主线（importance=Main）必须 parent_id=None。
     async fn create_storyline(
         &self,
         project_id: Uuid,
         name: &str,
         description: Option<&str>,
         importance: &str,
+        tone: &str,
+        visibility: &str,
+        parent_id: Option<Uuid>,
     ) -> Result<serde_json::Value>;
-    /// 更新剧情线名称/描述（带 project 作用域校验）。
+    /// 更新剧情线名称/描述/明暗/可见性。
     async fn update_storyline(
         &self,
         id: Uuid,
         name: &str,
         description: Option<&str>,
+        tone: Option<&str>,
+        visibility: Option<&str>,
     ) -> Result<serde_json::Value>;
     /// 删除剧情线（按 id）。
     async fn delete_storyline(&self, id: Uuid) -> Result<()>;
+    /// 列出某项目所有挂载关系（parent → child）
+    async fn list_storyline_relations(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<serde_json::Value>>;
 }
 
 /// Foreshadow（伏笔）仓储端口。
@@ -503,6 +516,7 @@ pub trait ProjectRepositoryPort: Send + Sync {
         name: Option<&str>,
         description: Option<&str>,
         status: Option<&str>,
+        premise: Option<&str>,
     ) -> Result<serde_json::Value>;
     async fn delete_project(&self, id: Uuid) -> Result<()>;
 }

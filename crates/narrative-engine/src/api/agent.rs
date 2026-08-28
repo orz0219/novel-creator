@@ -206,3 +206,31 @@ pub struct SavePromptRequest {
     scope: String,
     system_prompt: String,
 }
+
+/// `POST /api/v1/agent/guide/confirm` —— 前端用户点"确认推进"按钮触发。
+///
+/// 调 confirm_step 工具（已注册到 ToolRegistry），传入 project_id。
+/// 工具内部完成：组装 MinCompleteSnapshot → 校验 → 通过则推进
+/// `project.config.current_step` 到下一步。失败则返回结构化报告。
+///
+/// 可选参数 `target_step`：当用户从"血肉小选择器"点过来时传入，
+/// 让后端校验指定 step 的产物（不传则按当前 stored_step 校验）。
+pub async fn confirm_guide_step(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project_id = req
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| anyhow::anyhow!("missing or invalid project_id"))?;
+    let mut input = serde_json::json!({"project_id": project_id.to_string()});
+    if let Some(ts) = req.get("target_step").and_then(|v| v.as_str()) {
+        input["target_step"] = serde_json::json!(ts);
+    }
+    let result = state
+        .agent
+        .execute_tool(project_id, "confirm_step", input)
+        .await?;
+    Ok(Json(result))
+}
