@@ -171,6 +171,7 @@ impl GenerationExecutor {
             self.llm.clone(),
             task.project_id,
             Some(task_id),
+            &model,
             &output,
         )
         .await

@@ -21,12 +21,6 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn test_pool() -> Result<PgPool> {
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://novel:novel_pass@localhost:5432/novel_engine".to_string()
-    });
-    Ok(PgPool::connect(&url).await?)
-}
 
 fn tool(registry: &Arc<ToolRegistry>, name: &str) -> Arc<dyn AgentTool> {
     registry
@@ -36,7 +30,7 @@ fn tool(registry: &Arc<ToolRegistry>, name: &str) -> Arc<dyn AgentTool> {
 
 #[tokio::test]
 async fn entity_tools_create_revise_retire_logical_delete() -> Result<()> {
-    let pool = test_pool().await?;
+    let pool = testkit::test_pool().await?;
 
     // 项目 + 主世界
     let project_service = ProjectService::new(
@@ -64,6 +58,7 @@ async fn entity_tools_create_revise_retire_logical_delete() -> Result<()> {
             pool.clone(),
         )))),
         Arc::new(DbProjectResolverPort::new(pool.clone())),
+        "user",
     ));
     let registry = Arc::new(ToolRegistry::new());
     register_entity_tools(&registry, entity_service);

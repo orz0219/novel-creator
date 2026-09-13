@@ -9,4 +9,12 @@ export { generationApi } from './generation'
 export { proposalApi } from './proposal'
 export { validationApi } from './validation'
 export { historyApi } from './history'
-export { settingsApi, type AppSettings } from './settings'
+export {
+  settingsApi,
+  type AppSettings,
+  type TestConnectionResult,
+  type TestConnectionInput,
+  type ModelListResult,
+  type ListModelsInput,
+  type ModelCatalog,
+} from './settings'

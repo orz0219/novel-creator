@@ -25,6 +25,7 @@ pub mod prompt;
 pub mod runtime;
 pub mod prompt_store;
 pub mod guide;
+pub mod usage;
 
 pub use runtime::AgentRuntime;
 pub use runtime::AgentStreamEvent;
@@ -34,4 +35,5 @@ pub use session::{AgentSession, SessionStore, InMemorySessionStore, ChatMessage}
 pub use memory::{AgentMemory, InMemoryAgentMemory, MemoryItem};
 pub use prompt::DEFAULT_SYSTEM_PROMPT_BASE;
 pub use prompt_store::InMemoryPromptRepo;
+pub use usage::{estimate_message_tokens, estimate_tokens, ContextUsage};
 pub use types::*;

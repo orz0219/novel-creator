@@ -29,81 +29,51 @@
     />
 
     <!-- Character design detail panel (profile + state) -->
-    <div v-if="showDetail && viewingEntity" class="detail-panel">
-      <div class="detail-header">
-        <span class="detail-title">人物档案</span>
-        <span class="detail-subtitle">{{ viewingEntity.name }}</span>
-        <button class="btn-ghost" @click="openBaseEdit()">编辑基础信息</button>
-        <button class="btn-ghost" @click="showDetail = false">收起</button>
-      </div>
-
-      <section class="detail-section">
-        <div class="detail-section-head">
-          <h3 class="detail-section-title">角色设定</h3>
-          <button class="btn-save" :disabled="savingProfile" @click="saveProfile()">
-            {{ savingProfile ? '保存中…' : '保存档案' }}
-          </button>
-        </div>
-        <div class="field-grid">
-          <div class="field" v-for="f in profileFields" :key="f.key">
-            <label class="field-label">{{ f.label }}</label>
-            <textarea
-              v-if="f.textarea"
-              v-model="profileForm[f.key]"
-              class="field-textarea"
-              rows="2"
-            ></textarea>
-            <input v-else v-model="profileForm[f.key]" class="field-input" type="text" />
-          </div>
-        </div>
-      </section>
-
-      <section class="detail-section">
-        <div class="detail-section-head">
-          <h3 class="detail-section-title">当前状态</h3>
-          <button class="btn-save" :disabled="savingState" @click="saveState()">
-            {{ savingState ? '保存中…' : '保存状态' }}
-          </button>
-        </div>
-        <div class="field-grid">
-          <div class="field">
-            <label class="field-label">所在地</label>
-            <input v-model="stateForm.location" class="field-input" type="text" />
-          </div>
-          <div class="field">
-            <label class="field-label">身体状态</label>
-            <input v-model="stateForm.physical_state" class="field-input" type="text" />
-          </div>
-          <div class="field">
-            <label class="field-label">心理状态</label>
-            <input v-model="stateForm.mental_state" class="field-input" type="text" />
-          </div>
-          <div class="field">
-            <label class="field-label">资源状态</label>
-            <input v-model="stateForm.resource_state" class="field-input" type="text" />
-          </div>
-          <div class="field">
-            <label class="field-label">社会状态</label>
-            <input v-model="stateForm.social_state" class="field-input" type="text" />
-          </div>
-          <div class="field field-wide">
-            <label class="field-label">额外信息 (JSON)</label>
-            <textarea v-model="stateExtraText" class="field-textarea" rows="2"></textarea>
-          </div>
-        </div>
-      </section>
-    </div>
+    <template v-if="showDetail && viewingEntity">
+      <ProfilePanel
+        ref="profilePanelRef"
+        title="角色设定"
+        :subtitle="viewingEntity.name"
+        :groups="profileGroups"
+        :model-value="panelValue"
+        :saving="savingProfile"
+        extra-label="编辑基础信息"
+        @save="saveProfile"
+        @close="showDetail = false"
+        @extra="openBaseEdit()"
+      />
+      <ProfilePanel
+        ref="statePanelRef"
+        title="当前状态"
+        :groups="stateGroups"
+        :model-value="stateForm"
+        :saving="savingState"
+        :show-close="false"
+        @save="saveState"
+      />
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useWorldStore } from '@/stores/world'
 import EntityCard from '@/components/ui/EntityCard.vue'
 import EntityDialog from '@/components/ui/EntityDialog.vue'
+import ProfilePanel, { type ProfileGroup } from '@/components/ui/ProfilePanel.vue'
+import { ARC_STAGES_FIELD } from '@/utils/arcStages'
 import { characterApi } from '@/api/character'
 import type { Entity } from '@/types'
 import type { CharacterProfile, CharacterState } from '@/types/character'
+import {
+  AGE_OPTIONS,
+  GENDER_OPTIONS,
+  ROLE_OPTIONS,
+  emptyProfileForm,
+  formToProfile,
+  profileToForm,
+  type ProfileForm,
+} from '@/utils/characterProfile'
 import { User } from 'lucide-vue-next'
 
 const worldStore = useWorldStore()
@@ -114,32 +84,172 @@ const editingEntity = ref<Entity | null>(null)
 const showDetail = ref(false)
 const viewingEntity = ref<Entity | null>(null)
 
-const profileForm = ref<Partial<CharacterProfile>>({})
+// 表单模型 ProfileForm、枚举选项与双向映射（profileToForm / formToProfile）
+// 统一放在 utils/characterProfile.ts，那里有单测覆盖这层「表单 ↔ 后端契约」的转换。
+
+/** 字段按语义分组：平铺成一排时，读的人抓不到结构 */
+const profileGroups: ProfileGroup[] = [
+  {
+    title: '基本',
+    fields: [
+      { key: 'name', label: '真名' },
+      { key: 'aliases', label: '别名', hint: '多个别名用逗号分隔' },
+      { key: 'age_range', label: '年龄段', options: AGE_OPTIONS },
+      { key: 'gender', label: '性别', options: GENDER_OPTIONS },
+      { key: 'identity', label: '身份' },
+      { key: 'social_position_rank', label: '社会地位' },
+    ],
+  },
+  {
+    title: '性格与外貌',
+    fields: [
+      { key: 'appearance', label: '外貌', multiline: true },
+      { key: 'core_personality', label: '核心性格', multiline: true },
+      { key: 'values', label: '价值观', multiline: true },
+    ],
+  },
+  {
+    title: '来历与定位',
+    fields: [
+      { key: 'background_origin', label: '背景', multiline: true },
+      { key: 'role_in_story', label: '故事功能位', options: ROLE_OPTIONS },
+    ],
+  },
+  {
+    title: '驱动力与冲突',
+    fields: [
+      {
+        key: 'drive',
+        label: '驱动力',
+        shape: 'object',
+        readOnly: true,
+        subFields: [
+          { key: 'motivation', label: '核心动机' },
+          { key: 'primary_goal', label: '首要目标' },
+          { key: 'desire', label: '欲望' },
+          { key: 'fear', label: '恐惧' },
+          { key: 'weakness', label: '弱点' },
+          { key: 'contradiction', label: '内在矛盾' },
+          { key: 'hidden_goal', label: '隐藏目的' },
+          { key: 'long_term', label: '长期目标' },
+          { key: 'current', label: '当前目标' },
+          { key: 'immediate', label: '眼前目标' },
+        ],
+      },
+      {
+        key: 'conflicts',
+        label: '冲突',
+        shape: 'object-list',
+        readOnly: true,
+        primaryKey: 'description',
+        badgeKey: 'conflict_type',
+        badgeLabels: {
+          Internal: '内在',
+          External: '外在',
+          Relationship: '关系',
+          Ideology: '理念',
+        },
+        subFields: [
+          { key: 'phase', label: '生效阶段' },
+          { key: 'resolution_status', label: '状态' },
+        ],
+      },
+      {
+        key: 'secrets',
+        label: '秘密',
+        shape: 'object-list',
+        readOnly: true,
+        primaryKey: 'content',
+        badgeKey: 'importance',
+        badgePrefix: '重要度 ',
+      },
+    ],
+  },
+  {
+    title: '能力与弧光',
+    fields: [
+      {
+        key: 'capabilities',
+        label: '能力边界',
+        shape: 'object',
+        readOnly: true,
+        subFields: [
+          { key: 'skills', label: '擅长' },
+          { key: 'limitations', label: '限制' },
+        ],
+      },
+      {
+        key: 'arc_potential',
+        label: '弧光潜力',
+        shape: 'object',
+        readOnly: true,
+        subFields: [
+          { key: 'starting_state', label: '起点' },
+          { key: 'possible_change', label: '变化方向' },
+          { key: 'resistance', label: '阻力' },
+        ],
+      },
+      ARC_STAGES_FIELD,
+    ],
+  },
+]
+
+/**
+ * 面板要展示的值：档案里既有「扁平可编辑字段」（真名 / 身份…），
+ * 也有「结构化扩展字段」（驱动力 / 冲突 / 秘密 / 能力 / 弧光）。
+ * 后者不在表单模型里，直接取自后端返回的原始档案。
+ */
+const panelValue = computed(() => ({
+  ...(rawProfile.value ?? {}),
+  ...profileForm.value,
+}))
+
+/** 人物状态：角色在故事当下所处的处境 */
+const stateGroups: ProfileGroup[] = [
+  {
+    title: '处境',
+    fields: [
+      { key: 'location', label: '所在地' },
+      { key: 'physical_state', label: '身体状态', multiline: true },
+      { key: 'mental_state', label: '心理状态', multiline: true },
+    ],
+  },
+  {
+    title: '资源与关系',
+    fields: [
+      { key: 'resource_state', label: '资源状态', multiline: true },
+      { key: 'social_state', label: '社会状态', multiline: true },
+    ],
+  },
+]
+
+const profilePanelRef = ref<InstanceType<typeof ProfilePanel> | null>(null)
+const statePanelRef = ref<InstanceType<typeof ProfilePanel> | null>(null)
+
+const profileForm = ref<ProfileForm>(emptyProfileForm())
 const stateForm = ref<Partial<CharacterState>>({})
-const stateExtraText = ref('')
 const savingProfile = ref(false)
 const savingState = ref(false)
 
-const profileFields: { key: keyof CharacterProfile; label: string; textarea?: boolean }[] = [
-  { key: 'name', label: '真名' },
-  { key: 'aliases', label: '别名' },
-  { key: 'age', label: '年龄' },
-  { key: 'gender', label: '性别' },
-  { key: 'identity', label: '身份' },
-  { key: 'appearance', label: '外貌', textarea: true },
-  { key: 'background_origin', label: '背景', textarea: true },
-  { key: 'social_position', label: '社会地位' },
-  { key: 'core_personality', label: '核心性格', textarea: true },
-  { key: 'values', label: '价值观' },
-]
+/** 原始档案：提交时靠它保留 social_position 里没在表单上暴露的子字段 */
+const rawProfile = ref<CharacterProfile | null>(null)
 
 async function openDetail(entity: Entity) {
   viewingEntity.value = entity
   showDetail.value = true
-  profileForm.value = (await characterApi.getProfile(entity.id).catch(() => null)) ?? ({} as Partial<CharacterProfile>)
-  const st = (await characterApi.getState(entity.id).catch(() => null)) ?? ({} as Partial<CharacterState>)
-  stateForm.value = st
-  stateExtraText.value = st.extra ? JSON.stringify(st.extra, null, 2) : ''
+  worldStore.error = ''
+  try {
+    // 后端在"还没有档案/状态"时返回 null，这是正常语义，不是错误
+    rawProfile.value = (await characterApi.getProfile(entity.id)) ?? null
+    profileForm.value = rawProfile.value ? profileToForm(rawProfile.value) : emptyProfileForm()
+    const st = (await characterApi.getState(entity.id)) ?? ({} as Partial<CharacterState>)
+    stateForm.value = st
+  } catch (e) {
+    rawProfile.value = null
+    profileForm.value = emptyProfileForm()
+    stateForm.value = {}
+    worldStore.error = `加载人物档案失败：${(e as Error).message}`
+  }
 }
 
 function openCreate() {
@@ -153,30 +263,43 @@ function openBaseEdit() {
   showDialog.value = true
 }
 
-async function saveProfile() {
+async function saveProfile(value: Record<string, unknown>) {
   if (!viewingEntity.value) return
   savingProfile.value = true
+  worldStore.error = ''
   try {
-    await characterApi.updateProfile(viewingEntity.value.id, profileForm.value)
+    const saved = await characterApi.updateProfile(
+      viewingEntity.value.id,
+      // ProfilePanel 对各类档案通用，以 Record<string, unknown> 传值；
+      // 这里收窄回人物档案表单的类型
+      formToProfile(value as unknown as ProfileForm, rawProfile.value),
+    )
+    // 用后端回写的真实值刷新表单与基准，避免本地状态与库中不一致
+    rawProfile.value = saved
+    profileForm.value = profileToForm(saved)
+    // 保存成功才退出编辑态；失败时保留输入，避免白填一遍
+    profilePanelRef.value?.finishEdit()
   } catch (e) {
-    worldStore.error = '保存人物档案失败'
+    worldStore.error = `保存人物档案失败：${(e as Error).message}`
   } finally {
     savingProfile.value = false
   }
 }
 
-async function saveState() {
+async function saveState(value: Record<string, unknown>) {
   if (!viewingEntity.value) return
   savingState.value = true
+  worldStore.error = ''
   try {
-    let extra: unknown = null
-    if (stateExtraText.value.trim()) {
-      extra = JSON.parse(stateExtraText.value)
-    }
-    stateForm.value.extra = extra
-    await characterApi.updateState(viewingEntity.value.id, stateForm.value)
+    const saved = await characterApi.updateState(viewingEntity.value.id, {
+      ...value,
+      // extra 是历史遗留字段，界面上不再暴露；原样带回，避免被整行覆盖写入清空
+      extra: stateForm.value.extra ?? null,
+    })
+    stateForm.value = saved
+    statePanelRef.value?.finishEdit()
   } catch (e) {
-    worldStore.error = '保存人物状态失败（请检查额外信息 JSON 格式）'
+    worldStore.error = `保存人物状态失败：${(e as Error).message}`
   } finally {
     savingState.value = false
   }
@@ -227,32 +350,4 @@ async function handleDelete(entity: Entity) {
 .empty-text { font-size: var(--text-sm); }
 .error-banner { padding: var(--space-3) var(--space-4); background: var(--color-error-subtle); color: var(--color-error); border-radius: var(--radius-sm); margin-bottom: var(--space-4); font-size: var(--text-sm); }
 
-.detail-panel { margin-top: var(--space-6); padding: var(--space-6); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
-.detail-header { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-4); }
-.detail-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-primary); font-family: var(--font-serif); }
-.detail-subtitle { font-size: var(--text-sm); color: var(--text-tertiary); }
-.btn-ghost { margin-left: auto; padding: var(--space-1) var(--space-3); background: transparent; border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; color: var(--text-secondary); }
-.btn-ghost:last-child { margin-left: var(--space-2); }
-.btn-ghost:hover { background: var(--color-surface-hover); }
-
-.detail-section { margin-bottom: var(--space-6); }
-.detail-section:last-child { margin-bottom: 0; }
-.detail-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-3); }
-.detail-section-title { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
-.btn-save { padding: var(--space-1) var(--space-3); background: var(--color-primary); border: none; color: white; border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; }
-.btn-save:disabled { opacity: 0.6; cursor: default; }
-
-.field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-3); }
-.field { display: flex; flex-direction: column; gap: var(--space-1); }
-.field-wide { grid-column: 1 / -1; }
-.field-inline { flex-direction: row; align-items: center; gap: var(--space-2); }
-.field-label { font-size: var(--text-xs); color: var(--text-tertiary); }
-.field-input, .field-textarea {
-  width: 100%; padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
-  background: var(--color-bg); color: var(--text-primary); font-size: var(--text-sm);
-  font-family: inherit;
-}
-.field-textarea { resize: vertical; line-height: 1.5; }
-.field-checkbox { width: 18px; height: 18px; }
 </style>

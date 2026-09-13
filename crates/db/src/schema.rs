@@ -104,6 +104,7 @@ pub async fn validate_schema(pool: &PgPool) -> Result<Vec<String>> {
         "character_secret",
         "character_capability",
         "character_arc_potential",
+        "entity_arc_stage",
         "character_extension",
         "faction_profile",
         "location_profile",

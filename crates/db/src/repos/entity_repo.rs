@@ -44,9 +44,15 @@ impl EntityTypeRepo {
         })
     }
 
+    /// 按类型名查实体类型。
+    ///
+    /// **大小写不敏感**：实体类型名在库中是 `Character` / `Location` 这样的首字母大写形式，
+    /// 而 LLM 调用工具时经常写成小写（`location`）。若用精确匹配，过滤会静默失效、
+    /// 返回空列表——看起来像"没有数据"，实际只是没匹配上。
     pub async fn get_by_name(&self, name: &str) -> Result<Option<EntityType>> {
         let row = sqlx::query_as::<_, EntityTypeRow>(
-            "SELECT id, name, description, schema_json, created_at, updated_at FROM entity_type WHERE name = $1",
+            "SELECT id, name, description, schema_json, created_at, updated_at FROM entity_type \
+             WHERE LOWER(name) = LOWER($1)",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -273,12 +279,13 @@ impl EntityRepo {
 
     pub async fn update(&self, entity: &Entity) -> Result<()> {
         let result = sqlx::query(
-            "UPDATE entity SET name = $1, summary = $2, attributes = $3, \
-             version = version + 1, updated_at = NOW() \
-             WHERE id = $4 AND project_id = $5 AND version = $6",
+            "UPDATE entity SET name = $1, summary = $2, description = $3, attributes = $4, \
+             version = version + 1, updated_by = 'agent', updated_at = NOW() \
+             WHERE id = $5 AND project_id = $6 AND version = $7",
         )
         .bind(&entity.name)
         .bind(&entity.summary)
+        .bind(&entity.description)
         .bind(&entity.attributes)
         .bind(entity.id)
         .bind(entity.project_id)
@@ -381,21 +388,51 @@ impl EntityRepo {
         Ok(row.map(|r| r.into()))
     }
 
+    /// 把实体**当前**这一版留档，供版本历史查询。
+    ///
+    /// 调用时机是「更新之前」——这样 `INSERT ... SELECT` 拿到的就是被取代的那一版，
+    /// 不必先改再读回。当前状态永远在 `entity` 表里，读历史时把它拼成最新一版即可。
+    ///
+    /// 同一个 (entity_id, version) 只会留一份：CAS 失败重试、或同一次改动被走了
+    /// 两条写入路径时，不会堆出重复快照。
+    pub async fn snapshot_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        entity_id: Uuid,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO entity_snapshot \
+             (entity_id, project_id, version, name, summary, description, attributes, status, updated_by) \
+             SELECT id, project_id, version, name, summary, description, attributes, status, updated_by \
+             FROM entity WHERE id = $1 \
+             ON CONFLICT (entity_id, version) DO NOTHING",
+        )
+        .bind(entity_id)
+        .execute(executor)
+        .await
+        .context("Failed to snapshot entity before update")?;
+        Ok(())
+    }
+
     /// Transactional update with version CAS.
     ///
     /// Returns the number of rows affected. If 0, a ConcurrentModification occurred.
+    /// `actor` 记录这次改动是谁发起的（`MutationSource::as_str()`：user / ai / system），
+    /// 会写进 `entity.updated_by` 并成为版本历史里的「由谁修改」。
     pub async fn update_tx<'c>(
         executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
         entity: &Entity,
+        actor: &str,
     ) -> Result<usize> {
         let result = sqlx::query(
-            "UPDATE entity SET name = $1, summary = $2, attributes = $3, \
-             version = version + 1, updated_at = NOW() \
-             WHERE id = $4 AND project_id = $5 AND version = $6",
+            "UPDATE entity SET name = $1, summary = $2, description = $3, attributes = $4, \
+             version = version + 1, updated_by = $5, updated_at = NOW() \
+             WHERE id = $6 AND project_id = $7 AND version = $8",
         )
         .bind(&entity.name)
         .bind(&entity.summary)
+        .bind(&entity.description)
         .bind(&entity.attributes)
+        .bind(actor)
         .bind(entity.id)
         .bind(entity.project_id)
         .bind(entity.version)

@@ -47,6 +47,37 @@ impl AgeRange {
             _ => AgeRange::Unknown,
         }
     }
+
+    /// 严格解析：无法识别的值返回 `None`，**不静默兜底**。
+    ///
+    /// 同时接受中文写法：这是中文小说创作系统，作者与模型都会自然地写「青年」。
+    /// 认识的写法明确映射到规范值，不认识的才报错——「认识但写法不同」与
+    /// 「根本不知道你在说什么」必须区别对待，前者不该被拒绝。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "Child" | "儿童" | "孩童" | "小孩" => Some(AgeRange::Child),
+            "Teen" | "少年" | "青少年" | "青春期" => Some(AgeRange::Teen),
+            "YoungAdult" | "Young Adult" | "青年" | "年轻人" => Some(AgeRange::YoungAdult),
+            "Adult" | "成年" | "成年人" => Some(AgeRange::Adult),
+            "MiddleAge" | "MiddleAged" | "Middle Age" | "middle-aged" | "中年" | "中年人" => {
+                Some(AgeRange::MiddleAge)
+            }
+            "Elder" | "Elderly" | "老年" | "老人" | "老年期" => Some(AgeRange::Elder),
+            "Unknown" | "不明" | "未知" => Some(AgeRange::Unknown),
+            _ => None,
+        }
+    }
+
+    /// 全部合法取值，供工具的 JSON Schema 与错误提示复用。
+    pub const ALL: [&'static str; 7] = [
+        "Child",
+        "Teen",
+        "YoungAdult",
+        "Adult",
+        "MiddleAge",
+        "Elder",
+        "Unknown",
+    ];
 }
 
 /// 性别：定位为身份约束(identity_constraint)，不是性格
@@ -78,6 +109,21 @@ impl Gender {
             _ => Gender::Other,
         }
     }
+
+    /// 严格解析（语义同 `AgeRange::parse`）：非法值返回 `None` 而不是降级成 `Other`；
+    /// 同时接受中文写法。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "Male" | "男" | "男性" => Some(Gender::Male),
+            "Female" | "女" | "女性" => Some(Gender::Female),
+            "NonBinary" | "非二元" | "其他性别" => Some(Gender::NonBinary),
+            "Unknown" | "不明" | "未知" => Some(Gender::Unknown),
+            "Other" | "其他" => Some(Gender::Other),
+            _ => None,
+        }
+    }
+
+    pub const ALL: [&'static str; 5] = ["Male", "Female", "NonBinary", "Unknown", "Other"];
 }
 
 /// 角色在故事中的功能位（role_in_story）
@@ -118,6 +164,33 @@ impl StoryRole {
             _ => StoryRole::Observer,
         }
     }
+
+    /// 严格解析（语义同 `AgeRange::parse`）：非法值返回 `None` 而不是降级成 `Observer`；
+    /// 同时接受中文写法。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "Protagonist" | "主角" => Some(StoryRole::Protagonist),
+            "Antagonist" | "反派" | "反面角色" => Some(StoryRole::Antagonist),
+            "Mentor" | "导师" | "引路人" => Some(StoryRole::Mentor),
+            "Ally" | "盟友" | "伙伴" | "配角" | "辅助角色" => Some(StoryRole::Ally),
+            "Rival" | "对手" | "竞争者" => Some(StoryRole::Rival),
+            "Catalyst" | "催化剂" | "推动者" => Some(StoryRole::Catalyst),
+            "Victim" | "受害者" => Some(StoryRole::Victim),
+            "Observer" | "旁观者" | "观察者" => Some(StoryRole::Observer),
+            _ => None,
+        }
+    }
+
+    pub const ALL: [&'static str; 8] = [
+        "Protagonist",
+        "Antagonist",
+        "Mentor",
+        "Ally",
+        "Rival",
+        "Catalyst",
+        "Victim",
+        "Observer",
+    ];
 }
 
 /// 冲突类型
@@ -147,12 +220,31 @@ impl ConflictType {
             _ => ConflictType::Internal,
         }
     }
+
+    /// 严格解析，同时接受中文（语义同 `AgeRange::parse`）：
+    /// 不认识的写法返回 `None`，而不是一律降级成 `Internal`。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "Internal" | "内在" | "内心" | "内部" => Some(ConflictType::Internal),
+            "External" | "外在" | "外部" | "环境" => Some(ConflictType::External),
+            "Relationship" | "关系" | "人际" => Some(ConflictType::Relationship),
+            "Ideology" | "理念" | "信仰" | "观念" => Some(ConflictType::Ideology),
+            _ => None,
+        }
+    }
+
+    pub const ALL: [&'static str; 4] = ["Internal", "External", "Relationship", "Ideology"];
 }
 
 // ===================== 组合子结构 =====================
 
 /// 社会位置（social_status 的抽象：不写死"贵族/平民"）
+///
+/// `serde(default)` 是必需的：`social_access` 不是 Option，若没有它，
+/// 调用方只提供 `rank` 时反序列化会因 "missing field `social_access`" 直接失败，
+/// 表现为前端保存社会地位时整个请求 500。缺失即"没有"，用默认值即可。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SocialPosition {
     pub rank: Option<String>,
     pub authority_level: Option<i32>,
@@ -160,7 +252,11 @@ pub struct SocialPosition {
 }
 
 /// 剧情必要性（R2 新增）：告诉引擎谁该重点写、谁可以死、谁可替换
+///
+/// 同 `SocialPosition`：`importance` / `irreplaceability` 不是 Option，
+/// 必须允许部分字段缺失。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct NarrativeNecessity {
     pub importance: i32,
     pub irreplaceability: i32,
@@ -168,11 +264,21 @@ pub struct NarrativeNecessity {
     pub replacement_cost: Option<String>,
 }
 
+fn default_urgency() -> i32 {
+    3
+}
+
 /// 驱动力（合并原 CharacterGoal 的多级目标，并补上恐惧/弱点/欲望/矛盾）
+///
+/// `serde(default)` 必须保留：`urgency` 不是 Option，若模型只给动机/目标
+/// 而没写 urgency，反序列化会因 "missing field `urgency`" 直接失败。
+/// 缺失时默认 3（中等紧迫度），不把模型逼进无意义的字段重试。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CharacterDrive {
     pub primary_goal: Option<String>,
     pub motivation: Option<String>,
+    #[serde(default = "default_urgency")]
     pub urgency: i32,
     pub long_term: Option<String>,
     pub current: Option<String>,
@@ -193,6 +299,11 @@ pub struct CharacterConflict {
     pub description: String,
     pub target_entity_id: Option<Uuid>,
     pub resolution_status: Option<String>,
+    /// 该冲突从哪个阶段（`EntityArcStage.stage`）开始成立。
+    ///
+    /// 为什么需要它：周浩「怕被排除在外」这条冲突在主角开口之前根本不存在；
+    /// 不分阶段的话，它会从第一章起就成立。前端可按阶段过滤，引擎可只取当下生效的冲突。
+    pub phase: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -225,14 +336,21 @@ pub struct CharacterSecret {
 }
 
 /// 能力边界（限制比能力更重要）
+///
+/// `serde(default)` 让 skills / limitations 可以省略其一：
+/// 模型只写 skills 时不再因 missing field 直接失败。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CharacterCapability {
     pub skills: Vec<String>,
     pub limitations: Vec<String>,
 }
 
-/// 弧光潜力（人物成长线）
+/// 弧光潜力（人物成长线）—— 内在曲线：为什么会变、什么在抵抗。
+///
+/// 与 `EntityArcStage`（外部时间线）正交，两个都填，角色才立得住。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CharacterArcPotential {
     pub starting_state: Option<String>,
     pub possible_change: Option<String>,

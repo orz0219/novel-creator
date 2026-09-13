@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Novel Engine</title>
+  <link rel="stylesheet" href="./mobile.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <button class="icon-btn" id="btn-menu" aria-label="历史会话">☰</button>
+      <div class="topbar-main">
+        <div class="topbar-title" id="project-name">选择项目</div>
+        <div class="topbar-sub" id="engine-status">
+          <span class="dot" id="engine-dot"></span><span id="engine-text">正在连接引擎…</span>
+        </div>
+      </div>
+      <button class="icon-btn" id="btn-new" aria-label="新建会话">＋</button>
+    </header>
+
+    <!-- 主区域：由 js 渲染 -->
+    <main id="view" class="view"></main>
+
+    <!-- 输入区（仅对话页显示） -->
+    <div class="composer" id="composer" hidden>
+      <div class="composer-error" id="composer-error" hidden></div>
+      <div class="composer-row">
+        <textarea id="input" rows="1" placeholder="说说你的想法…"></textarea>
+        <button id="btn-send" class="send-btn" aria-label="发送">发送</button>
+      </div>
+    </div>
+
+    <!-- 底部 Tab -->
+    <nav class="tabbar">
+      <button class="tab" data-tab="agent" aria-label="对话"><span>对话</span></button>
+      <button class="tab" data-tab="world" aria-label="世界"><span>世界</span></button>
+      <button class="tab" data-tab="story" aria-label="故事"><span>故事</span></button>
+      <button class="tab" data-tab="more" aria-label="更多"><span>更多</span></button>
+    </nav>
+
+    <!-- 历史会话抽屉 -->
+    <div class="drawer-mask" id="drawer-mask" hidden></div>
+    <aside class="drawer" id="drawer" hidden>
+      <div class="drawer-head">
+        <span>历史会话</span>
+        <button class="icon-btn" id="btn-drawer-close">×</button>
+      </div>
+      <div class="drawer-body" id="drawer-body"></div>
+    </aside>
+
+    <!-- 轻提示 -->
+    <div class="toast" id="toast" hidden></div>
+  </div>
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

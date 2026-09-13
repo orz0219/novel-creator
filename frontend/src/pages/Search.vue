@@ -1,6 +1,10 @@
 <template>
   <div class="search-page">
     <div class="search-header">
+      <button class="back-btn" type="button" @click="goBack">
+        <ArrowLeft :size="16" />
+        <span>{{ backLabel }}</span>
+      </button>
       <div class="search-input-wrapper">
         <svg class="search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
           <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/>
@@ -38,6 +42,7 @@
 
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router'
+import { ArrowLeft } from 'lucide-vue-next'
 import { useWorldStore } from '@/stores/world'
 import { useProjectStore } from '@/stores/project'
 import { computed, onMounted, ref } from 'vue'
@@ -47,6 +52,17 @@ const route = useRoute()
 const router = useRouter()
 const worldStore = useWorldStore()
 const projectStore = useProjectStore()
+
+/**
+ * 返回目标：入口页通过 `?from=` 带上（项目侧栏 / 命令面板）。
+ * 直接打开本页（刷新、书签）时没有来源，则回首页。
+ */
+const backTarget = computed(() => (route.query.from as string) || '/')
+const backLabel = computed(() => (route.query.from ? '返回' : '返回首页'))
+
+function goBack() {
+  router.push(backTarget.value)
+}
 
 // /search is a top-level route with no :id, so fall back to the active/most-recent project.
 const projectId = computed(() => {
@@ -115,6 +131,8 @@ function navigateTo(entity: Entity) {
 <style scoped>
 .search-page { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
 .search-header { padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--border-default); }
+.back-btn { display: inline-flex; align-items: center; gap: var(--space-1); margin-bottom: var(--space-3); padding: var(--space-2) var(--space-3); background: transparent; color: var(--text-secondary); border: 1px solid var(--border-default); border-radius: var(--radius-sm); cursor: pointer; font-size: var(--text-sm); transition: var(--transition-fast); }
+.back-btn:hover { color: var(--color-primary-text); border-color: var(--border-primary); }
 .search-input-wrapper { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--bg-panel); border: 1px solid var(--border-default); border-radius: var(--radius-md); margin-bottom: var(--space-3); }
 .search-icon { color: var(--text-tertiary); flex-shrink: 0; }
 .search-input { flex: 1; background: transparent; border: none; outline: none; color: var(--text-primary); font-size: var(--text-lg); }

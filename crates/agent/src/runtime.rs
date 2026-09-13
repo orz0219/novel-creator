@@ -14,7 +14,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_stream::stream;
 use chrono::Utc;
-use domain::ports::{AgentPromptConfig, LlmPort, PromptRepositoryPort};
+use domain::ports::{
+    AgentPromptConfig, AiSettingsPort, GuideProgressPort, LlmPort, LlmStreamChunk, LlmUsage,
+    PromptRepositoryPort,
+};
 use futures::Stream;
 use futures::StreamExt;
 use serde::Serialize;
@@ -25,6 +28,7 @@ use crate::prompt::build_system_prompt;
 use crate::session::{AgentSession, ChatMessage, SessionStore};
 use crate::tool::{AskQuestionTool, EchoTool, ToolRegistry};
 use crate::types::ToolMeta;
+use crate::usage::{estimate_message_tokens, ContextUsage};
 
 /// Agent 流式输出事件。
 pub enum AgentStreamEvent {
@@ -43,6 +47,11 @@ pub enum AgentStreamEvent {
         /// 成功时为结果 JSON（已美化）；失败时为错误信息。
         output: String,
     },
+    /// 本轮 LLM 调用的用量统计（含提示缓存命中）。
+    ///
+    /// 工具循环里可能调用多次模型，这里下发的是**最后一次**的统计——
+    /// 它对应"当前上下文有多大、缓存命中了多少"，正是用户想看的指标。
+    Usage(LlmUsage),
     /// 本轮结束。
     Done,
     /// 出错（message 为错误信息）。
@@ -70,8 +79,10 @@ pub struct AgentRuntime {
     prompt_store: Arc<dyn PromptRepositoryPort>,
     /// 内置默认基座（无自定义时使用，且用于「恢复默认」）。
     default_system_prompt: String,
-    /// 透传给 LLM 的模型名（具体生效值由 Provider 配置决定）。
-    model: String,
+    /// 运行时 AI 配置（模型名等）：每次对话前读取，设置页改完立即生效。
+    ai_settings: Arc<dyn AiSettingsPort>,
+    /// 引导进度：以 `project.config.current_step` 为唯一真源。
+    guide_progress: Arc<dyn GuideProgressPort>,
 }
 
 impl AgentRuntime {
@@ -82,7 +93,8 @@ impl AgentRuntime {
         memory: Arc<dyn AgentMemory>,
         prompt_store: Arc<dyn PromptRepositoryPort>,
         default_system_prompt: String,
-        model: String,
+        ai_settings: Arc<dyn AiSettingsPort>,
+        guide_progress: Arc<dyn GuideProgressPort>,
     ) -> Self {
         Self {
             llm,
@@ -91,8 +103,20 @@ impl AgentRuntime {
             memory,
             prompt_store,
             default_system_prompt,
-            model,
+            ai_settings,
+            guide_progress,
         }
+    }
+
+    /// 当前引导阶段：以项目级 `config.current_step` 为准（多会话共享）。
+    ///
+    /// 项目尚未写入步骤时用 `guide::INITIAL_STEP`——即「还没开始引导」的正常起点。
+    async fn current_step_of(&self, project_id: Uuid) -> Result<String> {
+        Ok(self
+            .guide_progress
+            .current_step(project_id)
+            .await?
+            .unwrap_or_else(|| crate::guide::INITIAL_STEP.to_string()))
     }
 
     /// 注册 P1 基础工具（echo / ask_question）。
@@ -120,9 +144,60 @@ impl AgentRuntime {
         self.sessions.get(id).await
     }
 
+    /// 当前会话的上下文用量（聊天页显示「已用 / 上限」并预警）。
+    ///
+    /// 由于整段会话历史会被拍平成一次请求，用量按会话全部消息累加估算，
+    /// 上限取设置页配置的预算（网关不返回模型真实上下文长度，见 `usage` 模块说明）。
+    pub async fn context_usage(&self, id: Uuid) -> Result<ContextUsage> {
+        let session = self
+            .sessions
+            .get(id)
+            .await?
+            .context("会话不存在，无法统计上下文用量")?;
+        let config = self.ai_settings.load().await?;
+
+        let used_tokens = session
+            .messages
+            .iter()
+            .map(|m| estimate_message_tokens(&m.content))
+            .sum();
+
+        Ok(ContextUsage {
+            used_tokens,
+            limit_tokens: config.context_limit,
+            message_count: session.messages.len(),
+            model: config.model,
+        })
+    }
+
+    /// 截断会话：只保留前 `keep` 条消息，其余全部删除。
+    ///
+    /// 用于「删除某条消息及其之后的全部内容」——错误或跑偏的消息会污染后续上下文，
+    /// 因此必须连同其后产生的用户消息、AI 回复与工具记录一并移除。
+    /// `keep = 0` 表示清空全部消息（会话本身保留）。
+    pub async fn truncate_session(&self, id: Uuid, keep: usize) -> Result<AgentSession> {
+        let mut session = self
+            .sessions
+            .get(id)
+            .await?
+            .context("会话不存在，无法截断")?;
+
+        if keep > session.messages.len() {
+            anyhow::bail!(
+                "保留条数 {} 超出当前消息总数 {}",
+                keep,
+                session.messages.len()
+            );
+        }
+
+        session.messages.truncate(keep);
+        session.updated_at = Utc::now();
+        self.sessions.update(session.clone()).await?;
+        Ok(session)
+    }
+
     /// 重命名会话（用于历史列表中的自定义标题）。
-    pub async fn rename_session(&self, id: Uuid, title: &str) -> Result<()> {
-        let mut s = self
+    pub async fn rename_session(&self, id: Uuid, title: &str) -> Result<()> {        let mut s = self
             .sessions
             .get(id)
             .await?
@@ -212,9 +287,10 @@ impl AgentRuntime {
             .collect();
 
         let scope = format!("project:{}", session.project_id);
+        let step = self.current_step_of(session.project_id).await?;
         let system = build_system_prompt(
             &self.resolve_base(&scope).await?,
-            &session.current_step,
+            &step,
             &self.tools.list(),
             &memories,
         );
@@ -228,7 +304,15 @@ impl AgentRuntime {
             .join("\n");
         let user_prompt = format!("{}\n\n用户：{}", history, message);
 
-        let reply = self.llm.complete(&system, &user_prompt, &self.model).await?;
+        let config = self
+            .ai_settings
+            .load()
+            .await
+            .context("读取运行时 AI 配置失败")?;
+        let reply = self
+            .llm
+            .complete(&system, &user_prompt, &config.model)
+            .await?;
 
         session.messages.push(ChatMessage {
             role: "assistant".into(),
@@ -279,7 +363,7 @@ impl AgentRuntime {
 
         // 克隆 Arc，移入流闭包，使返回的流为 'static + Send。
         let llm = self.llm.clone();
-        let model = self.model.clone();
+        let ai_settings = self.ai_settings.clone();
         let sessions = self.sessions.clone();
         let memory = self.memory.clone();
         // 把已加载的会话直接移入流闭包：流内不再回查，避免竞态导致助手消息漏存
@@ -291,6 +375,8 @@ impl AgentRuntime {
 
         // 提示词基座与工具列表在流外确定一次（owned，避免闭包捕获 &self）
         let base = self.resolve_base(&format!("project:{}", session.project_id)).await?;
+        // 引导阶段也在流外确定一次：一次对话内不会变化，且必须以项目级进度为准
+        let step = self.current_step_of(session.project_id).await?;
         let tools = self.tools.clone();
         let tool_list = tools.list();
 
@@ -299,9 +385,32 @@ impl AgentRuntime {
             const END: &str = "<<END>>";
             const TOOL_MARKER: &str = "<<CALL_TOOL>>";
             const TOOL_RESULT_MARKER: &str = "<<TOOL_RESULT>>";
-            const MAX_TOOL_ITERS: usize = 6;
+            // 单轮对话内允许的工具调用次数上限。
+            //
+            // 这是一道**安全阀**（防止模型陷入无意义循环把 token 烧光），不是产品功能限制：
+            // 批量创建十几个地点是常见用法，每次创建算一次调用，因此上限必须留足余量。
+            // 用户随时可以用界面上的「停止」按钮主动中断，达到此上限时本轮也会正常收尾
+            // （已完成的工具调用均已落库），再发一条消息即可接着做。
+            const MAX_TOOL_ITERS: usize = 50;
+            // 模型使用不支持的 XML / DSML 工具调用格式时，允许它收到错误后自我修正的次数。
+            const MAX_FORMAT_RETRIES: usize = 3;
+            // 工具调用 JSON 不完整时，允许模型收到错误后自我修正的次数；超过就停止本轮，避免无限空转。
+            const MAX_PARSE_RETRIES: usize = 3;
+            // 正文下发的内部分隔标记（用于判断"末尾是否可能是标记前缀"）。
+            const STREAM_MARKERS: [&str; 2] = [TOOL_MARKER, MARKER];
 
             let mut tool_iters: usize = 0;
+            let mut format_retries: usize = 0;
+            let mut parse_retries: usize = 0;
+
+            // 本轮对话使用的模型名：启动时不固化，每次对话前从设置页读取。
+            let model = match ai_settings.load().await {
+                Ok(config) => config.model,
+                Err(e) => {
+                    yield Ok(AgentStreamEvent::Error(format!("读取运行时 AI 配置失败：{}", e)));
+                    return;
+                }
+            };
 
             loop {
                 // 每次迭代重建提示词与历史（含已积累的 tool 消息），让模型看到上一轮工具结果
@@ -312,11 +421,11 @@ impl AgentRuntime {
                     .into_iter()
                     .map(|m| format!("[{}] {}", m.memory_type, m.content))
                     .collect();
-                let system = build_system_prompt(&base, &session.current_step, &tool_list, &memories);
+                let system = build_system_prompt(&base, &step, &tool_list, &memories);
                 let history = session
                     .messages
                     .iter()
-                    .map(|m| {
+                    .filter_map(|m| {
                         let body = if m.role == "tool" {
                             match parse_tool_result(&m.content) {
                                 Some((name, ok, output)) => format!(
@@ -327,10 +436,19 @@ impl AgentRuntime {
                                 ),
                                 None => m.content.clone(),
                             }
+                        } else if m.role == "assistant" {
+                            // 历史里可能残留旧版本未清理的 XML / DSML 工具调用：
+                            // 回灌给模型前先剥掉，避免继续污染上下文、强化错误格式。
+                            strip_xml_tool_calls(&m.content)
                         } else {
                             m.content.clone()
                         };
-                        format!("{}：{}", m.role, body)
+                        let body = body.trim();
+                        if body.is_empty() {
+                            None
+                        } else {
+                            Some(format!("{}：{}", m.role, body))
+                        }
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -350,25 +468,88 @@ impl AgentRuntime {
                 let mut tjson = String::new();
                 let mut question: Option<(String, Vec<String>)> = None;
                 let mut tool_json: Option<String> = None;
+                // `acc` 中已下发给前端的字节数（正文增量发送的游标）。
+                let mut emitted = 0usize;
+                // 本轮流里最后一次用量统计（含缓存命中），流结束时下发给前端。
+                let mut last_usage: Option<LlmUsage> = None;
+                // 流结束原因；`length` 表示输出撞到 max_tokens，JSON 很可能被截断。
+                let mut last_finish_reason: Option<String> = None;
 
                 while let Some(res) = llm_stream.next().await {
                     match res {
-                        Ok(tok) => {
+                        // 用量统计：记录即可，不参与正文解析
+                        Ok(LlmStreamChunk::Usage(usage)) => {
+                            last_usage = Some(usage);
+                        }
+                        // 结束原因只记录，正文/工具解析结束后再决定如何提示
+                        Ok(LlmStreamChunk::Finish(reason)) => {
+                            last_finish_reason = Some(reason);
+                        }
+                        Ok(LlmStreamChunk::Token(tok)) => {
                             acc.push_str(&tok);
                             // 优先识别工具调用标记；其次选择题标记；否则按 token 透传
                             if !in_q && !in_tool {
-                                if acc.contains(TOOL_MARKER) {
+                                if let Some(pos) = acc.find(TOOL_MARKER) {
+                                    // 标记之前的正文照常下发，标记本身绝不下发
+                                    if pos > emitted {
+                                        yield Ok(AgentStreamEvent::Token(
+                                            acc[emitted..pos].to_string(),
+                                        ));
+                                        emitted = pos;
+                                    }
                                     in_tool = true;
-                                    if let Some(pos) = acc.find(TOOL_MARKER) {
-                                        tjson = acc[pos + TOOL_MARKER.len()..].to_string();
+                                    tjson = acc[pos + TOOL_MARKER.len()..].to_string();
+                                } else if let Some((start, end)) =
+                                    find_fullwidth_marker(&acc, "CALL_TOOL")
+                                {
+                                    // 模型把标记写成了全角竖线形态（｜｜CALL_TOOL｜｜）：
+                                    // 同样按工具调用处理，并让游标跳过这段伪标记（绝不下发）。
+                                    if start > emitted {
+                                        yield Ok(AgentStreamEvent::Token(
+                                            acc[emitted..start].to_string(),
+                                        ));
                                     }
-                                } else if acc.contains(MARKER) {
+                                    emitted = end;
+                                    in_tool = true;
+                                    tjson = acc[end..].to_string();
+                                } else if let Some(pos) = acc.find(MARKER) {
+                                    if pos > emitted {
+                                        yield Ok(AgentStreamEvent::Token(
+                                            acc[emitted..pos].to_string(),
+                                        ));
+                                        emitted = pos;
+                                    }
                                     in_q = true;
-                                    if let Some(pos) = acc.find(MARKER) {
-                                        qjson = acc[pos + MARKER.len()..].to_string();
+                                    qjson = acc[pos + MARKER.len()..].to_string();
+                                } else if let Some((start, end)) =
+                                    find_fullwidth_marker(&acc, "ASK_QUESTION")
+                                {
+                                    // 同上：全角竖线形态的选择题标记
+                                    if start > emitted {
+                                        yield Ok(AgentStreamEvent::Token(
+                                            acc[emitted..start].to_string(),
+                                        ));
                                     }
+                                    emitted = end;
+                                    in_q = true;
+                                    qjson = acc[end..].to_string();
                                 } else {
-                                    yield Ok(AgentStreamEvent::Token(tok));
+                                    // 无标记：只下发「确定不可能属于标记前缀」的部分。
+                                    // 标记常被模型分片成多个 token（如 `<<CAL` + `L_TOOL>>`），
+                                    // 直接透传会把前半截泄漏到聊天界面。
+                                    let safe_end = floor_char_boundary(
+                                        &acc,
+                                        acc.len().saturating_sub(marker_prefix_hold(
+                                            &acc,
+                                            &STREAM_MARKERS,
+                                        )),
+                                    );
+                                    if safe_end > emitted {
+                                        yield Ok(AgentStreamEvent::Token(
+                                            acc[emitted..safe_end].to_string(),
+                                        ));
+                                        emitted = safe_end;
+                                    }
                                 }
                             }
                             if in_tool {
@@ -411,6 +592,7 @@ impl AgentRuntime {
                                     } else {
                                         // 解析失败：退回文本（回放已收集内容）
                                         yield Ok(AgentStreamEvent::Token(qjson.clone()));
+                                        emitted = acc.len();
                                         in_q = false;
                                     }
                                 }
@@ -423,6 +605,11 @@ impl AgentRuntime {
                     }
                 }
 
+                // 流结束：补发此前为防标记泄漏而暂留的正文
+                if !in_tool && !in_q && emitted < acc.len() {
+                    yield Ok(AgentStreamEvent::Token(acc[emitted..].to_string()));
+                }
+
                 // 流结束：未闭合的工具标记也强制进入工具处理（解析会失败并回灌错误）
                 if in_tool {
                     tool_json = tool_json.or(Some(tjson.trim().to_string()));
@@ -432,9 +619,13 @@ impl AgentRuntime {
                 if let Some(json_str) = tool_json {
                     tool_iters += 1;
                     if tool_iters > MAX_TOOL_ITERS {
-                        yield Ok(AgentStreamEvent::Error(
-                            "工具调用次数超过上限，请简化请求或分步进行".into(),
-                        ));
+                        // 安全阀触发：本轮正常收尾，已完成的调用都已落库。
+                        // 提示里说明"如何继续"，避免用户以为整轮白做了。
+                        yield Ok(AgentStreamEvent::Error(format!(
+                            "本轮工具调用已达上限（{} 次安全阀）。已完成的改动均已保存；\
+                             如需继续，直接再发一条消息即可（例如「继续」）。",
+                            MAX_TOOL_ITERS
+                        )));
                         break;
                     }
                     let (name, input, ok, output) = match parse_tool_call(&json_str) {
@@ -450,7 +641,69 @@ impl AgentRuntime {
                                 Err(e) => (n, i, false, e.to_string()),
                             }
                         }
-                        Err(e) => (String::new(), serde_json::json!({}), false, e.to_string()),
+                        Err(e) => {
+                            parse_retries += 1;
+
+                            // 把真正的诊断信息返回给 AI 和用户，而不是只写日志、
+                            // 更不是所有错误都写“输出过长”。
+                            let finish_reason = last_finish_reason
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let completion_tokens = last_usage
+                                .as_ref()
+                                .map(|u| u.completion_tokens)
+                                .unwrap_or(0);
+                            let tail: String = {
+                                let chars: Vec<char> = json_str.chars().collect();
+                                chars[chars.len().saturating_sub(180)..].iter().collect()
+                            };
+                            tracing::warn!(
+                                finish_reason = %finish_reason,
+                                completion_tokens,
+                                json_len = json_str.len(),
+                                json_tail = %tail,
+                                "工具调用 JSON 解析失败"
+                            );
+
+                            // 返回原始诊断，不做解释、不做美化：
+                            // 用户和 AI 需要看到原始错误、finish_reason、长度和尾部，
+                            // 由他们决定怎么反馈/修正。
+                            append_tool_error_log(&serde_json::json!({
+                                "time": Utc::now().to_rfc3339(),
+                                "session_id": session.id.to_string(),
+                                "model": model.clone(),
+                                "raw_error": e.to_string(),
+                                "finish_reason": finish_reason.clone(),
+                                "completion_tokens": completion_tokens,
+                                "json_length": json_str.len(),
+                                "json_full": json_str.clone(),
+                            }));
+
+                            let mut message = format!(
+                                "工具调用 JSON 解析失败（原始错误，未美化）：\n\
+                                 raw_error: {}\n\
+                                 finish_reason: {}\n\
+                                 completion_tokens: {}\n\
+                                 json_length: {}\n\
+                                 json_tail: {}\n\
+                                 完整 JSON 已写入日志：tmp/agent_tool_errors.jsonl",
+                                e,
+                                finish_reason,
+                                completion_tokens,
+                                json_str.len(),
+                                tail,
+                            );
+                            if parse_retries >= MAX_PARSE_RETRIES {
+                                message.push_str("\n已连续多次失败，本轮将停止自动重试。");
+                            }
+
+                            (
+                                "tool_call_json_error".to_string(),
+                                serde_json::json!({}),
+                                false,
+                                message,
+                            )
+                        }
                     };
                     // 持久化工具结果（前端重载时按 <<TOOL_RESULT>> 标记渲染为工具卡片）
                     let result_content = format!(
@@ -473,6 +726,16 @@ impl AgentRuntime {
                         ok,
                         output,
                     });
+
+                    // JSON 连续不完整时不要无限重试：给用户一个明确收尾，避免一直刷错误卡片。
+                    if parse_retries >= MAX_PARSE_RETRIES {
+                        yield Ok(AgentStreamEvent::Error(format!(
+                            "AI 连续 {} 次生成不完整的工具调用 JSON，本轮已停止自动重试。\
+                             请拆小任务后重试；若反复出现，需要根据后端日志检查模型/网关是否稳定。",
+                            MAX_PARSE_RETRIES
+                        )));
+                        break;
+                    }
                     continue;
                 }
 
@@ -482,16 +745,88 @@ impl AgentRuntime {
                     break;
                 }
 
-                // 普通文本：把整段作为助手消息落库
-                if !acc.trim().is_empty() {
+                // 普通文本：剥离模型自带的 XML / DSML 风格工具调用。
+                let (stripped, had_unsupported_call) = strip_xml_tool_calls_with_flag(&acc);
+                let text = stripped.trim().to_string();
+
+                if had_unsupported_call {
+                    format_retries += 1;
+                    let (attempted_name, attempted_input) = extract_unsupported_tool_call(&acc);
+                    let output = format!(
+                        "工具调用格式错误：检测到不受支持的 XML/DSML 调用格式，因此本次没有执行。\
+                         请改用 <<CALL_TOOL>>{{\"name\":\"工具名\",\"input\":{{...}}}}<<END>> 重新输出；\
+                         不要使用 <invoke>、<parameter>、<calls> 或 \u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} 这类标签。{}",
+                        if attempted_name.is_empty() || attempted_name == "tool_format_error" {
+                            String::new()
+                        } else {
+                            format!("看起来你原本想调用 `{}`。", attempted_name)
+                        }
+                    );
+                    let display_name = if attempted_name.is_empty() {
+                        "tool_format_error".to_string()
+                    } else {
+                        attempted_name.clone()
+                    };
+
+                    // 模型在坏调用之外写的正文仍然保留，方便用户理解上下文。
+                    if !text.is_empty() {
+                        session.messages.push(ChatMessage {
+                            role: "assistant".into(),
+                            content: text.clone(),
+                            created_at: Utc::now(),
+                        });
+                    }
+
+                    // 以 `tool` 消息回灌失败结果：下一轮模型会看到具体错误并自我修正。
+                    let result_content = format!(
+                        "{}{}{}",
+                        TOOL_RESULT_MARKER,
+                        serde_json::json!({
+                            "name": display_name.clone(),
+                            "input": attempted_input.clone(),
+                            "ok": false,
+                            "output": output.clone(),
+                        }),
+                        END
+                    );
                     session.messages.push(ChatMessage {
-                        role: "assistant".into(),
-                        content: acc.trim().to_string(),
+                        role: "tool".into(),
+                        content: result_content,
                         created_at: Utc::now(),
                     });
                     if let Err(e) = sessions.update(session.clone()).await {
                         yield Ok(AgentStreamEvent::Error(format!("保存会话失败: {}", e)));
                     }
+                    yield Ok(AgentStreamEvent::Tool {
+                        name: display_name,
+                        input: attempted_input,
+                        ok: false,
+                        output,
+                    });
+
+                    if format_retries > MAX_FORMAT_RETRIES {
+                        yield Ok(AgentStreamEvent::Error(format!(
+                            "AI 多次使用不受支持的工具调用格式，本轮已停止自动重试。\
+                             请再发一条消息让它重试，或检查模型输出格式。"
+                        )));
+                        break;
+                    }
+                    continue;
+                }
+
+                if !text.is_empty() {
+                    session.messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: text,
+                        created_at: Utc::now(),
+                    });
+                    if let Err(e) = sessions.update(session.clone()).await {
+                        yield Ok(AgentStreamEvent::Error(format!("保存会话失败: {}", e)));
+                    }
+                }
+                // 先下发用量统计（含缓存命中），再宣告结束——前端在 done 时即可展示
+                if let Some(usage) = last_usage {
+                    yield Ok(AgentStreamEvent::Usage(usage));
                 }
                 yield Ok(AgentStreamEvent::Done);
                 break;
@@ -568,6 +903,201 @@ fn parse_ask_question(s: &str) -> Option<(String, Vec<String>)> {
     Some((question, options))
 }
 
+/// 末尾需要暂留的字节数：`s` 的后缀若可能是某个标记的前缀，这部分就不能立即下发。
+///
+/// 例：`s` 以 `<<CAL` 结尾时返回 5（`<<CALL_TOOL>>` 以它开头）；
+/// 普通正文（不含 `<<`）返回 0，可零延迟下发，因此不影响正常流式观感。
+fn marker_prefix_hold(s: &str, markers: &[&str]) -> usize {
+    let max_len = markers.iter().map(|m| m.len()).max().unwrap_or(0);
+    if max_len <= 1 {
+        return 0;
+    }
+    // 只看末尾 max_len - 1 字节：更长的后缀不可能是某个标记的前缀
+    let tail_start = floor_char_boundary(s, s.len().saturating_sub(max_len - 1));
+    let tail = &s[tail_start..];
+
+    let mut hold = 0;
+    for len in 1..=tail.len() {
+        let start = floor_char_boundary(tail, tail.len() - len);
+        let suffix = &tail[start..];
+        if suffix.len() != len {
+            continue; // 落在多字节字符中间
+        }
+        if markers.iter().any(|m| m.starts_with(suffix)) {
+            hold = len;
+        }
+    }
+    hold
+}
+
+/// 在累积文本中查找「全角竖线形态」的标记，返回 `(起始字节位置, 结束字节位置)`。
+///
+/// 部分模型会把 `<<CALL_TOOL>>` 输出成 `｜｜CALL_TOOL｜｜`——`｜` 是 U+FF5C
+/// **全角竖线**，在界面上与 `<` `>` 几乎无法分辨，但字节完全不同，
+/// 会导致标记识别失败：调用既不执行，内容又被当作正文显示给用户。
+fn find_fullwidth_marker(haystack: &str, name: &str) -> Option<(usize, usize)> {
+    let needle = format!("\u{FF5C}\u{FF5C}{}\u{FF5C}\u{FF5C}", name);
+    haystack.find(&needle).map(|i| (i, i + needle.len()))
+}
+
+/// 剥离模型输出中的 XML / DSML 风格工具调用块。
+///
+/// 部分模型（如 DeepSeek 系）会用 `<invoke name="…"><parameter …/></invoke>` 这类
+/// 原生 function-calling 格式，而本项目只解析 `<<CALL_TOOL>>`。这类内容
+/// **不会被执行**；若原样落库，下一轮还会作为上下文回灌给模型，反过来强化这种错误格式。
+///
+/// 除了标准 XML，还要兼容实际出现过的畸形写法：
+/// - `<<> calls>` / `</<> invoke>`：模型把 `<>` 当成标签分隔符；
+/// - `<\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} calls>`：DSML 包裹标签（`\u{FF5C}` 是全角竖线）。
+///
+/// 未闭合的块（流式中途）一并吞到文末。
+fn strip_xml_tool_calls(text: &str) -> String {
+    strip_xml_tool_calls_with_flag(text).0
+}
+
+/// 同 [`strip_xml_tool_calls`]，但同时返回“是否真的检测到不支持的调用格式”。
+///
+/// 调用方可用这个标记决定要不要给用户补一句“该次调用未执行”的说明，
+/// 避免模型用坏格式调用工具时，用户侧看起来像 AI 什么都没做。
+fn strip_xml_tool_calls_with_flag(text: &str) -> (String, bool) {
+    // 打开标签 → 对应闭合标签。必须成对匹配，不能一律取“最近闭合”，
+    // 否则 `<calls><invoke>…</invoke></calls>` 会只吃掉 `</invoke>` 而留下 `</calls>`。
+    const BLOCKS: [(&str, &str); 4] = [
+        ("<tool_calls>", "</tool_calls>"),
+        ("<calls>", "</calls>"),
+        ("<invoke", "</invoke>"),
+        ("<function_call>", "</function_call>"),
+    ];
+
+    let normalized = normalize_malformed_tool_tags(text);
+    let had_unsupported = BLOCKS
+        .iter()
+        .any(|(open, _close)| normalized.contains(open));
+
+    let mut out = String::with_capacity(normalized.len());
+    let mut rest = normalized.as_str();
+
+    loop {
+        let Some((start, _open, close)) = BLOCKS
+            .iter()
+            .filter_map(|(open, close)| rest.find(open).map(|i| (i, *open, *close)))
+            .min_by_key(|(i, _, _)| *i)
+        else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        // 块结束：优先找当前打开标签对应的闭合标签；没有闭合则吞到文末。
+        let end = tail
+            .find(close)
+            .map(|i| i + close.len())
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+
+    (strip_orphan_xml_tags(&out), had_unsupported)
+}
+
+/// 把模型写坏的标签归一化成普通 XML 形态，方便 `strip_xml_tool_calls` 统一处理。
+fn normalize_malformed_tool_tags(text: &str) -> String {
+    let mut out = text.to_string();
+
+    // 形态一：`<<> calls>` / `</<> invoke>`（`<>` 被当成分隔符）。
+    // 模型通常在 `<<>` 后留一个空格，必须先连同空白一起替换，否则会留下 `< calls>`。
+    out = out
+        .replace("<<> ", "<")
+        .replace("<<>\t", "<")
+        .replace("<<>\n", "<")
+        .replace("<<>", "<")
+        .replace("</<> ", "</")
+        .replace("</<>\t", "</")
+        .replace("</<>\n", "</")
+        .replace("</<>", "</");
+
+    // 形态二：DSML 包裹，如 `<\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} calls>`。
+    // 同时兼容全角竖线和 ASCII `||DSML||`。
+    for marker in ["\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C}", "||DSML||"] {
+        // 模型通常会在包裹符后留一个空格：`<｜｜DSML｜｜ calls>`。
+        out = out.replace(&format!("<{} ", marker), "<");
+        out = out.replace(&format!("</{} ", marker), "</");
+        // 无空格兜底。
+        out = out.replace(&format!("<{}", marker), "<");
+        out = out.replace(&format!("</{}", marker), "</");
+    }
+
+    out
+}
+
+/// 清掉剥离主块后仍残留的孤立 XML 标签（如单独的 `<parameter name="id">`）。
+fn strip_orphan_xml_tags(text: &str) -> String {
+    const TAGS: [&str; 10] = [
+        "<parameter",
+        "</parameter>",
+        "<arguments",
+        "</arguments>",
+        "<tool_calls>",
+        "</tool_calls>",
+        "<calls>",
+        "</calls>",
+        "<invoke",
+        "</invoke>",
+    ];
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    loop {
+        let Some((start, _)) = TAGS
+            .iter()
+            .filter_map(|tag| rest.find(tag).map(|i| (i, *tag)))
+            .min_by_key(|(i, _)| *i)
+        else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        // 从标签起点删到最近的 `>`；没有 `>`（流式半截）则直接丢弃到文末。
+        if let Some(gt) = tail.find('>') {
+            rest = &tail[gt + 1..];
+        } else {
+            rest = "";
+        }
+    }
+
+    out
+}
+
+/// 从 `i` 向左找最近的可切分字符边界（避免切坏多字节字符）。
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// 把工具调用 JSON 失败的**原始记录**追加到 JSONL 日志。
+///
+/// 默认写到项目根下的 `tmp/agent_tool_errors.jsonl`；可用环境变量
+/// `NOVEL_TOOL_ERROR_LOG` 覆盖。写入失败不打断对话（日志只是诊断辅助）。
+fn append_tool_error_log(record: &serde_json::Value) {
+    use std::io::Write;
+
+    let path = std::env::var("NOVEL_TOOL_ERROR_LOG")
+        .unwrap_or_else(|_| "tmp/agent_tool_errors.jsonl".to_string());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{}", record);
+    }
+}
+
 /// 解析 `<<CALL_TOOL>>` 的 JSON：`{"name":"...","input":{...}}`。
 ///
 /// 复用 `extract_json_object` 容忍多余字符。`name` 必填；`input` 缺省为空对象；
@@ -581,8 +1111,41 @@ fn parse_ask_question(s: &str) -> Option<(String, Vec<String>)> {
 fn parse_tool_call(s: &str) -> Result<(String, serde_json::Value)> {
     let json = extract_json_object(s)
         .ok_or_else(|| anyhow::anyhow!("工具调用 JSON 解析失败"))?;
-    let v: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| anyhow::anyhow!("工具调用 JSON 解析失败: {}", e))?;
+
+    let v: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(v) => v,
+        Err(first) => {
+            let first_msg = first.to_string();
+            // 模型非常常见的坏习惯：JSON 结尾少一个/多个右括号。
+            // 只在 EOF 且能用栈扫描确定缺失的闭合符时做“补齐”，不改动已有结构。
+            if first_msg.contains("EOF while parsing") {
+                if let Some(repaired) = repair_incomplete_json(&json) {
+                    match serde_json::from_str::<serde_json::Value>(&repaired) {
+                        Ok(v) => {
+                            tracing::warn!(
+                                original_len = json.len(),
+                                repaired_len = repaired.len(),
+                                "自动补齐工具调用 JSON 缺失的右括号"
+                            );
+                            v
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("工具调用 JSON 解析失败: {}", e));
+                        }
+                    }
+                } else {
+                    return Err(anyhow::anyhow!("工具调用 JSON 解析失败: {}", first_msg));
+                }
+            } else {
+                return Err(anyhow::anyhow!("工具调用 JSON 解析失败: {}", first_msg));
+            }
+        }
+    };
+
+    finish_parse_tool_value(v)
+}
+
+fn finish_parse_tool_value(v: serde_json::Value) -> Result<(String, serde_json::Value)> {
     let name = v
         .get("name")
         .and_then(|x| x.as_str())
@@ -594,6 +1157,58 @@ fn parse_tool_call(s: &str) -> Result<(String, serde_json::Value)> {
         anyhow::bail!("工具调用 input 必须为 JSON 对象");
     }
     Ok((name, input))
+}
+
+/// 对“JSON 对象已结束，只是外层少右括号”的常见情况做最小修复：
+/// 用栈扫描字符串（忽略字符串字面量里的括号），只补缺失的 `}` / `]`。
+/// 不改动已有内容、不修缺少逗号/引号这类无法安全推断的错误。
+fn repair_incomplete_json(s: &str) -> Option<String> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => stack.push(ch),
+            '}' => {
+                if stack.pop() != Some('{') {
+                    return None;
+                }
+            }
+            ']' => {
+                if stack.pop() != Some('[') {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 字符串没闭合、或没有缺失闭合符时，不做猜测。
+    if in_string || stack.is_empty() {
+        return None;
+    }
+
+    let mut out = s.trim_end().to_string();
+    while out.ends_with(',') {
+        out.pop();
+    }
+    for open in stack.iter().rev() {
+        out.push(if *open == '{' { '}' } else { ']' });
+    }
+    Some(out)
 }
 
 /// 检测 input 是不是 LLM 把 JSON schema 原文当 input 传。
@@ -648,6 +1263,21 @@ mod tests_parse_tool_call {
         let v = json!({"type": "Faction", "name": "x"});
         let out = unwrap_schema_shaped_input(v.clone());
         assert_eq!(out, v);
+    }
+
+    #[test]
+    fn repairs_missing_outer_brace() {
+        // 数据库里真实出现过：外层对象少一个右花括号。
+        let broken = r#"{"name":"update_character_profile","input":{"id":"x","capabilities":{"skills":["a"],"limitations":["b"]}}"#;
+        let repaired = repair_incomplete_json(broken).expect("应能补齐右括号");
+        let v: serde_json::Value = serde_json::from_str(&repaired).expect("补齐后应是合法 JSON");
+        assert_eq!(v["input"]["capabilities"]["skills"][0], "a");
+    }
+
+    #[test]
+    fn does_not_repair_unterminated_string() {
+        // 字符串没闭合时无法安全猜测，应拒绝修复。
+        assert!(repair_incomplete_json("{\"a\":\"").is_none());
     }
 }
 
@@ -704,6 +1334,46 @@ fn extract_json_object(s: &str) -> Option<String> {
     Some(s[start..=end].to_string())
 }
 
+/// 从不受支持的 XML / DSML 工具调用文本里，尽量提取「模型原本想调用的工具名和入参」。
+///
+/// 只用于把错误写得更清楚并回灌给模型，不会真的执行这个坏格式调用。
+fn extract_unsupported_tool_call(text: &str) -> (String, serde_json::Value) {
+    let normalized = normalize_malformed_tool_tags(text);
+
+    // 形态一：DSML 里常带一段完整 JSON：<invoke name="CALL_TOOL">{"name":"get_entity","input":{...}}
+    if let Some(json) = extract_json_object(&normalized) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+            if let Some(name) = value.get("name").and_then(|x| x.as_str()) {
+                let name = name.trim();
+                if !name.is_empty() {
+                    let input = value
+                        .get("input")
+                        .cloned()
+                        .filter(|v| v.is_object())
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    return (name.to_string(), input);
+                }
+            }
+        }
+    }
+
+    // 形态二：原生 XML function-call：<invoke name="get_entity"><parameter ...>
+    if let Some(idx) = normalized.find("<invoke") {
+        let tail = &normalized[idx..];
+        if let Some(attr_start) = tail.find("name=\"") {
+            let rest = &tail[attr_start + 6..];
+            if let Some(end) = rest.find('"') {
+                let name = rest[..end].trim();
+                if !name.is_empty() && name != "CALL_TOOL" {
+                    return (name.to_string(), serde_json::json!({}));
+                }
+            }
+        }
+    }
+
+    ("tool_format_error".to_string(), serde_json::json!({}))
+}
+
 /// 轻量 JSON Schema 校验：检查 `required` 字段存在且非空，并按 `properties` 中的
 /// `type` 做基础类型校验（string/object/array/number/boolean）。不做深层结构校验。
 fn validate_input(input: &serde_json::Value, schema: &serde_json::Value) -> Result<()> {
@@ -726,23 +1396,180 @@ fn validate_input(input: &serde_json::Value, schema: &serde_json::Value) -> Resu
     if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
         for (k, v) in obj {
             if let Some(spec) = props.get(k) {
-                if let Some(t) = spec.get("type").and_then(|t| t.as_str()) {
-                    let ok = match t {
-                        "string" => v.is_string(),
-                        "object" => v.is_object(),
-                        "array" => v.is_array(),
-                        "number" => v.is_number(),
-                        "boolean" => v.is_boolean(),
-                        "integer" => v.is_i64() || v.is_u64(),
-                        _ => true,
-                    };
-                    if !ok {
-                        anyhow::bail!("字段 '{}' 应为类型 {}", k, t);
+                match spec.get("type") {
+                    // 单一类型
+                    Some(serde_json::Value::String(t)) => {
+                        if !type_matches(v, t) {
+                            anyhow::bail!("字段 '{}' 应为类型 {}", k, t);
+                        }
                     }
+                    // 多类型（如 ["string", "object"]）：满足任一即可。
+                    // 有些字段本就允许"简单写法或结构化写法"两种形态，
+                    // 若只声明一种，模型的另一种合理写法会被硬拒（实测踩到过）。
+                    Some(serde_json::Value::Array(types)) => {
+                        let names: Vec<&str> = types.iter().filter_map(|t| t.as_str()).collect();
+                        if !names.is_empty() && !names.iter().any(|t| type_matches(v, t)) {
+                            anyhow::bail!("字段 '{}' 应为类型 {}", k, names.join(" 或 "));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
     Ok(())
+}
+
+/// 单个 JSON 值是否符合给定的类型名。
+fn type_matches(v: &serde_json::Value, t: &str) -> bool {
+    match t {
+        "string" => v.is_string(),
+        "object" => v.is_object(),
+        "array" => v.is_array(),
+        "number" => v.is_number(),
+        "boolean" => v.is_boolean(),
+        "integer" => v.is_i64() || v.is_u64(),
+        "null" => v.is_null(),
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod stream_marker_tests {
+    use super::*;
+
+    const MARKERS: [&str; 2] = ["<<CALL_TOOL>>", "<<ASK_QUESTION>>"];
+
+    #[test]
+    fn plain_text_is_never_held_back() {
+        // 普通正文（不含 `<<`）可以零延迟下发
+        assert_eq!(marker_prefix_hold("你好，我来修改主角", &MARKERS), 0);
+        assert_eq!(marker_prefix_hold("hello world", &MARKERS), 0);
+        assert_eq!(marker_prefix_hold("", &MARKERS), 0);
+    }
+
+    #[test]
+    fn partial_marker_is_held_back() {
+        // 模型把标记分片成多个 token 时，这些片段绝不能下发
+        assert_eq!(marker_prefix_hold("<<", &MARKERS), 2);
+        assert_eq!(marker_prefix_hold("我来改<<CAL", &MARKERS), 5);
+        assert_eq!(marker_prefix_hold("<<CALL_TOOL>", &MARKERS), 12);
+        assert_eq!(marker_prefix_hold("<<ASK_QUES", &MARKERS), 10);
+    }
+
+    #[test]
+    fn single_angle_bracket_is_not_a_marker_prefix() {
+        // 标记都以 `<<` 开头，单个 `<` 不构成前缀
+        assert_eq!(marker_prefix_hold("a<b", &MARKERS), 0);
+        assert_eq!(marker_prefix_hold("a<x>", &MARKERS), 0);
+    }
+
+    #[test]
+    fn floor_char_boundary_never_splits_multibyte_chars() {
+        let s = "你好"; // 每个汉字 3 字节
+        assert_eq!(floor_char_boundary(s, 4), 3);
+        assert_eq!(floor_char_boundary(s, 6), 6);
+        assert_eq!(floor_char_boundary(s, 99), 6);
+        assert!(s.is_char_boundary(floor_char_boundary(s, 4)));
+    }
+
+    #[test]
+    fn strips_complete_xml_tool_call() {
+        let s = "好的，我来修改。\n<tool_calls>\n<invoke name=\"get_entity\">\n<parameter name=\"id\">abc</parameter>\n</invoke>\n</tool_calls>\n";
+        let out = strip_xml_tool_calls(s);
+        assert!(out.contains("好的，我来修改"));
+        assert!(!out.contains("invoke"));
+        assert!(!out.contains("parameter"));
+    }
+
+    #[test]
+    fn strips_unclosed_xml_tool_call_to_end() {
+        let s = "正文内容\n<invoke name=\"get_entity\">\n<parameter name=\"id\">abc</parameter>";
+        assert_eq!(strip_xml_tool_calls(s).trim(), "正文内容");
+    }
+
+    #[test]
+    fn keeps_plain_text_with_angle_brackets() {
+        let s = "这是一段普通正文，包含 < 和 > 符号。";
+        assert_eq!(strip_xml_tool_calls(s), s);
+    }
+
+    #[test]
+    fn strips_calls_tag_block_without_tool_calls_prefix() {
+        // 模型有时省略 <tool_calls>，直接写 <calls>（也是数据库里出现过的形态）。
+        let s = "好的\n<calls>\n<invoke name=\"get_entity\">\n<parameter name=\"id\">abc</parameter>\n</invoke>\n</calls>";
+        let out = strip_xml_tool_calls(s);
+        assert!(out.contains("好的"));
+        for leaked in ["calls", "invoke", "parameter", "abc"] {
+            assert!(!out.contains(leaked), "不应残留 {leaked}: {out}");
+        }
+    }
+
+    #[test]
+    fn strips_malformed_double_angle_tool_call() {
+        // `<<> calls>` / `</<> invoke>`：模型把 `<>` 当成了标签分隔符。
+        let s = "重试\n<<> calls>\n<<> invoke name=\"get_entity\">\n<<> parameter name=\"id\">abc</<> parameter>\n</<> invoke>\n</<> calls>";
+        let out = strip_xml_tool_calls(s);
+        assert!(out.contains("重试"));
+        for leaked in ["<<>", "invoke", "parameter", "abc"] {
+            assert!(!out.contains(leaked), "不应残留 {leaked}: {out}");
+        }
+    }
+
+    #[test]
+    fn strips_dsml_wrapped_tool_call() {
+        // 数据库真实样本：<\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} calls> ...
+        let marker = "\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C}";
+        let s = format!(
+            "重试\n<{marker} calls>\n<{marker} invoke name=\"get_character_profile\">\n<{marker} parameter name=\"id\" string=\"true\">133b6607-1cc8-4161-92b4-40c54857e9c0</{marker} parameter>\n</{marker} invoke>\n</{marker} calls>"
+        );
+        let out = strip_xml_tool_calls(&s);
+        assert!(out.contains("重试"));
+        for leaked in ["DSML", "calls", "invoke", "parameter", "133b6607", "\u{FF5C}"] {
+            assert!(!out.contains(leaked), "不应残留 {leaked}: {out}");
+        }
+    }
+
+    #[test]
+    fn extracts_attempted_tool_from_dsml_json() {
+        // 坏格式里带完整 JSON 时，应尽量提取出模型原本想调用的工具。
+        let marker = "\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C}";
+        let s = format!(
+            "<{marker} calls>\n<{marker} invoke name=\"CALL_TOOL\">{{\"name\":\"get_entity\",\"input\":{{\"id\":\"abc\"}}}}"
+        );
+        let (name, input) = extract_unsupported_tool_call(&s);
+        assert_eq!(name, "get_entity");
+        assert_eq!(input["id"], "abc");
+    }
+
+    #[test]
+    fn extracts_attempted_tool_from_xml_invoke() {
+        let s = "<calls><invoke name=\"get_character_profile\"><parameter name=\"id\">abc</parameter></invoke></calls>";
+        let (name, input) = extract_unsupported_tool_call(s);
+        assert_eq!(name, "get_character_profile");
+        assert!(input.is_object());
+    }
+
+    #[test]
+    fn detects_fullwidth_bar_marker() {
+        // 模型把 `<<CALL_TOOL>>` 写成了全角竖线形态
+        let s = "<\u{FF5C}\u{FF5C}CALL_TOOL\u{FF5C}\u{FF5C}>{\"name\":\"x\"}";
+        let (start, end) = find_fullwidth_marker(s, "CALL_TOOL").expect("应识别出全角标记");
+        assert_eq!(&s[start..end], "\u{FF5C}\u{FF5C}CALL_TOOL\u{FF5C}\u{FF5C}");
+        // 标记之后的 JSON 可以正常取出
+        assert!(s[end..].contains("\"name\""));
+    }
+
+    #[test]
+    fn ignores_ascii_marker_in_fullwidth_lookup() {
+        // ASCII 形态不应被全角查找命中（两套检测互相独立）
+        assert!(find_fullwidth_marker("<<CALL_TOOL>>{}", "CALL_TOOL").is_none());
+    }
+
+    #[test]
+    fn ignores_plain_text_with_fullwidth_bars() {
+        // 普通中文里的全角竖线不应被误判
+        assert!(find_fullwidth_marker("表格｜列｜说明", "CALL_TOOL").is_none());
+    }
 }

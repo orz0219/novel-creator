@@ -1,0 +1,11 @@
+[package]
+name = "testkit"
+description = "集成测试共享工具：把测试数据写进独立的测试库，不碰开发库"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+db = { workspace = true }

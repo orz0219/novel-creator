@@ -1,6 +1,8 @@
 pub mod entity;
 pub mod world;
 pub mod character;
+
+pub mod arc_stage;
 pub mod faction;
 pub mod state;
 pub mod narrative;
@@ -36,6 +38,7 @@ pub mod world_version;
 pub mod util;
 pub mod extraction;
 pub mod agent_store;
+pub mod model_catalog;
 
 pub use util::{deterministic_uuid, sha256_hex};
 pub use extraction::*;
@@ -48,6 +51,7 @@ pub use repair::*;
 pub use world_version::*;
 pub use world::*;
 pub use character::*;
+pub use arc_stage::*;
 pub use faction::*;
 pub use narrative::*;
 pub use knowledge::*;

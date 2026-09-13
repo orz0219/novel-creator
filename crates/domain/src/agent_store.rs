@@ -41,7 +41,9 @@ impl AgentSession {
             project_id,
             title: None,
             messages: Vec::new(),
-            current_step: "项目初始化".to_string(),
+            // 会话级字段仅为兼容保留；**引导阶段的真源是 project.config.current_step**。
+            // 这里与 guide 的初始步骤 key 保持一致，避免出现不在步骤清单里的值。
+            current_step: "premise".to_string(),
             created_at: now,
             updated_at: now,
         }

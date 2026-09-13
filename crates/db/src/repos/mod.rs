@@ -29,9 +29,12 @@ pub mod knowledge_gap_repo;
 pub mod summary_repo;
 pub mod identity_repo;
 pub mod character_repo;
+
+pub mod arc_stage_repo;
 pub mod narrative_budget_repo;
 pub mod outbox_repo;
 pub mod world_version_repo;
 pub mod prompt_repo;
 pub mod session_repo;
 pub mod memory_repo;
+pub mod entity_version_repo;

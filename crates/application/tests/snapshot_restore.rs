@@ -14,11 +14,9 @@ use db::application_ports::{DbNarrativeStateWritePort, DbSnapshotRepositoryPort}
 use domain::narrative::StateDimension;
 use domain::ports::NarrativeStateWritePort;
 
+/// 连**测试库**（库名带 _test，自动创建并迁移），不碰开发库
 async fn pool() -> PgPool {
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://novel:novel_pass@localhost:5432/novel_engine".to_string()
-    });
-    sqlx::PgPool::connect(&url).await.expect("connect database")
+    testkit::test_pool().await.expect("连接测试库失败")
 }
 
 fn service(pool: PgPool) -> SnapshotService {

@@ -191,6 +191,53 @@ pub trait GenerationRepositoryPort: Send + Sync {
     ) -> Result<()>;
 }
 
+/// LLM 用量统计（含提示缓存命中信息）。
+///
+/// 数据来自网关返回的 `usage` 字段。不同网关给的细节不同：
+/// 有的给 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`，
+/// 有的给 `prompt_tokens_details.cached_tokens`，两者都解析为 [`cached_tokens`]。
+///
+/// [`cached_tokens`]: LlmUsage::cached_tokens
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LlmUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+    /// 命中提示缓存的 prompt token 数；网关未返回该信息时为 `None`。
+    pub cached_tokens: Option<u32>,
+}
+
+impl LlmUsage {
+    /// 提示缓存命中率（`cached / prompt`）；无缓存信息或 prompt 为 0 时返回 `None`。
+    ///
+    /// 命中率高说明会话前缀被网关缓存复用（省钱、更快）；
+    /// 持续为 0 通常意味着每轮都在重算，或网关侧缓存被驱逐。
+    pub fn cache_hit_rate(&self) -> Option<f32> {
+        let cached = self.cached_tokens?;
+        if self.prompt_tokens == 0 {
+            return None;
+        }
+        Some(cached as f32 / self.prompt_tokens as f32)
+    }
+}
+
+/// 流式返回的一段内容。
+///
+/// 之所以不是单纯的 `String`：网关通常把用量统计放在**最后一个 chunk**，
+/// 若只用字符串通道就没法把缓存命中信息带给上层。
+#[derive(Debug, Clone)]
+pub enum LlmStreamChunk {
+    /// 正文片段。
+    Token(String),
+    /// 本次请求的用量统计。
+    Usage(LlmUsage),
+    /// 流结束原因（如 stop / length / content_filter）。
+    ///
+    /// `length` 表示输出撞到了 `max_tokens` 上限：此时 JSON 工具调用很可能
+    /// 被截断，调用方应给模型/用户明确提示，而不是只报一个 JSON EOF。
+    Finish(String),
+}
+
 /// LLM 调用端口（提案 十 / 十一）。
 ///
 /// GenerationExecutor 只依赖此抽象，具体实现在 infrastructure 中包裹 LlmClient。
@@ -198,19 +245,67 @@ pub trait GenerationRepositoryPort: Send + Sync {
 pub trait LlmPort: Send + Sync {
     async fn complete(&self, system_prompt: &str, user_prompt: &str, model: &str) -> Result<String>;
 
-    /// 流式补全：返回的流逐段产出 token（`Result<String>`）。
+    /// 流式补全：逐段产出正文 token，末尾可能跟一条用量统计。
     ///
-    /// 默认实现回退到 `complete`，把整段文本作为单个 chunk 产出，
+    /// 默认实现回退到 `complete`，把整段文本作为单个 chunk 产出（不含用量），
     /// 因此未覆盖该方法的端口（如测试用 Mock）无需改动即可使用。
     async fn stream_complete(
         &self,
         system_prompt: &str,
         user_prompt: &str,
         model: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk>> + Send>>> {
         let text = self.complete(system_prompt, user_prompt, model).await?;
-        Ok(Box::pin(futures::stream::once(async move { Ok(text) })))
+        Ok(Box::pin(futures::stream::once(async move {
+            Ok(LlmStreamChunk::Token(text))
+        })))
     }
+}
+
+/// 运行时 AI 配置（模型网关参数）。
+///
+/// 真源是「设置」页写入的 `app_settings` 中 `aiBaseUrl / aiApiKey / defaultModel`；
+/// 环境变量（`OPENCODE_BASE_URL` / `OPENCODE_API_KEY` / `OPENCODE_MODEL`）只在
+/// 设置页未配置对应字段时充当默认值。
+#[derive(Debug, Clone)]
+pub struct AiRuntimeConfig {
+    /// OpenAI 兼容网关前缀（不含 `/chat/completions`）。
+    pub base_url: String,
+    /// 未配置密钥时为 None（请求不带 Authorization 头）。
+    pub api_key: Option<String>,
+    /// 模型名，透传给网关的 `model` 字段。
+    pub model: String,
+    /// 单次对话的上下文上限（token），用于聊天页用量预警。
+    ///
+    /// 注意：网关的 `/models` 不返回上下文长度，因此这是**用户在设置页配置的预算**，
+    /// 而非模型硬上限的权威声明；仅用于「快超了」的提前提醒。
+    pub context_limit: usize,
+    /// 单次请求允许模型输出的最大 token 数。
+    ///
+    /// 中文长文本 + 工具调用 JSON 很容易撞上限；设置页可调，默认 22000。
+    pub max_output_tokens: u32,
+}
+
+/// 运行时 AI 配置读取端口。
+///
+/// 每次 LLM 调用前都会调用 [`AiSettingsPort::load`]，因此设置页改完立即对
+/// 对话 / 生成 / 抽取全部生效，无需重启服务。
+#[async_trait]
+pub trait AiSettingsPort: Send + Sync {
+    async fn load(&self) -> Result<AiRuntimeConfig>;
+}
+
+/// 引导进度读取端口。
+///
+/// 真源是 `project.config.current_step`（由 `confirm_step` 工具推进，项目级、多会话共享）。
+/// 注意：`agent_sessions.current_step` 是早期遗留字段，值恒为「项目初始化」，
+/// **不能**作为判断当前引导阶段的依据——否则 LLM 会一直以为还停在第一步。
+#[async_trait]
+pub trait GuideProgressPort: Send + Sync {
+    /// 读取项目当前引导步骤 key（如 `premise` / `golden_finger`）。
+    ///
+    /// 项目存在但尚未写入步骤时返回 `Ok(None)`。
+    async fn current_step(&self, project_id: Uuid) -> Result<Option<String>>;
 }
 
 /// Agent 系统提示词自定义配置（落库实体）。
@@ -650,14 +745,24 @@ pub trait EntityRepositoryPort: Send + Sync {
 
     async fn get_character_profile(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
     async fn get_character_state(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
-    async fn update_character_profile(&self, id: Uuid, profile: serde_json::Value) -> Result<serde_json::Value>;
-    async fn update_character_state(&self, id: Uuid, state: serde_json::Value) -> Result<serde_json::Value>;
+    async fn update_character_profile(&self, id: Uuid, profile: serde_json::Value, actor: &str) -> Result<serde_json::Value>;
+    async fn update_character_state(&self, id: Uuid, state: serde_json::Value, actor: &str) -> Result<serde_json::Value>;
     async fn get_location_profile(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
-    async fn upsert_location_profile(&self, id: Uuid, profile: serde_json::Value) -> Result<serde_json::Value>;
+    async fn upsert_location_profile(&self, id: Uuid, profile: serde_json::Value, actor: &str) -> Result<serde_json::Value>;
     async fn get_faction_profile(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
-    async fn upsert_faction_profile(&self, id: Uuid, profile: serde_json::Value) -> Result<serde_json::Value>;
+    async fn upsert_faction_profile(&self, id: Uuid, profile: serde_json::Value, actor: &str) -> Result<serde_json::Value>;
     async fn get_character_knowledge(&self, id: Uuid) -> Result<Vec<serde_json::Value>>;
     async fn get_character_relationships(&self, id: Uuid) -> Result<Vec<serde_json::Value>>;
+    /// 把「改动前」的档案留档，供版本历史回看。
+    ///
+    /// `actor` 沿用 MutationSource::as_str()：user / ai / system。
+    async fn snapshot_profile(
+        &self,
+        id: Uuid,
+        kind: &str,
+        before: &serde_json::Value,
+        actor: &str,
+    ) -> Result<()>;
 }
 
 /// 解析对象 -> project_id 的低层读端口（仅查询，不修改）。

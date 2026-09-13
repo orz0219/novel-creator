@@ -168,6 +168,17 @@ export async function deletePrompt(scope = 'global'): Promise<void> {
   if (!resp.ok) throw new Error(await errorText(resp))
 }
 
+/** 本轮调用的用量统计（含提示缓存命中）。 */
+export interface LlmUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  /** 命中提示缓存的 prompt token 数；网关未提供该信息时为 null。 */
+  cached_tokens: number | null
+  /** 缓存命中率 0~1；网关未提供缓存信息时为 null。 */
+  cache_hit_rate: number | null
+}
+
 export interface ChatStreamHandlers {
   onStatus?: (data: string) => void
   onToken?: (data: string) => void
@@ -175,6 +186,42 @@ export interface ChatStreamHandlers {
   onError?: (data: string) => void
   onQuestion?: (data: { question: string; options: string[] }) => void
   onTool?: (data: { name: string; input: unknown; ok: boolean; output: string }) => void
+  /** 本轮用量统计（在 done 之前下发一次）。 */
+  onUsage?: (data: LlmUsage) => void
+}
+
+/** 会话上下文用量（估算值，用于聊天页「快超了」预警）。 */
+export interface ContextUsage {
+  used_tokens: number
+  limit_tokens: number
+  message_count: number
+  model: string
+}
+
+/** 读取某会话的上下文用量（后端按会话全部消息估算）。 */
+export async function getContextUsage(sessionId: string): Promise<ContextUsage> {
+  const resp = await fetch(`${BASE}/session/${sessionId}/context`)
+  if (!resp.ok) throw new Error(await errorText(resp))
+  return resp.json()
+}
+
+/**
+ * 截断会话：删除第 `fromIndex` 条消息及其之后的**全部**内容
+ * （含随后产生的用户消息、AI 回复与工具记录），返回截断后的完整会话。
+ *
+ * 用于清掉发错或跑偏的消息，避免它污染后续上下文。
+ */
+export async function truncateSession(
+  sessionId: string,
+  fromIndex: number,
+): Promise<AgentSession> {
+  const resp = await fetch(`${BASE}/session/${sessionId}/truncate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from_index: fromIndex }),
+  })
+  if (!resp.ok) throw new Error(await errorText(resp))
+  return resp.json()
 }
 
 function parseSSEBlock(block: string): { event?: string; data?: string } {
@@ -190,16 +237,20 @@ function parseSSEBlock(block: string): { event?: string; data?: string } {
 /**
  * 发送一条消息并消费 SSE 流。
  * 后端按命名事件下发：status(thinking) → 多个 token → done / error。
+ *
+ * `signal` 用于「停止生成」：中断后本函数会抛出 AbortError，由调用方识别为主动停止。
  */
 export async function streamChat(
   sessionId: string,
   message: string,
   handlers: ChatStreamHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
   const resp = await fetch(BASE + '/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: sessionId, message }),
+    signal,
   })
   if (!resp.ok || !resp.body) {
     handlers.onError?.(`HTTP ${resp.status}`)
@@ -217,7 +268,14 @@ export async function streamChat(
     else if (ev.event === 'token') handlers.onToken?.(ev.data)
     else if (ev.event === 'done') handlers.onDone?.()
     else if (ev.event === 'error') handlers.onError?.(ev.data)
-    else if (ev.event === 'question') {
+    else if (ev.event === 'usage') {
+      try {
+        handlers.onUsage?.(JSON.parse(ev.data) as LlmUsage)
+      } catch (e) {
+        // 用量是辅助信息，解析失败不应打断对话；但要留下痕迹便于排查
+        console.warn('[agent] 用量事件解析失败:', e, ev.data)
+      }
+    } else if (ev.event === 'question') {
       try {
         handlers.onQuestion?.(JSON.parse(ev.data))
       } catch {

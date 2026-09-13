@@ -42,6 +42,9 @@
           <router-link :to="'/project/' + projectId + '/world/items'" class="rail-item" :title="'物品'">
             <Package class="ri" :size="20" /><span class="rl">物品</span>
           </router-link>
+          <router-link :to="'/project/' + projectId + '/world/golden-finger'" class="rail-item" :title="'金手指'">
+            <Sparkles class="ri" :size="20" /><span class="rl">金手指</span>
+          </router-link>
           <router-link :to="'/project/' + projectId + '/world/rules'" class="rail-item" :title="'规则'">
             <ScrollText class="ri" :size="20" /><span class="rl">规则</span>
           </router-link>
@@ -93,13 +96,23 @@
       <div class="rail-pin-bottom">
         <div class="rail-group">
           <div class="rail-group-title">系统</div>
-          <router-link to="/search" class="rail-item" :title="'搜索'">
+          <!-- 同样带上来源路径，搜索页的「返回」按钮据此回到当前项目页面 -->
+          <router-link
+            :to="{ path: '/search', query: { from: route.fullPath } }"
+            class="rail-item"
+            :title="'搜索'"
+          >
             <Search class="ri" :size="20" /><span class="rl">搜索</span>
           </router-link>
           <button class="rail-item" @click="uiStore.openCommandPalette()" :title="'命令面板'">
             <Command class="ri" :size="20" /><span class="rl">命令面板</span>
           </button>
-          <router-link to="/settings" class="rail-item" :title="'设置'">
+          <!-- 带上来源路径，设置页的「返回」按钮据此回到当前项目页面 -->
+          <router-link
+            :to="{ path: '/settings', query: { from: route.fullPath } }"
+            class="rail-item"
+            :title="'设置'"
+          >
             <Settings class="ri" :size="20" /><span class="rl">设置</span>
           </router-link>
         </div>
@@ -119,7 +132,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   Bot, Globe, Users, MapPin, Swords, Package, ScrollText, Link2, Calendar,
   BookOpen, Kanban, GitBranch, Wand2, Network, FileText, Camera, Search, History,
-  LayoutDashboard, Command, Settings,
+  LayoutDashboard, Command, Settings, Sparkles,
 } from 'lucide-vue-next'
 import { useUiStore } from '@/stores/ui'
 import { useWorldStore } from '@/stores/world'

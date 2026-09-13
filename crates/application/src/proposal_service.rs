@@ -39,7 +39,13 @@ impl ProposalService {
 
     /// 批准并提交流程（提案 九）：转换 -> 提交 Canon -> 标记批准。
     ///
-    /// 若 Canon 提交失败（冲突 / 校验），直接返回错误，提案保持原状态。
+    /// **顺序很重要**：先把数据提交到 Canon，成功后才把提案标记为 Approved。
+    /// 反过来（先标 Approved 再提交）会出一个很难发现的坏情况——提交失败时
+    /// 提案已经是「已批准」，但数据根本没落库：界面上看起来批过了，
+    /// 状态机又不允许再次批准，连重试都做不到。
+    /// 实测踩到过：目标实体不存在导致 `fact_entity` 外键失败，就是这个表现。
+    ///
+    /// 若 Canon 提交失败（冲突 / 校验），直接返回错误，提案保持原状态，可重试。
     pub async fn approve_proposal(&self, id: Uuid) -> Result<ProposedChange> {
         let change = self
             .repo
@@ -47,12 +53,15 @@ impl ProposalService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("proposal {} not found", id))?;
 
-        // 先翻到 Approved：提交器要求 Approved -> Applied 的守卫。
-        self.repo.approve_proposal(id).await?;
+        // 1) 纯计算：payload 解析失败时状态不动
         let cmd = self.to_command(&change)?;
+
+        // 2) 真正写 Canon（提交器只校验命令本身，不依赖提案的状态字段）
         self.committer.commit(cmd).await?;
 
-        // 提交成功后重新读取，返回最新状态（数据已落到 Canon，提案停留在 Approved 终态）。
+        // 3) 数据落库成功后才标记批准
+        self.repo.approve_proposal(id).await?;
+
         let updated = self
             .repo
             .get_proposal(id)

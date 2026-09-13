@@ -27,9 +27,6 @@ pub struct LlmResponse {
 }
 
 /// LLM Usage statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmUsage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-}
+///
+/// 直接复用领域层的类型，避免同一份用量数据存在两个定义、字段逐渐漂移。
+pub use domain::ports::LlmUsage;

@@ -41,6 +41,15 @@ pub async fn get_session(
     Ok(Json(session))
 }
 
+/// `GET /api/v1/agent/session/{id}/context` —— 该会话的上下文用量（聊天页预警）。
+pub async fn context_usage(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<agent::ContextUsage>, AppError> {
+    let usage = state.agent.context_usage(id).await?;
+    Ok(Json(usage))
+}
+
 /// `GET /api/agent/sessions?project_id=xxx` —— 列出某项目下的会话（按项目隔离）。
 pub async fn list_sessions(
     State(state): State<AppState>,
@@ -69,6 +78,26 @@ pub async fn rename_session(
 ) -> Result<(), AppError> {
     state.agent.rename_session(id, &req.title).await?;
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TruncateRequest {
+    /// 从第几条消息开始删除（0 基下标）；该条及其之后的全部消息都会被移除。
+    pub from_index: usize,
+}
+
+/// `POST /api/v1/agent/session/{id}/truncate` —— 截断会话（只保留上半部分）。
+///
+/// 删除第 `from_index` 条消息及其之后的全部内容（含后续的用户消息、AI 回复与工具记录），
+/// 用于把发错或跑偏的消息连同其造成的上下文污染一起清掉。
+/// 返回截断后的完整会话，便于前端直接替换界面。
+pub async fn truncate_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<TruncateRequest>,
+) -> Result<Json<agent::AgentSession>, AppError> {
+    let session = state.agent.truncate_session(id, req.from_index).await?;
+    Ok(Json(session))
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +175,19 @@ pub async fn chat(
                     })
                     .to_string();
                     yield Ok(Event::default().event("tool").data(payload));
+                }
+                Ok(agent::AgentStreamEvent::Usage(u)) => {
+                    // 用量 + 缓存命中率：前端把它显示在「上下文」那一行，
+                    // 用来判断网关侧提示缓存是否在正常工作（命中率长期为 0 说明每轮都在重算）。
+                    let payload = serde_json::json!({
+                        "prompt_tokens": u.prompt_tokens,
+                        "completion_tokens": u.completion_tokens,
+                        "total_tokens": u.total_tokens,
+                        "cached_tokens": u.cached_tokens,
+                        "cache_hit_rate": u.cache_hit_rate(),
+                    })
+                    .to_string();
+                    yield Ok(Event::default().event("usage").data(payload));
                 }
                 Ok(agent::AgentStreamEvent::Done) => {
                     yield Ok(Event::default().event("done").data(""));

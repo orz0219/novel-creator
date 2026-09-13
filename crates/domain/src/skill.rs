@@ -375,6 +375,7 @@ impl SkillTemplates {
                             "properties": {
                                 "conflict_type": {"type": "string", "enum": ["Internal","External","Relationship","Ideology"]},
                                 "description": {"type": "string"},
+                                "phase": {"type": "string", "description": "该冲突从哪个阶段开始成立（对应 arc_stages[].stage）；不填表示全书一直成立"},
                                 "target": {"type": "string"}
                             }
                         }
@@ -415,6 +416,23 @@ impl SkillTemplates {
                             "starting_state": {"type": "string"},
                             "possible_change": {"type": "string"},
                             "resistance": {"type": "string"}
+                        }
+                    },
+                    "arc_stages": {
+                        "type": "array",
+                        "description": "阶段弧线（外部时间线）：角色在故事不同阶段的身份 / 戏份 / 目标。只出现一段的角色可以只填一段，不必凑齐前中后期",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "stage": {"type": "string", "description": "阶段名：前期 / 中期 / 后期，或卷1 / 卷2"},
+                                "order": {"type": "integer", "description": "排序，越小越早"},
+                                "role": {"type": "string", "description": "此阶段的身份 / 功能位"},
+                                "screen_weight": {"type": "string", "enum": ["Light","Medium","Heavy"]},
+                                "goal": {"type": "string", "description": "此阶段的目标"},
+                                "function": {"type": "string", "description": "此阶段的叙事功能"},
+                                "entry_trigger": {"type": "string", "description": "什么事件把他推进这一阶段"}
+                            },
+                            "required": ["stage"]
                         }
                     },
                     "extension": {
@@ -464,6 +482,9 @@ impl SkillTemplates {
                  - drive 给出 primary_goal + motivation + urgency，并尽量点出 hidden_goal / fear / weakness / contradiction（制造张力）。\n\
                  - conflicts 至少一条，标明类型与目标（人物参与剧情的接口）。\n\
                  - relationships / secrets / capabilities(限制比能力更重要) / arc_potential 都为后续情节服务。\n\
+                 - arc_stages 描述外部时间线（他何时上场、每个阶段演什么、戏份多大）：\n\
+                   明确会跨阶段变化的角色才填，只出现一段的配角不必强行凑齐前中后期；\n\
+                   screen_weight 用 Light/Medium/Heavy，goal / entry_trigger 让阶段变得可推演。\n\
                  - extension 仅在玄幻/都市/科幻等题材需要专属字段时填写（如修炼等级、职业、义体），通用设定不要往里塞。\n\
                  \n\
                  输出严格符合给定 JSON schema，不要添加 schema 之外的顶层字段。".to_string(),

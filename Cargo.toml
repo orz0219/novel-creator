@@ -9,6 +9,9 @@ members = [
     "crates/ai",
     "crates/agent",
     "crates/narrative-engine",
+    "crates/sqlite-db",
+    "crates/sqlite-engine",
+    "crates/testkit",
 ]
 
 [workspace.package]
@@ -56,3 +59,4 @@ runtime = { path = "crates/runtime" }
 infrastructure = { path = "crates/infrastructure" }
 ai = { path = "crates/ai" }
 agent = { path = "crates/agent" }
+sqlite-db = { path = "crates/sqlite-db" }

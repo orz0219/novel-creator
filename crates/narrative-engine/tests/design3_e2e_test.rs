@@ -7,12 +7,13 @@
 
 use db::connection::Database;
 use db::migration;
+
 use domain::*;
 use uuid::Uuid;
 
 async fn setup_db() -> Database {
-    let url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://novel:novel_pass@localhost:5432/novel_engine".to_string());
+    // 连测试库（库名带 _test），避免把测试数据写进开发库
+    let url = testkit::test_database_url().await.unwrap();
     let db = Database::open(&url).await.unwrap();
     migration::run_migrations(db.pool(), concat!(env!("CARGO_MANIFEST_DIR"), "/../db/migrations"))
         .await

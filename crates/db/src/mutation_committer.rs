@@ -248,8 +248,18 @@ async fn apply(
                 entity.attributes = v;
             }
             let expected = cmd.expected_version.unwrap_or(entity.version);
-            let rows = crate::repos::entity_repo::EntityRepo::update_tx(&mut **tx, &entity).await?;
+            // 更新前留一份快照：这是 `/entities/{id}/versions` 能看到的历史来源。
+            // 放在 UPDATE 之前，拿到的就是「被取代的这一版」。
+            crate::repos::entity_repo::EntityRepo::snapshot_tx(&mut **tx, cmd.target)
+                .await?;
+            let rows = crate::repos::entity_repo::EntityRepo::update_tx(
+                &mut **tx,
+                &entity,
+                source.as_str(),
+            )
+            .await?;
             if rows == 0 {
+                // CAS 失败说明是并发修改：此时事务会整体回滚，刚才那条快照也不会留下
                 return Err(MutationError::ConcurrentModification {
                     target: cmd.target,
                     expected,

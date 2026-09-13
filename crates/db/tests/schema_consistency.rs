@@ -146,7 +146,24 @@ fn derive_schema() -> BTreeMap<String, BTreeSet<String>> {
 
             // ALTER TABLE ...
             if upper.contains("ALTER TABLE") {
-                let tokens: Vec<&str> = line.split_ascii_whitespace().collect();
+                // 迁移里 ALTER TABLE 允许跨行书写（如 023_storyline_tree.sql 把
+                // "ALTER TABLE storyline" 与 "ADD COLUMN ..." 分两行），
+                // 因此先把整条语句拼到分号为止，再按空白切词。
+                let mut stmt = line.trim().to_string();
+                while !stmt.trim_end().ends_with(';') {
+                    match lines.next() {
+                        Some(next_line) => {
+                            let t = next_line.trim();
+                            if t.starts_with("--") {
+                                continue; // 注释行
+                            }
+                            stmt.push(' ');
+                            stmt.push_str(t);
+                        }
+                        None => break,
+                    }
+                }
+                let tokens: Vec<&str> = stmt.split_ascii_whitespace().collect();
                 if let Some(pos) = tokens
                     .iter()
                     .position(|w| w.eq_ignore_ascii_case("TABLE"))
@@ -378,6 +395,12 @@ fn rust_sql_references_match_migrations() {
                         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                         .collect();
                     if ident.is_empty() {
+                        continue;
+                    }
+                    // 跳过 PostgreSQL 系统目录表：`pg_class` / `pg_attribute` /
+                    // `pg_constraint` 等不属于业务迁移，导出与结构巡检代码要查
+                    // 它们来读表结构，是正常用法。
+                    if ident.starts_with("pg_") {
                         continue;
                     }
                     // 跳过 schema 限定名、函数调用与保留字

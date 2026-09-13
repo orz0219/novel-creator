@@ -62,15 +62,26 @@ const props = defineProps<{
   current: string
   steps: StepDef[]
   loading?: boolean
+  /**
+   * 血肉 step 的真实完成度（step key → 是否已有产物）。
+   *
+   * 血肉步可自由顺序、也可整段跳过（推进骨架步时不经过它们），
+   * 因此**不能**仅凭"位置排在当前步之前"就判定完成，否则会显示假对号。
+   */
+  fleshDone?: Record<string, boolean>
 }>()
 
 function stateOf(key: string): 'done' | 'current' | 'upcoming' {
   const cur = props.steps.findIndex((s) => s.key === props.current)
   const i = props.steps.findIndex((s) => s.key === key)
   if (cur === -1) return 'upcoming'
-  if (i < cur) return 'done'
   if (i === cur) return 'current'
-  return 'upcoming'
+  // 血肉步：以「是否真有产物」为准
+  if (props.steps[i]?.group === 'flesh') {
+    return props.fleshDone?.[key] ? 'done' : 'upcoming'
+  }
+  // 骨架步：严格顺序推进，排在当前步之前即为已完成
+  return i < cur ? 'done' : 'upcoming'
 }
 </script>
 

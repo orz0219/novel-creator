@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use domain::extraction::ExtractionResult;
-use domain::ports::{LlmPort, ProposalRepositoryPort};
+use domain::ports::{AiSettingsPort, LlmPort, ProposalRepositoryPort};
 use domain::validation::{ChangePayload, ProposedChangeType};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -36,11 +36,16 @@ pub const EXTRACTION_SYSTEM_PROMPT: &str = r#"你是一个小说世界观建模�
 pub struct ExtractionExecutor {
     proposals: Arc<dyn ProposalRepositoryPort>,
     llm: Arc<dyn LlmPort>,
+    settings: Arc<dyn AiSettingsPort>,
 }
 
 impl ExtractionExecutor {
-    pub fn new(proposals: Arc<dyn ProposalRepositoryPort>, llm: Arc<dyn LlmPort>) -> Self {
-        Self { proposals, llm }
+    pub fn new(
+        proposals: Arc<dyn ProposalRepositoryPort>,
+        llm: Arc<dyn LlmPort>,
+        settings: Arc<dyn AiSettingsPort>,
+    ) -> Self {
+        Self { proposals, llm, settings }
     }
 
     /// 从一段自由文本抽取结构化世界模型候选，并为每个候选创建 ProposedChange 草稿。
@@ -49,8 +54,20 @@ impl ExtractionExecutor {
     pub async fn extract(&self, project_id: Uuid, text: &str) -> Result<ExtractionResult> {
         // 抽取产生的提案不依附于某个生成任务，task_id 为 None。
         let task_id = None;
-        extract_into_proposals(self.proposals.clone(), self.llm.clone(), project_id, task_id, text)
-            .await
+        // 必须用**当前配置的模型**。这里曾经传的是字符串 "extraction"，
+        // 而 LlmPort::complete 的第三个参数是「模型名」，于是网关回
+        //   Model extraction is not supported
+        // —— 抽取功能（手动抽取与生成后的自动抽取）一直不可用。
+        let model = self.settings.load().await?.model;
+        extract_into_proposals(
+            self.proposals.clone(),
+            self.llm.clone(),
+            project_id,
+            task_id,
+            &model,
+            text,
+        )
+        .await
     }
 }
 
@@ -65,11 +82,12 @@ pub async fn extract_into_proposals(
     llm: Arc<dyn LlmPort>,
     project_id: Uuid,
     task_id: Option<Uuid>,
+    model: &str,
     text: &str,
 ) -> Result<ExtractionResult> {
     let user = format!("## 原文\n{}\n\n请只返回符合 schema 的 JSON。", text);
     let raw = llm
-        .complete(EXTRACTION_SYSTEM_PROMPT, &user, "extraction")
+        .complete(EXTRACTION_SYSTEM_PROMPT, &user, model)
         .await?;
     let result = parse_extraction_json(&raw).context("解析 LLM 抽取结果失败")?;
 
@@ -166,12 +184,36 @@ mod tests {
 
     struct MockLlm {
         reply: String,
+        /// 记录每次调用传进来的模型名——用来钉住「抽取用的是配置的模型」
+        seen_models: Mutex<Vec<String>>,
     }
     #[async_trait]
     impl LlmPort for MockLlm {
-        async fn complete(&self, _s: &str, _u: &str, _m: &str) -> Result<String> {
+        async fn complete(&self, _s: &str, _u: &str, model: &str) -> Result<String> {
+            self.seen_models.lock().unwrap().push(model.to_string());
             Ok(self.reply.clone())
         }
+    }
+
+    /// 只提供「当前配置的模型」，其余字段抽取用不到
+    struct MockSettings {
+        model: String,
+    }
+    #[async_trait]
+    impl AiSettingsPort for MockSettings {
+        async fn load(&self) -> Result<domain::ports::AiRuntimeConfig> {
+            Ok(domain::ports::AiRuntimeConfig {
+                base_url: "http://localhost:1".to_string(),
+                api_key: Some("test-key".to_string()),
+                model: self.model.clone(),
+                context_limit: 128_000,
+                max_output_tokens: 4_096,
+            })
+        }
+    }
+
+    fn settings_with(model: &str) -> Arc<dyn AiSettingsPort> {
+        Arc::new(MockSettings { model: model.to_string() })
     }
 
     #[derive(Default)]
@@ -236,8 +278,9 @@ mod tests {
         let repo = Arc::new(MockProposalRepo::default());
         let llm = Arc::new(MockLlm {
             reply: SAMPLE.to_string(),
+            seen_models: Mutex::new(Vec::new()),
         });
-        let exec = ExtractionExecutor::new(repo.clone(), llm);
+        let exec = ExtractionExecutor::new(repo.clone(), llm.clone(), settings_with("deepseek-flash"));
         let result = exec
             .extract(Uuid::new_v4(), "林秋第一次来到北境城，遇到兄长林寒。")
             .await
@@ -246,6 +289,16 @@ mod tests {
         assert_eq!(result.entities.len(), 2);
         assert_eq!(result.entities[0].name, "林秋");
         assert_eq!(result.relations.len(), 1);
+
+        // 回归断言：抽取必须用**当前配置的模型**。
+        // 这里曾经传的是任务名 "extraction"，网关直接回
+        // `Model extraction is not supported` —— 抽取功能一直不可用。
+        let seen = llm.seen_models.lock().unwrap();
+        assert_eq!(seen.len(), 1, "应只调用一次 LLM");
+        assert_eq!(
+            seen[0], "deepseek-flash",
+            "抽取必须用设置里配置的模型，而不是任务名"
+        );
 
         let created = repo.created.lock().unwrap();
         assert_eq!(created.len(), 3);

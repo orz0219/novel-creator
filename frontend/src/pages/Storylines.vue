@@ -19,10 +19,17 @@
     <div class="page-header">
       <h1 class="page-title">剧情线</h1>
       <div class="header-actions">
-        <span class="header-hint">共 {{ storyStore.storylines.length }} 条剧情线</span>
+        <span class="header-hint">
+          共 {{ storyStore.storylines.length }} 条 · 副线 {{ branchCount }} 条 · 暗线 {{ darkCount }} 条
+        </span>
+        <button class="btn-ghost" @click="expandAll">全部展开</button>
+        <button class="btn-ghost" @click="collapseAll">全部收起</button>
         <button class="btn-primary" @click="openCreate">+ 新建剧情线</button>
       </div>
     </div>
+    <p class="page-tip">
+      点击卡片编辑；左侧 <b>−/+</b> 折叠或展开；卡片右上角 <b>＋ 子线</b> 添加下级；虚线卡片为暗线。
+    </p>
     <div v-if="storyStore.error" class="error-banner">{{ storyStore.error }}</div>
 
     <!-- 空状态 -->
@@ -46,24 +53,27 @@
           @delete="handleDelete"
           @add-child="openCreateChild"
         />
-        <div v-if="childrenMap[mainLine.id]?.length === 0" class="hint-no-branches">
-          还没有副线 —
-          <a class="link" @click="openCreateChild(mainLine.id)">新建一条</a>
+        <!-- 根节点折叠时，整棵副线树枝一起隐藏 -->
+        <div v-if="expandedIds[mainLine.id] !== false" class="tree-branches">
+          <div v-if="childrenMap[mainLine.id]?.length === 0" class="hint-no-branches">
+            还没有副线 —
+            <a class="link" @click="openCreateChild(mainLine.id)">新建一条</a>
+          </div>
+          <!-- 递归副线 -->
+          <SlBranch
+            v-for="(child, i) in childrenMap[mainLine.id] || []"
+            :key="child.id"
+            :node="child"
+            :depth="1"
+            :is-last="i === (childrenMap[mainLine.id]?.length ?? 0) - 1"
+            :children-map="childrenMap"
+            :expanded-ids="expandedIds"
+            @toggle="toggleExpand"
+            @edit="openEdit"
+            @delete="handleDelete"
+            @add-child="openCreateChild"
+          />
         </div>
-        <!-- 递归副线 -->
-        <SlBranch
-          v-for="(child, i) in childrenMap[mainLine.id] || []"
-          :key="child.id"
-          :node="child"
-          :depth="1"
-          :is-last="i === (childrenMap[mainLine.id]?.length ?? 0) - 1"
-          :children-map="childrenMap"
-          :expanded-ids="expandedIds"
-          @toggle="toggleExpand"
-          @edit="openEdit"
-          @delete="handleDelete"
-          @add-child="openCreateChild"
-        />
       </div>
       <div v-else class="empty-state">
         <div class="empty-icon">⚠️</div>
@@ -92,37 +102,39 @@
           <label class="form-label">描述</label>
           <textarea v-model="form.description" class="form-textarea" placeholder="剧情线描述" rows="3"></textarea>
         </div>
-        <div class="form-group">
-          <label class="form-label">状态</label>
-          <select v-model="form.status" class="form-select">
-            <option value="Planned">计划中</option>
-            <option value="Active">进行中</option>
-            <option value="Resolved">已解决</option>
-            <option value="Abandoned">已放弃</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">重要性</label>
-          <select v-model="form.importance" class="form-select" :disabled="!!editingId && form.importance === 'Main'">
-            <option value="Main">主线（每项目 1 条）</option>
-            <option value="Important">重要支线</option>
-            <option value="Normal">普通支线</option>
-            <option value="Minor">次要支线</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">明/暗线</label>
-          <select v-model="form.tone" class="form-select">
-            <option value="light">明线（用户可见）</option>
-            <option value="dark">暗线（伏笔/钩子）</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">可见性</label>
-          <select v-model="form.visibility" class="form-select">
-            <option value="visible">暴露给读者</option>
-            <option value="hidden">隐藏（暗线用）</option>
-          </select>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">状态</label>
+            <select v-model="form.status" class="form-select">
+              <option value="Planned">计划中</option>
+              <option value="Active">进行中</option>
+              <option value="Resolved">已解决</option>
+              <option value="Abandoned">已放弃</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">重要性</label>
+            <select v-model="form.importance" class="form-select" :disabled="!!editingId && form.importance === 'Main'">
+              <option value="Main">主线（每项目 1 条）</option>
+              <option value="Important">重要支线</option>
+              <option value="Normal">普通支线</option>
+              <option value="Minor">次要支线</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">明/暗线</label>
+            <select v-model="form.tone" class="form-select">
+              <option value="light">明线（用户可见）</option>
+              <option value="dark">暗线（伏笔/钩子）</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">可见性</label>
+            <select v-model="form.visibility" class="form-select">
+              <option value="visible">暴露给读者</option>
+              <option value="hidden">隐藏（暗线用）</option>
+            </select>
+          </div>
         </div>
         <div class="form-group" v-if="form.importance !== 'Main'">
           <label class="form-label">挂载到（parent_id）</label>
@@ -215,10 +227,27 @@ const orphanBranches = computed<Storyline[]>(() => {
   })
 })
 
+const branchCount = computed(() =>
+  storyStore.storylines.filter((s) => s.importance !== 'Main').length,
+)
+const darkCount = computed(() =>
+  storyStore.storylines.filter((s) => s.tone === 'dark').length,
+)
+
 /** 展开/折叠：默认全部展开；id → bool（true=展开, false=折叠） */
 const expandedIds = ref<Record<string, boolean>>({})
 function toggleExpand(id: string) {
   expandedIds.value[id] = expandedIds.value[id] === false
+}
+function expandAll() {
+  const next: Record<string, boolean> = {}
+  for (const sl of storyStore.storylines) next[sl.id] = true
+  expandedIds.value = next
+}
+function collapseAll() {
+  const next: Record<string, boolean> = {}
+  for (const sl of storyStore.storylines) next[sl.id] = false
+  expandedIds.value = next
 }
 
 // ===== 表单 =====
@@ -337,6 +366,8 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
   margin-bottom: var(--space-6);
 }
 .page-title {
@@ -347,25 +378,46 @@ onMounted(async () => {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
 .header-hint {
   font-size: var(--text-sm);
   color: var(--text-tertiary);
   font-family: var(--font-serif);
+  margin-right: var(--space-2);
 }
-.btn-primary {
+.page-tip {
+  margin: calc(var(--space-4) * -1) 0 var(--space-5);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.page-tip b {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.btn-primary,
+.btn-ghost {
   padding: var(--space-2) var(--space-4);
-  background: var(--color-primary);
-  border: none;
-  color: white;
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
   font-family: inherit;
   cursor: pointer;
   transition: all var(--transition-fast);
 }
-.btn-primary:hover { background: var(--color-primary-hover); }
+.btn-primary {
+  background: var(--color-primary);
+  border: 1px solid var(--color-primary);
+  color: white;
+}
+.btn-primary:hover { background: var(--color-primary-hover); border-color: var(--color-primary-hover); }
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+}
+.btn-ghost:hover { background: var(--bg-hover); border-color: var(--border-emphasis); color: var(--text-primary); }
 .btn-secondary {
   padding: var(--space-2) var(--space-4);
   background: transparent;
@@ -375,9 +427,60 @@ onMounted(async () => {
   font-size: var(--text-sm);
   font-family: inherit;
   cursor: pointer;
-  margin-right: var(--space-2);
 }
 .btn-secondary:hover { background: var(--bg-hover); }
+
+/* Create/Edit form — 之前缺失导致弹窗内部没有样式 */
+.entity-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.form-label {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.form-input,
+.form-textarea,
+.form-select {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.form-input:focus,
+.form-textarea:focus,
+.form-select:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-subtle);
+}
+.form-textarea {
+  resize: vertical;
+  min-height: 76px;
+  line-height: var(--leading-relaxed);
+}
+.form-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 
 .error-banner {
   background: var(--color-error-subtle);
@@ -400,6 +503,7 @@ onMounted(async () => {
 
 .storyline-tree { display: flex; flex-direction: column; gap: 0; }
 .tree-root { display: flex; flex-direction: column; }
+.tree-branches { display: flex; flex-direction: column; }
 
 /* 主线根的"还没有副线"提示 */
 .hint-no-branches {

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use domain::ports::{LlmPort, PromptRepositoryPort};
+use domain::ports::{
+    AiRuntimeConfig, AiSettingsPort, GuideProgressPort, LlmPort, PromptRepositoryPort,
+};
 use uuid::Uuid;
 
 use agent::*;
@@ -16,6 +18,32 @@ struct MockLlm;
 impl LlmPort for MockLlm {
     async fn complete(&self, _system: &str, user_prompt: &str, _model: &str) -> Result<String> {
         Ok(format!("【模拟回复】收到：{}", user_prompt))
+    }
+}
+
+/// 测试用假 AI 配置：固定模型名，不读数据库。
+struct MockAiSettings;
+
+#[async_trait]
+impl AiSettingsPort for MockAiSettings {
+    async fn load(&self) -> Result<AiRuntimeConfig> {
+        Ok(AiRuntimeConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: None,
+            model: "test".to_string(),
+            context_limit: 128_000,
+            max_output_tokens: 22_000,
+        })
+    }
+}
+
+/// 测试用假引导进度：固定停在第一步。
+struct MockGuideProgress;
+
+#[async_trait]
+impl GuideProgressPort for MockGuideProgress {
+    async fn current_step(&self, _project_id: Uuid) -> Result<Option<String>> {
+        Ok(Some("premise".to_string()))
     }
 }
 
@@ -33,7 +61,8 @@ fn make_runtime() -> Arc<AgentRuntime> {
             memory,
             prompt_store,
             agent::DEFAULT_SYSTEM_PROMPT_BASE.to_string(),
-            "test".into(),
+            Arc::new(MockAiSettings),
+            Arc::new(MockGuideProgress),
         )
         .with_default_tools(),
     )

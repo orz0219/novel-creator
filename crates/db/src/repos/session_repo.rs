@@ -18,18 +18,28 @@ impl SessionRepo {
         Self { pool }
     }
 
-    async fn insert_messages(&self, sid: &Uuid, msgs: &[ChatMessage]) -> Result<()> {
+    /// 在一个已开启的事务里批量写入消息（seq 按数组下标）。
+    ///
+    /// 必须与「清空消息」处在同一事务：本项目采用「删除后重写」的全量落库方式，
+    /// 若两条语句分开提交，中间会出现「消息被删光」的空窗期，
+    /// 任何并发读取（例如前端在收到 done 事件后立刻拉取会话）都会读到 0 条，
+    /// 表现为「对话被截断」。
+    async fn insert_messages(
+        conn: &mut sqlx::PgConnection,
+        sid: Uuid,
+        msgs: &[ChatMessage],
+    ) -> Result<()> {
         for (seq, m) in msgs.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO agent_messages (session_id, role, content, seq, created_at) \
                  VALUES ($1, $2, $3, $4, $5)",
             )
-            .bind(*sid)
+            .bind(sid)
             .bind(&m.role)
             .bind(&m.content)
             .bind(seq as i32)
             .bind(m.created_at)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .context("Failed to insert agent message")?;
         }
@@ -52,6 +62,12 @@ impl SessionRepo {
 #[async_trait]
 impl SessionStore for SessionRepo {
     async fn create(&self, session: AgentSession) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("Failed to begin create-session tx")?;
+
         sqlx::query(
             "INSERT INTO agent_sessions (id, project_id, title, current_step, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6)",
@@ -62,10 +78,13 @@ impl SessionStore for SessionRepo {
         .bind(&session.current_step)
         .bind(session.created_at)
         .bind(session.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("Failed to create agent session")?;
-        self.insert_messages(&session.id, &session.messages).await?;
+
+        Self::insert_messages(&mut tx, session.id, &session.messages).await?;
+
+        tx.commit().await.context("Failed to commit create-session")?;
         Ok(())
     }
 
@@ -84,21 +103,33 @@ impl SessionStore for SessionRepo {
     }
 
     async fn update(&self, session: AgentSession) -> Result<()> {
+        // 「清空 + 重写」必须在同一事务内完成：否则 DELETE 与 INSERT 之间存在空窗期，
+        // 并发读取（如前端在收到 done 事件后立刻拉取会话）会读到 0 条消息，表现为「对话被截断」。
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("Failed to begin update-session tx")?;
+
         sqlx::query(
             "UPDATE agent_sessions SET title = $2, current_step = $3, updated_at = NOW() WHERE id = $1",
         )
         .bind(session.id)
         .bind(&session.title)
         .bind(&session.current_step)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("Failed to update agent session")?;
+
         sqlx::query("DELETE FROM agent_messages WHERE session_id = $1")
             .bind(session.id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .context("Failed to clear agent messages")?;
-        self.insert_messages(&session.id, &session.messages).await?;
+
+        Self::insert_messages(&mut tx, session.id, &session.messages).await?;
+
+        tx.commit().await.context("Failed to commit update-session")?;
         Ok(())
     }
 

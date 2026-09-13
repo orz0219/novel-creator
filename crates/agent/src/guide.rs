@@ -225,6 +225,11 @@ pub const STEPS: &[GuideStep] = &[
         prompt_for_step: "本步：聊**地图 / 地点**。落点：至少 1 个 Location entity（entity_type='Location'）。\n\
                           用 create_location 工具建。建议：1 个主城 + 1-2 个关键地点；\n\
                           可选：给主角一个常驻地点作为'据点'。\n\
+                          **建完地点后紧接着用 update_location_profile 补全它的设计档案**\n\
+                          （地点类型 / 规模 / 气候 / 纪元 / 可达性 / 人口 / 地理 / 外貌 / 经济 / 规则 / 历史 / 叙事用途），\n\
+                          只填你与用户已经聊定的字段，不要凭空编造——档案缺失会让该地点详情面板一片空白。\n\
+                          若该地点的**叙事角色**随剧情变化（主角藏身处→教团总部→两军战场），用 arc_stages 按阶段写 role / function / screen_weight / status；\n\
+                          被烧毁、易主这类物理变化属于剧情事件，不要写进阶段。\n\
                           注意：这是**血肉 step**，用户可自由顺序来建（不强制先聊这个）。\n\
                           推进到下一骨架步前，每类血肉至少 1 个。",
         completion_signal: "本步产物就绪条件：至少 1 个 Location entity 已建。\
@@ -241,6 +246,12 @@ pub const STEPS: &[GuideStep] = &[
         group: StepGroup::Flesh,
         prompt_for_step: "本步：聊**势力 / 组织**。落点：至少 1 个 Faction entity。\n\
                           用 create_faction 工具建。建议：1 个敌对势力 + 1 个友方势力。\n\
+                          **建完势力后紧接着用 update_faction_profile 补全它的设计档案**\n\
+                          （目标 goals / 领袖 leader / 价值观 values / 资源 resources / 领地 territory /\n\
+                          成员 members / 敌人 enemies / 盟友 allies / 内部矛盾 internal_conflicts /\n\
+                          秘密 secrets / 行事风格 modus_operandi），\n\
+                          只填你与用户已经聊定的字段，不要凭空编造——档案缺失会让势力详情面板一片空白。\n\
+                          势力的实力/地盘/盟友会随剧情变化，用 arc_stages 按阶段记录 role（在故事里的角色）/ goal（该阶段目标）/ status（该阶段多强、占哪、跟谁结盟）；\n\
                           **血肉 step**，用户可自由顺序。",
         completion_signal: "本步产物就绪条件：至少 1 个 Faction entity 已建。\
                            满足 → 告诉用户'势力已就绪。请点下方\"确认推进\"按钮。'",
@@ -274,9 +285,18 @@ pub const STEPS: &[GuideStep] = &[
         prompt_for_step: "本步：聊金手指。\n\
                           **金手指是独立 entity（entity_type='golden_finger'）**，\
                           通过 create_relation 与主角 Character 相连（relation type='possesses'）。\n\
-                          至少包括：name + description + origin（来自哪里）+ side_effect（副作用）。\n\
-                          落库步骤：先 create_character (entity_type='golden_finger') 建金手指，\
-                          再 create_relation 把主角与金手指连起来。",
+                          落库步骤（三步都要做，缺一步金手指在界面上就是残的）：\n\
+                          1) **用 create_entity 并把 entity_type 传 'golden_finger'** 建金手指\n\
+                             （不要用 create_character——那会把类型固化成 Character，界面上就没有金手指了）；\n\
+                          2) 用 create_relation 把主角与金手指连起来；\n\
+                          3) **用 update_golden_finger 填写结构化档案**——界面的金手指面板完全依赖这些字段，\n\
+                             不填则面板一片空白、用户看不出这个金手指到底有什么用。要填的是：\n\
+                             gf_type（类型）、one_liner（一句话作用）、origin（来源）、\n\
+                             abilities（核心机制，逐条写清 effect 效果 / trigger 触发条件 / limit 该机制的边界）、\n\
+                             side_effect（副作用；作者设定为「无」也要显式写「无」，不能留空）、\n\
+                             constraints（硬约束：什么时候会失效、必须满足什么前提——这是后续写作最容易崩的地方）、\n\
+                             growth_stages（初期 / 中期 / 后期分别能做什么，按故事时间顺序）。\n\
+                          这些内容必须和用户逐条聊定，不要凭空编造。",
         completion_signal: "本步产物就绪条件：\n\
                            - 1 个 golden_finger entity 已建；\n\
                            - 该金手指已通过 create_relation 与主角 Character 相连。\n\
@@ -295,8 +315,19 @@ pub const STEPS: &[GuideStep] = &[
         title: "主角",
         group: StepGroup::Skeleton,
         prompt_for_step: "本步：聊**主角**（一个 Character entity）。\n\
-                          用 create_character 工具建。\n\
-                          至少包括：name + description + 人物小传。\n\
+                          落库步骤（两步都要做）：\n\
+                          1) 用 create_character 工具建主角（name + description + 人物小传）；\n\
+                          2) **用 update_character_profile 填写结构化档案**——不填的话，\
+                             人物页面的「角色设定」就是一张空表，等于设定没落地。逐项填：\n\
+                             真名 / 别名 aliases / 年龄段 age_range / 性别 gender / 身份 identity /\n\
+                             外貌 appearance / 背景来历 background_origin / 核心性格 core_personality /\n\
+                             价值观 values / 故事功能位 role_in_story / 社会地位 social_position_rank。\n\
+                             若这个角色会跨阶段变化（前期只是背景板、中期成为合伙人、后期成重头戏），\
+                             用 arc_stages 列出每个阶段的 stage / order / role / screen_weight / goal / entry_trigger；\
+                             不跨阶段可以不传这个字段。\n\
+                             age_range、gender、role_in_story 可直接传中文（如「青年」「男」「主角」），\n\
+                             也可以传规范值，两种写法都会正确落库，无法识别的写法才会报错。\n\
+                             只填与用户已经聊定的内容，没聊到的字段不要传。\n\
                           主角必须在前一步（golden_finger）已与金手指有 'possesses' relation。\n\
                           配角在后续血肉 step 单独建。",
         completion_signal: "本步产物就绪条件：至少 1 个 Character entity（主角）已建。\
@@ -314,6 +345,12 @@ pub const STEPS: &[GuideStep] = &[
         group: StepGroup::Flesh,
         prompt_for_step: "本步：聊**关键配角**。落点：至少 1 个 Character entity（扣除主角）。\n\
                           用 create_character 工具建。建议 2-3 个：\n                          - 1 个盟友（ally）；\n                          - 1 个对手（rival）；\n                          - 可选：1 个导师 / 引路人。\n\
+                          **建完每个配角后紧接着用 update_character_profile 补全档案**\n\
+                          （真名 / 别名 / 年龄段 / 性别 / 身份 / 外貌 / 背景来历 / 核心性格 / 价值观 /\n\
+                          故事功能位 / 社会地位），只填已聊定的内容，不要凭空编造；\n\
+                          若某个配角只出现一段、不跨阶段，就不必填 arc_stages；\
+                          确实跨阶段变化的，再用 arc_stages 标出他何时上场、戏份多大。\n\
+                          age_range、gender、role_in_story 可直接传中文（如「青年」「男」「盟友」），\n\
                           配角与主角通过 create_relation 建立关系。\n\
                           **血肉 step**，用户可自由顺序。",
         completion_signal: "本步产物就绪条件：至少有 1 个非主角的 Character entity 已建。\

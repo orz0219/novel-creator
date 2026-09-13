@@ -22,6 +22,7 @@ const router = createRouter({
             { path: 'world/locations', name: 'Locations', component: () => import('@/pages/Locations.vue') },
             { path: 'world/factions', name: 'Factions', component: () => import('@/pages/Factions.vue') },
             { path: 'world/items', name: 'Items', component: () => import('@/pages/Items.vue') },
+            { path: 'world/golden-finger', name: 'GoldenFinger', component: () => import('@/pages/GoldenFinger.vue') },
             { path: 'world/rules', name: 'Rules', component: () => import('@/pages/Rules.vue') },
             { path: 'world/relationships', name: 'Relationships', component: () => import('@/pages/Relationships.vue') },
             { path: 'world/timeline', name: 'Timeline', component: () => import('@/pages/Timeline.vue') },

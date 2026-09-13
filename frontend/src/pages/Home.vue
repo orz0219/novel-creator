@@ -57,6 +57,7 @@
                 <td class="cell-time">{{ formatDate(project.updated_at) }}</td>
                 <td class="col-actions">
                   <div class="row-actions" @click.stop>
+                    <button class="btn-ghost" @click="exportProject(project)">导出</button>
                     <button class="btn-ghost" @click="openEdit(project)">编辑</button>
                     <button class="btn-danger" @click="openDelete(project)">删除</button>
                   </div>
@@ -140,6 +141,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
+import { projectApi } from '@/api/project'
 import type { Project } from '@/types/project'
 import NeDialog from '@/components/ui/NeDialog.vue'
 import NeInput from '@/components/ui/NeInput.vue'
@@ -257,6 +259,31 @@ async function handleEdit() {
 const showDeleteDialog = ref(false)
 const deleting = ref(false)
 const deleteTarget = ref<Project | null>(null)
+
+/** 导出项目 JSON：给手机单机版导入用 */
+async function exportProject(project: Project) {
+  try {
+    uiStore.addToast({ type: 'info', title: '正在导出', message: project.name })
+    const text = await projectApi.exportToJson(project.id)
+    const blob = new Blob([text], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    // 文件名去掉不适合做文件名的字符
+    a.download = `${project.name.replace(/[\\/:*?"<>|]/g, '_')}.json`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    uiStore.addToast({
+      type: 'success',
+      title: '已导出',
+      message: `${(text.length / 1024 / 1024).toFixed(2)} MB，可在手机 App 设置页导入`,
+    })
+  } catch (e: any) {
+    uiStore.addToast({ type: 'error', title: '导出失败', message: e.message || '' })
+  }
+}
 
 function openDelete(project: Project) {
   deleteTarget.value = project

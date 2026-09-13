@@ -29,34 +29,19 @@
     />
 
     <!-- Faction design detail panel -->
-    <div v-if="showDetail && viewingEntity" class="detail-panel">
-      <div class="detail-header">
-        <span class="detail-title">势力设计档案</span>
-        <span class="detail-subtitle">{{ viewingEntity.name }}</span>
-        <button class="btn-ghost" @click="openBaseEdit()">编辑基础信息</button>
-        <button class="btn-ghost" @click="showDetail = false">收起</button>
-      </div>
-
-      <div class="detail-section-head">
-        <h3 class="detail-section-title">设计字段</h3>
-        <button class="btn-save" :disabled="saving" @click="saveProfile()">
-          {{ saving ? '保存中…' : '保存档案' }}
-        </button>
-      </div>
-
-      <div class="profile-grid">
-        <div class="form-group" v-for="f in profileFields" :key="f.key">
-          <label class="form-label">{{ f.label }}</label>
-          <textarea
-            v-if="f.textarea"
-            v-model="profileForm[f.key]"
-            class="form-textarea"
-            rows="2"
-          ></textarea>
-          <input v-else v-model="profileForm[f.key]" class="form-input" type="text" />
-        </div>
-      </div>
-    </div>
+    <ProfilePanel
+      v-if="showDetail && viewingEntity"
+      ref="panelRef"
+      title="势力设计档案"
+      :subtitle="viewingEntity.name"
+      :groups="profileGroups"
+      :model-value="profileForm"
+      :saving="saving"
+      extra-label="编辑基础信息"
+      @save="saveProfile"
+      @close="showDetail = false"
+      @extra="openBaseEdit()"
+    />
   </div>
 </template>
 
@@ -66,6 +51,8 @@ import { useWorldStore } from '@/stores/world'
 import EntityCard from '@/components/ui/EntityCard.vue'
 import EntityDialog from '@/components/ui/EntityDialog.vue'
 import { factionProfileApi } from '@/api/character'
+import ProfilePanel, { type ProfileGroup } from '@/components/ui/ProfilePanel.vue'
+import { ARC_STAGES_FIELD } from '@/utils/arcStages'
 import type { Entity, FactionProfile } from '@/types'
 import { Swords } from 'lucide-vue-next'
 
@@ -78,26 +65,62 @@ const viewingEntity = ref<Entity | null>(null)
 const profileForm = ref<Partial<FactionProfile>>({})
 const saving = ref(false)
 
-type FacField = { key: keyof FactionProfile; label: string; textarea?: boolean }
-const profileFields: FacField[] = [
-  { key: 'goals', label: '目标', textarea: true },
-  { key: 'leader', label: '领袖' },
-  { key: 'values', label: '价值观', textarea: true },
-  { key: 'resources', label: '资源', textarea: true },
-  { key: 'territory', label: '领地', textarea: true },
-  { key: 'members', label: '成员', textarea: true },
-  { key: 'enemies', label: '敌人', textarea: true },
-  { key: 'allies', label: '盟友', textarea: true },
-  { key: 'internal_conflicts', label: '内部冲突', textarea: true },
-  { key: 'secrets', label: '秘密', textarea: true },
-  { key: 'modus_operandi', label: '行事风格', textarea: true },
+const panelRef = ref<InstanceType<typeof ProfilePanel> | null>(null)
+
+/**
+ * 字段按语义分组。
+ * 11 个字段平铺成一坨时，读的人抓不到结构——「目标/领袖」和「内部矛盾/秘密」
+ * 视觉权重完全一样，等于没有层级。
+ */
+const profileGroups: ProfileGroup[] = [
+  {
+    title: '基本',
+    fields: [
+      { key: 'goals', label: '目标', multiline: true },
+      { key: 'leader', label: '领袖' },
+      { key: 'values', label: '价值观', multiline: true },
+    ],
+  },
+  {
+    title: '实力',
+    fields: [
+      { key: 'resources', label: '资源', multiline: true },
+      { key: 'territory', label: '领地', multiline: true },
+      { key: 'members', label: '成员', multiline: true },
+    ],
+  },
+  {
+    title: '关系',
+    fields: [
+      { key: 'enemies', label: '敌人', multiline: true },
+      { key: 'allies', label: '盟友', multiline: true },
+    ],
+  },
+  {
+    title: '阶段弧线',
+    fields: [ARC_STAGES_FIELD],
+  },
+  {
+    title: '隐情',
+    fields: [
+      { key: 'internal_conflicts', label: '内部矛盾', multiline: true },
+      { key: 'secrets', label: '秘密', multiline: true },
+      { key: 'modus_operandi', label: '行事风格', multiline: true },
+    ],
+  },
 ]
 
 async function openDetail(entity: Entity) {
   viewingEntity.value = entity
   showDetail.value = true
-  profileForm.value =
-    (await factionProfileApi.get(entity.id).catch(() => null)) ?? ({} as Partial<FactionProfile>)
+  worldStore.error = ''
+  try {
+    // 后端在"还没有档案"时返回 null，这是正常语义，不是错误
+    profileForm.value = (await factionProfileApi.get(entity.id)) ?? ({} as Partial<FactionProfile>)
+  } catch (e) {
+    profileForm.value = {}
+    worldStore.error = `加载势力档案失败：${(e as Error).message}`
+  }
 }
 
 function openCreate() {
@@ -111,13 +134,19 @@ function openBaseEdit() {
   showDialog.value = true
 }
 
-async function saveProfile() {
+async function saveProfile(value: Record<string, unknown>) {
   if (!viewingEntity.value) return
   saving.value = true
+  worldStore.error = ''
   try {
-    await factionProfileApi.upsert(viewingEntity.value.id, profileForm.value)
-  } catch (e: any) {
-    worldStore.error = e?.message || '保存势力档案失败'
+    profileForm.value = await factionProfileApi.upsert(
+      viewingEntity.value.id,
+      value as Partial<FactionProfile>,
+    )
+    // 保存成功才退出编辑态；失败时保留用户输入，避免白填一遍
+    panelRef.value?.finishEdit()
+  } catch (e) {
+    worldStore.error = `保存势力档案失败：${(e as Error).message}`
   } finally {
     saving.value = false
   }
@@ -162,32 +191,4 @@ async function handleDelete(entity: Entity) {
 .empty-text { font-size: var(--text-sm); }
 .error-banner { padding: var(--space-3) var(--space-4); background: var(--color-error-subtle); color: var(--color-error); border-radius: var(--radius-sm); margin-bottom: var(--space-4); font-size: var(--text-sm); }
 
-.detail-panel { margin-top: var(--space-6); padding: var(--space-6); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
-.detail-header { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-4); }
-.detail-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-primary); font-family: var(--font-serif); }
-.detail-subtitle { font-size: var(--text-sm); color: var(--text-tertiary); }
-.btn-ghost { margin-left: auto; padding: var(--space-1) var(--space-3); background: transparent; border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; color: var(--text-secondary); }
-.btn-ghost:last-child { margin-left: var(--space-2); }
-.btn-ghost:hover { background: var(--color-surface-hover); }
-
-.detail-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-3); }
-.detail-section-title { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
-.btn-save { padding: var(--space-1) var(--space-3); background: var(--color-primary); border: none; color: white; border-radius: var(--radius-sm); font-size: var(--text-xs); cursor: pointer; }
-.btn-save:disabled { opacity: 0.6; cursor: default; }
-
-.profile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-4); }
-.form-group { display: flex; flex-direction: column; gap: var(--space-1); }
-.form-label { font-size: var(--text-sm); font-weight: 500; color: var(--text-secondary); }
-.form-input, .form-textarea {
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-base);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  font-size: var(--text-sm);
-  outline: none;
-  font-family: inherit;
-}
-.form-textarea { resize: vertical; }
-.form-input:focus, .form-textarea:focus { border-color: var(--color-primary); }
 </style>

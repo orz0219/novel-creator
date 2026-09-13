@@ -12,7 +12,7 @@
     <button
       class="ca-btn"
       :class="{ 'has-flesh': unfinishedFlesh.length > 0 }"
-      :disabled="busy"
+      :disabled="isDisabled"
       @click="onConfirm"
       :title="hintTitle"
     >
@@ -51,6 +51,8 @@ const props = defineProps<{
   projectId: string
   /** 血肉 step 列表（驱动角标 + hint） */
   fleshSteps?: FleshStep[]
+  /** 外部禁用（例如 AI 正在生成 / 调用工具时，不允许并发推进） */
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -60,6 +62,9 @@ const emit = defineEmits<{
 
 const busy = ref(false)
 const error = ref<string | null>(null)
+
+/** 生成中或自身请求中时都不可点，避免并发推进把会话状态打回 idle。 */
+const isDisabled = computed(() => busy.value || props.disabled === true)
 
 /** 全部血肉 step 列表 */
 const fleshSteps = computed<FleshStep[]>(() => props.fleshSteps || [])
@@ -80,7 +85,7 @@ const hintTitle = computed(() => {
 })
 
 async function onConfirm() {
-  if (busy.value) return
+  if (isDisabled.value) return
   busy.value = true
   error.value = null
   try {

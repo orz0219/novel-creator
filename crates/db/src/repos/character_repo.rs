@@ -373,8 +373,8 @@ impl CharacterConflictRepo {
         let now = Utc::now();
 
         sqlx::query(
-            "INSERT INTO character_conflict (id, entity_id, conflict_type, description, target_entity_id, resolution_status, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO character_conflict (id, entity_id, conflict_type, description, target_entity_id, resolution_status, phase, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(conflict.id)
         .bind(entity_id)
@@ -382,6 +382,7 @@ impl CharacterConflictRepo {
         .bind(&conflict.description)
         .bind(conflict.target_entity_id)
         .bind(&conflict.resolution_status)
+        .bind(&conflict.phase)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -392,7 +393,7 @@ impl CharacterConflictRepo {
 
     pub async fn list_by_entity(&self, entity_id: Uuid) -> Result<Vec<CharacterConflict>> {
         let rows = sqlx::query_as::<_, CharacterConflictRow>(
-            "SELECT id, entity_id, conflict_type, description, target_entity_id, resolution_status, created_at, updated_at \
+            "SELECT id, entity_id, conflict_type, description, target_entity_id, resolution_status, phase, created_at, updated_at \
              FROM character_conflict WHERE entity_id = $1 ORDER BY created_at",
         )
         .bind(entity_id)
@@ -401,6 +402,45 @@ impl CharacterConflictRepo {
         .context("Failed to query character conflicts")?;
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    /// 用给定的一组冲突**替换**该人物的全部冲突（先清后插，事务内）。
+    ///
+    /// 冲突是「整组重写」的语义：模型读到旧列表、改完再整份写回，
+    /// 逐条 create 会不断累积重复项，因此这里用替换。
+    pub async fn replace_by_entity(
+        &self,
+        entity_id: Uuid,
+        conflicts: &[CharacterConflict],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await.context("begin conflict tx")?;
+        sqlx::query("DELETE FROM character_conflict WHERE entity_id = $1")
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .context("clear character_conflict")?;
+
+        let now = Utc::now();
+        for c in conflicts {
+            sqlx::query(
+                "INSERT INTO character_conflict (id, entity_id, conflict_type, description, target_entity_id, resolution_status, phase, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(c.id)
+            .bind(entity_id)
+            .bind(c.conflict_type.as_str())
+            .bind(&c.description)
+            .bind(c.target_entity_id)
+            .bind(&c.resolution_status)
+            .bind(&c.phase)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .context("insert character_conflict")?;
+        }
+        tx.commit().await.context("commit conflict tx")?;
+        Ok(())
     }
 }
 
@@ -412,6 +452,7 @@ struct CharacterConflictRow {
     description: String,
     target_entity_id: Option<Uuid>,
     resolution_status: Option<String>,
+    phase: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -429,6 +470,7 @@ impl From<CharacterConflictRow> for CharacterConflict {
             description: r.description,
             target_entity_id: r.target_entity_id,
             resolution_status: r.resolution_status.filter(|s| !s.is_empty()),
+            phase: r.phase.filter(|s| !s.trim().is_empty()),
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -558,6 +600,43 @@ impl CharacterSecretRepo {
         .context("Failed to query character secrets")?;
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    /// 用给定的一组秘密**替换**该人物的全部秘密（先清后插，事务内）。
+    ///
+    /// 与冲突同构：秘密也是「整组重写」语义，逐条 create 会累积重复项。
+    pub async fn replace_by_entity(
+        &self,
+        entity_id: Uuid,
+        secrets: &[CharacterSecret],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await.context("begin secret tx")?;
+        sqlx::query("DELETE FROM character_secret WHERE entity_id = $1")
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .context("clear character_secret")?;
+
+        let now = Utc::now();
+        for s in secrets {
+            sqlx::query(
+                "INSERT INTO character_secret (id, entity_id, content, importance, reveal_condition, related_entities, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(s.id)
+            .bind(entity_id)
+            .bind(&s.content)
+            .bind(s.importance)
+            .bind(&s.reveal_condition)
+            .bind(serde_json::to_value(&s.related_entities).unwrap_or(serde_json::Value::Null))
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .context("insert character_secret")?;
+        }
+        tx.commit().await.context("commit secret tx")?;
+        Ok(())
     }
 }
 
@@ -755,6 +834,7 @@ impl From<CharacterArcRow> for CharacterArcPotential {
         }
     }
 }
+
 
 // ============= CharacterExtensionRepo =============
 

@@ -17,11 +17,12 @@
         </div>
       </header>
 
-      <!-- 6 步进度条 -->
+      <!-- 10 步进度条（血肉步的完成度按真实产物判断，避免假对号） -->
       <StepIndicator
         :current="guideStep"
         :steps="guideSteps"
         :loading="store.status === 'streaming'"
+        :flesh-done="fleshDoneMap"
       />
 
       <div class="messages" ref="messagesEl">
@@ -44,21 +45,34 @@
             :content="m.content"
             :streaming="m.streaming"
             :formatted="m.formatted"
+            :index="m.role === 'user' ? i : undefined"
             @select="onSelect"
             @retry="onRetry"
-            @format="onFormat(i)"
+            @truncate="onTruncate"
           />
 
           <!-- Thinking 指示器：用户发完消息 + LLM 还没返回第一 token 时显示
-               越简单越好：一个小气泡 + 三个跳动的点 -->
+               越简单越好：一个小气泡 + 三个跳动的点
+               若本轮已在执行工具，则同时显示「第 N 个操作」，让批量任务有进度感 -->
           <div v-if="store.thinking" class="thinking-bubble">
             <span class="thinking-avatar">导</span>
             <div class="thinking-content">
-              <span class="thinking-text">正在思考</span>
+              <span class="thinking-text">
+                {{ store.roundToolCount > 0 ? `正在执行第 ${store.roundToolCount + 1} 个操作` : '正在思考' }}
+              </span>
               <span class="thinking-dots">
                 <span></span><span></span><span></span>
               </span>
             </div>
+          </div>
+
+          <!-- 本轮收尾信号：批量操作跑完后，明确告知「结束了、做了多少、用了多久」 -->
+          <div v-if="store.lastRoundSummary && !store.thinking" class="round-summary">
+            <CheckCircle2 :size="14" />
+            <span>
+              本轮完成 · 执行 {{ store.lastRoundSummary.toolCalls }} 个操作 · 用时
+              {{ formatDuration(store.lastRoundSummary.elapsedMs) }}
+            </span>
           </div>
         </div>
       </div>
@@ -74,22 +88,80 @@
           @keydown="onKeydown"
         ></textarea>
         <div class="composer-toolbar">
-          <ConfirmAdvance
-            class="composer-advance"
-            :current-title="currentGuideTitle"
-            :next-title="nextGuideTitle"
-            :project-id="projectId"
-            :flesh-steps="fleshStatuses"
-            @advanced="onAdvanced"
-          />
+          <div class="toolbar-left">
+            <!-- 模型：显示当前生效模型，下拉即可切换（后端每次调用前读取，立即生效） -->
+            <div class="model-picker" :title="modelError || '当前使用的模型，切换后立即生效'">
+              <Cpu class="model-icon" :size="14" />
+              <select
+                class="model-select"
+                v-model="selectedModel"
+                :disabled="loadingModels || !modelChoices.length"
+                @change="onModelChange"
+              >
+                <option v-for="m in modelChoices" :key="m" :value="m">{{ m }}</option>
+              </select>
+            </div>
+            <span v-if="modelSavedHint" class="model-hint">{{ modelSavedHint }}</span>
+            <span v-else-if="modelError" class="model-hint error">模型列表获取失败</span>
+            <ConfirmAdvance
+              class="composer-advance"
+              :current-title="currentGuideTitle"
+              :next-title="nextGuideTitle"
+              :project-id="projectId"
+              :flesh-steps="fleshStatuses"
+              :disabled="store.status === 'streaming'"
+              @advanced="onAdvanced"
+            />
+          </div>
+          <!-- 生成中 → 同一位置变成「停止」（位置不变，符合肌肉记忆） -->
           <button
+            v-if="store.status === 'streaming'"
+            class="send-btn stop"
+            type="button"
+            title="停止本轮生成"
+            @click="store.stopStreaming()"
+          >
+            <Square :size="14" /><span>停止</span>
+          </button>
+          <button
+            v-else
             class="send-btn"
             :class="{ primary: canSend }"
             :disabled="!canSend"
             @click="send(inputText)"
           >
-            <Send :size="16" /><span>发送</span>
+            <Send :size="14" /><span>发送</span>
           </button>
+        </div>
+
+        <!--
+          上下文工具条：用量 + 缓存命中率。
+          缓存一项**始终占位**（无数据时显示「—」），这样位置固定、一眼能找到，
+          而不是"发过消息才冒出来"。
+        -->
+        <div v-if="store.contextUsage" class="context-meter" :class="contextLevel">
+          <div
+            class="meter-track"
+            :title="'上下文估算占用（按字符类型近似）。整段会话历史会一次性发给模型，接近上限时请新建会话。'"
+          >
+            <div class="meter-fill" :style="{ width: contextBarWidth }"></div>
+          </div>
+          <span class="meter-text">
+            上下文 {{ formatTokens(store.contextUsage.used_tokens) }} /
+            {{ formatTokens(store.contextUsage.limit_tokens) }} tokens
+            · {{ contextPercent }}%
+          </span>
+          <span class="meter-sep">·</span>
+          <!-- 缓存命中率：网关返回的真实数据 -->
+          <span
+            class="meter-text meter-cache"
+            :class="{ none: !hasCacheInfo || store.lastUsage?.cached_tokens === 0 }"
+            :title="cacheTitle"
+          >
+            {{ cacheHitText }}
+          </span>
+          <span v-if="contextLevel === 'warn'" class="meter-tip">已用较多</span>
+          <span v-else-if="contextLevel === 'danger'" class="meter-tip">接近上限，建议新建会话</span>
         </div>
       </div>
     </section>
@@ -136,11 +208,13 @@
 import { computed, onMounted, ref, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  Plus, Pencil, Trash2, AlertTriangle, Lightbulb, Settings2, Send,
+  Plus, Pencil, Trash2, AlertTriangle, Lightbulb, Settings2, Send, Cpu, Square,
+  CheckCircle2,
 } from 'lucide-vue-next'
 import { useAgentStore } from '@/stores/agent'
 import { useProjectStore } from '@/stores/project'
 import type { AgentSession } from '@/api/agent'
+import { settingsApi, type AppSettings } from '@/api'
 import { characterApi } from '@/api/character'
 import { locationApi } from '@/api/location'
 import { worldApi } from '@/api/world'
@@ -167,6 +241,119 @@ const suggestions = [
   '帮我设计一个魔法世界的底层规则',
   '创建一个叫黑炎帝国的反派势力',
 ]
+
+// ---------- 输入框旁的模型切换器 ----------
+// 与「设置」页共用同一个真源（全局 defaultModel）：后端每次 LLM 调用前读取，
+// 因此这里切换后立即生效，两处不会出现不一致。
+const settingsSnapshot = ref<AppSettings>({})
+const modelOptions = ref<string[]>([])
+const selectedModel = ref('')
+const loadingModels = ref(false)
+const modelError = ref('')
+const modelSavedHint = ref('')
+
+/** 下拉选项 = 网关真实模型 ∪ 当前模型（保证当前值始终可显示、可选中）。 */
+const modelChoices = computed(() => {
+  const list = [...modelOptions.value]
+  const current = selectedModel.value.trim()
+  if (current && !list.includes(current)) list.unshift(current)
+  return list
+})
+
+async function loadModelPicker() {
+  loadingModels.value = true
+  modelError.value = ''
+  try {
+    const s = await settingsApi.get()
+    settingsSnapshot.value = s
+    selectedModel.value = s.defaultModel ?? ''
+    const r = await settingsApi.listModels({ base_url: s.aiBaseUrl, api_key: s.aiApiKey })
+    if (r.ok) {
+      modelOptions.value = r.models ?? []
+    } else {
+      modelOptions.value = []
+      modelError.value = r.error ?? '未知错误'
+    }
+  } catch (e) {
+    modelError.value = (e as Error).message
+  } finally {
+    loadingModels.value = false
+  }
+}
+
+/** 切换模型：写回全局设置（连带保留其余字段），保存成功即已生效。 */
+async function onModelChange() {
+  modelError.value = ''
+  modelSavedHint.value = ''
+  try {
+    settingsSnapshot.value = { ...settingsSnapshot.value, defaultModel: selectedModel.value }
+    await settingsApi.update(settingsSnapshot.value)
+    modelSavedHint.value = `已切换到 ${selectedModel.value}`
+    setTimeout(() => {
+      modelSavedHint.value = ''
+    }, 3000)
+  } catch (e) {
+    modelError.value = (e as Error).message
+  }
+}
+
+// ---------- 上下文用量（估算预警） ----------
+// 后端把整段会话历史拍平成一次请求，超限时会直接报错；因此在输入框下方常显已用/上限。
+
+const contextPercent = computed(() => {
+  const u = store.contextUsage
+  if (!u || u.limit_tokens <= 0) return 0
+  return Math.round((u.used_tokens / u.limit_tokens) * 1000) / 10
+})
+
+/** 进度条宽度：一旦有占用至少显示 1%，否则细条看起来像没渲染。 */
+const contextBarWidth = computed(
+  () => `${Math.min(100, Math.max(1, contextPercent.value))}%`,
+)
+
+const contextLevel = computed<'ok' | 'warn' | 'danger'>(() => {
+  if (contextPercent.value >= 95) return 'danger'
+  if (contextPercent.value >= 80) return 'warn'
+  return 'ok'
+})
+
+/** 千分位显示，便于一眼判断量级。 */
+function formatTokens(n: number): string {
+  return n.toLocaleString('en-US')
+}
+
+/** 把毫秒格式化为「x 分 y 秒」/「y 秒」，用于本轮小结。 */
+function formatDuration(ms: number): string {
+  const total = Math.round(ms / 1000)
+  if (total < 60) return `${total} 秒`
+  return `${Math.floor(total / 60)} 分 ${total % 60} 秒`
+}
+
+/**
+ * 是否已拿到网关的缓存信息（页面刚打开、还没发消息时为 false）。
+ */
+const hasCacheInfo = computed(() => store.lastUsage?.cache_hit_rate != null)
+
+/**
+ * 缓存命中率文案（来自网关返回的真实用量）。
+ *
+ * **始终有内容**：无数据时显示「缓存 —」而不是整块消失——
+ * 位置固定，用户才不会找不到这块信息。
+ * 保留一位小数：细微差别（如从 0% 变成 5%）在判断"缓存是否开始生效"时也有意义。
+ */
+const cacheHitText = computed(() => {
+  const u = store.lastUsage
+  if (!u || u.cache_hit_rate == null) return '缓存 —'
+  const pct = Math.round(u.cache_hit_rate * 1000) / 10
+  return `缓存命中 ${pct}%`
+})
+
+/** 悬停说明：区分"还没数据"与"已有数据"两种状态。 */
+const cacheTitle = computed(() =>
+  hasCacheInfo.value
+    ? '本轮请求中命中网关提示缓存的 token 占比。长期为 0 说明每轮都在重算（更慢更贵）。'
+    : '发送一条消息后，这里会显示本轮的缓存命中率。',
+)
 
 const projectName = computed(() => projectStore.currentProject?.name ?? '')
 const activeSession = computed(() => store.sessions.find((s) => s.id === store.sessionId))
@@ -199,8 +386,8 @@ const guideStep = computed(() => {
   // 优先：project.config.current_step（项目级，多 session 共享）
   const fromConfig = (projectStore.currentProject?.config as any)?.current_step as string | undefined
   if (fromConfig) return fromConfig
-  // 兜底：session.current_step——但后端默认是中文'项目初始化'，
-  // 不在 guideSteps 里，所以只在它能匹配时用
+  // 兜底：session.current_step（新会话默认 'premise'）；早期会话存的是中文旧值，
+  // 不在 guideSteps 里，所以只在能匹配时使用。
   if (currentStep.value && guideSteps.some((s) => s.key === currentStep.value)) {
     return currentStep.value
   }
@@ -221,6 +408,11 @@ const fleshStatuses = ref<FleshStep[]>([
   { key: 'world.items',            title: '道具', done: false },
   { key: 'characters.supporting',  title: '配角', done: false },
 ])
+
+/** 血肉步完成度映射，供 StepIndicator 判断（血肉步可跳过，不能按位置推断完成）。 */
+const fleshDoneMap = computed(() =>
+  Object.fromEntries(fleshStatuses.value.map((f) => [f.key, f.done])),
+)
 
 /** 从后端拉 4 类血肉的实际数量，更新 fleshStatuses.done。
  *  注：4 个 API 失败时静默 catch——某些 entity 端点可能临时 500
@@ -339,6 +531,26 @@ async function send(text: string) {
   await store.sendMessage(t, projectId.value)
 }
 
+/**
+ * 删除某条消息及其之后的全部内容（截断）。
+ *
+ * 必须连带删除后续消息：错误的提问会污染整段上下文，
+ * 只删自身反而会让 AI 看到"没有提问的回答"，更混乱。
+ */
+async function onTruncate(index: number) {
+  if (store.status === 'streaming') return
+  const count = store.messages.length - index
+  const ok = window.confirm(
+    `将删除这条消息及其之后的 ${count} 条消息（含 AI 回复与工具记录）。\n此操作不可撤销，确定继续吗？`,
+  )
+  if (!ok) return
+  try {
+    await store.truncateFrom(index)
+  } catch (e) {
+    store.error = `删除失败：${(e as Error).message}`
+  }
+}
+
 // 选择题选项 / 自由输入 → 作为下一轮用户消息继续对话
 function onSelect(text: string) {
   send(text)
@@ -358,6 +570,9 @@ async function onRetry(payload: { name: string; input: unknown }) {
 
 // 推进成功：刷新项目 + 会话，让 step indicator 反映新阶段
 async function onAdvanced() {
+  // 生成/工具调用期间禁止并发推进：restoreSession 会把 status 重置为 idle，
+  // 导致用户看到"AI 还在调用工具，但右上角已显示就绪"。
+  if (store.status === 'streaming') return
   // 重拉项目（project.config.current_step 已变更）
   try {
     await projectStore.fetchProject(projectId.value)
@@ -374,11 +589,6 @@ async function onAdvanced() {
   await store.loadSessions(projectId.value)
   // 血肉完成度也要刷新（推进后可能新建了 entity）
   void refreshFleshStatus()
-}
-
-// 用户手动点 "排版" 按钮：把第 i 条消息标 formatted=true
-function onFormat(index: number) {
-  store.markFormatted(index)
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -421,6 +631,7 @@ async function activateProject(pid: string) {
 onMounted(async () => {
   await store.loadTools()
   await activateProject(projectId.value)
+  await loadModelPicker()
 })
 
 // 在项目间切换（/project/A/agent → /project/B/agent 复用同一组件实例）
@@ -582,10 +793,122 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+  /*
+   * 本行所有控件的统一高度（模型选择器 / 推进按钮 / 发送·停止按钮）。
+   * 之前三者各自用垂直 padding 撑高，实际渲染出 26 / 29 / 44px 三种高度，
+   * 排在一起明显参差；改为同一个变量定高，垂直 padding 归零、靠 flex 居中。
+   */
+  --control-h: 30px;
 }
 .composer-advance { display: inline-flex; }
+/* 推进按钮是子组件，这里只在本场景对齐高度，不改组件自身的样式 */
+.composer-advance :deep(.ca-btn) {
+  height: var(--control-h);
+  padding: 0 var(--space-3);
+}
+
+/* 输入框下方的左侧组：模型切换器 + 确认推进 */
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+/* 模型切换器：轻量胶囊，与主按钮区分层级 */
+.model-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: var(--control-h);
+  padding: 0 8px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  transition: var(--transition-fast);
+}
+.model-picker:hover { border-color: var(--border-primary); }
+.model-icon { color: var(--text-tertiary); flex-shrink: 0; }
+.model-select {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  cursor: pointer;
+  max-width: 160px;
+  padding: 0 12px 0 0;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-tertiary) 50%), linear-gradient(135deg, var(--text-tertiary) 50%, transparent 50%);
+  background-position: right 4px center, right 1px center;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+.model-select:focus { outline: none; }
+.model-select:disabled { cursor: default; opacity: 0.7; }
+.model-picker:hover .model-select { color: var(--color-primary-text); }
+.model-hint {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-hint.error { color: var(--color-error); }
+
+/* 上下文用量：输入框下方一条细进度 + 数值 */
+.context-meter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  min-width: 0;
+}
+.meter-track {
+  flex: 0 0 80px;
+  height: 3px;
+  background: var(--bg-active);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  background: var(--text-tertiary);
+  border-radius: 2px;
+  transition: width var(--transition-fast);
+}
+.meter-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meter-sep { color: var(--text-tertiary); flex-shrink: 0; }
+/* 缓存命中率：中性偏强调色；无数据或完全未命中时降为灰色 */
+.meter-cache { color: var(--color-accent); }
+.meter-cache.none { color: var(--text-tertiary); }
+.meter-tip { white-space: nowrap; }
+.context-meter.warn .meter-fill { background: var(--color-warning); }
+.context-meter.warn .meter-tip { color: var(--color-warning); }
+.context-meter.danger .meter-fill { background: var(--color-error); }
+.context-meter.danger .meter-text,
+.context-meter.danger .meter-tip { color: var(--color-error); }
 
 /* Thinking 指示器（LLM 还没返回第一 token 时） */
+/* 本轮收尾信号：批量操作结束后出现，明确"已结束 + 做了多少 + 用了多久" */
+.round-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0 44px;
+  padding: var(--space-2) var(--space-3);
+  align-self: flex-start;
+  font-size: var(--text-xs);
+  color: var(--color-success);
+  background: var(--color-success-subtle);
+  border-radius: var(--radius-md);
+  animation: fade-in 240ms ease;
+}
+
 .thinking-bubble {
   display: flex;
   gap: var(--space-3);
@@ -641,13 +964,22 @@ watch(
 .composer-input:focus { border-color: var(--color-primary); }
 .send-btn {
   display: inline-flex; align-items: center; gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
+  height: var(--control-h);
+  padding: 0 var(--space-4);
   background: var(--bg-panel-secondary); border: 1px solid var(--border-default);
   border-radius: var(--radius-md); color: var(--text-disabled);
   font-size: var(--text-sm); font-family: inherit; cursor: not-allowed; transition: all var(--transition-fast);
 }
 .send-btn.primary { background: var(--color-primary); border-color: var(--color-primary); color: #fff; cursor: pointer; }
 .send-btn.primary:hover { background: var(--color-primary-hover); }
+/* 生成中的「停止」：同一位置，用错误色提示可中断 */
+.send-btn.stop {
+  background: var(--bg-base);
+  border-color: var(--color-error);
+  color: var(--color-error);
+  cursor: pointer;
+}
+.send-btn.stop:hover { background: var(--color-error-subtle); }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 </style>

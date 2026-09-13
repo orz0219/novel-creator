@@ -17,6 +17,7 @@
         :key="filter.id"
         class="control-btn filter"
         :class="{ active: activeFilter === filter.id }"
+        :title="filter.label"
         @click="$emit('filter', filter.id)"
       ><component :is="filter.icon" :size="16" /></button>
     </div>
@@ -27,22 +28,40 @@
 </template>
 
 <script setup lang="ts">
-import { Globe, User, MapPin, Swords, Calendar, GitBranch } from 'lucide-vue-next'
-defineProps<{
+import { computed, type Component } from 'vue'
+import { Globe, User, MapPin, Swords, Package, Sparkles, Circle, Calendar } from 'lucide-vue-next'
+
+export interface GraphFilterType {
+  type: string
+  label: string
+}
+
+const props = defineProps<{
   zoom: number
   activeFilter: string
+  /** 当前图里真实存在的实体类型；由父组件动态传入，避免出现空按钮。 */
+  types?: GraphFilterType[]
 }>()
 
 defineEmits(['zoom-in', 'zoom-out', 'zoom-reset', 'fit', 'center', 'filter'])
 
-const filters = [
-  { id: 'all', icon: Globe },
-  { id: 'Character', icon: User },
-  { id: 'Location', icon: MapPin },
-  { id: 'Faction', icon: Swords },
-  { id: 'Event', icon: Calendar },
-  { id: 'Thread', icon: GitBranch },
-]
+const ICONS: Record<string, Component> = {
+  Character: User,
+  Location: MapPin,
+  Faction: Swords,
+  Item: Package,
+  Event: Calendar,
+  golden_finger: Sparkles,
+}
+
+const filters = computed(() => [
+  { id: 'all', label: '全部', icon: Globe },
+  ...(props.types ?? []).map((t) => ({
+    id: t.type,
+    label: t.label,
+    icon: ICONS[t.type] ?? Circle,
+  })),
+])
 </script>
 
 <style scoped>

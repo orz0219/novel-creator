@@ -16,7 +16,9 @@ use infrastructure::llm::{InfraLlmPort, LlmClient, OpenAiCompatibleProvider};
 use db::repos::prompt_repo::PromptRepo;
 use db::repos::session_repo::SessionRepo;
 use db::repos::memory_repo::MemoryRepo;
-use domain::ports::PromptRepositoryPort;
+use db::ai_settings::DbAiSettingsPort;
+use db::guide_progress::DbGuideProgressPort;
+use domain::ports::{AiSettingsPort, GuideProgressPort, PromptRepositoryPort};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -92,15 +94,15 @@ async fn main() -> Result<()> {
     }
 
     // 构建 Agent 运行时：会话/记忆用内存；基础工具（echo/ask_question）+ P2 真实领域工具。
-    let base_url = std::env::var("OPENCODE_BASE_URL")
-        .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string());
-    let api_key = std::env::var("OPENCODE_API_KEY").ok();
-    let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "mimo-v2.5".to_string());
+    // 运行时 AI 配置：真源是「设置」页写入的 app_settings，环境变量仅作为未配置时的默认值。
+    // 对话 / 生成 / 抽取三处 LLM 共用同一个端口，设置页保存后全部立即生效。
+    let ai_settings: Arc<dyn AiSettingsPort> = Arc::new(DbAiSettingsPort::new(
+        pool.clone(),
+        db::ai_settings::AiSettingsDefaults::from_env(),
+    ));
     let mut llm_client = LlmClient::new("opencode".to_string());
-    llm_client.add_provider(Arc::new(OpenAiCompatibleProvider::new(
-        base_url, api_key, model.clone(),
-    )));
-    let llm = Arc::new(InfraLlmPort::new(llm_client));
+    llm_client.add_provider(Arc::new(OpenAiCompatibleProvider::new(ai_settings.clone())));
+    let llm = Arc::new(InfraLlmPort::new(llm_client, ai_settings.clone()));
 
     let agent_tools = Arc::new(ToolRegistry::new());
     // 基础工具
@@ -114,6 +116,9 @@ async fn main() -> Result<()> {
     let agent_memory: Arc<dyn domain::agent_store::AgentMemory> =
         Arc::new(MemoryRepo::new(pool.clone()));
     let prompt_store: Arc<dyn PromptRepositoryPort> = Arc::new(PromptRepo::new(pool.clone()));
+    // 引导进度真源：project.config.current_step（项目级，多会话共享）
+    let guide_progress: Arc<dyn GuideProgressPort> =
+        Arc::new(DbGuideProgressPort::new(pool.clone()));
     let agent = Arc::new(AgentRuntime::new(
         llm,
         agent_tools,
@@ -121,11 +126,12 @@ async fn main() -> Result<()> {
         agent_memory,
         prompt_store,
         agent::DEFAULT_SYSTEM_PROMPT_BASE.to_string(),
-        model,
+        ai_settings.clone(),
+        guide_progress,
     ));
 
     // Create application state
-    let state = AppState::new(pool, agent);
+    let state = AppState::new(pool, agent, ai_settings);
 
     // Build router
     let app = api::router(state);

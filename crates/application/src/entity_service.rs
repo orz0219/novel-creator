@@ -20,18 +20,25 @@ pub struct EntityService {
     repo: Arc<dyn EntityRepositoryPort>,
     committer: Arc<MutationCommitter>,
     resolver: Arc<dyn ProjectResolverPort>,
+    /// 见 `new()` 的说明
+    actor: &'static str,
 }
 
 impl EntityService {
+    /// `actor` 记录「这次改动是谁发起的」（`MutationSource::as_str()`：user / ai / system），
+    /// 会写进档案历史快照——用户要能区分「我自己改的」和「AI 改的」。
+    /// 同一个 service 实例的来源是固定的：HTTP 接口构造的是 user，AI 工具构造的是 ai。
     pub fn new(
         repo: Arc<dyn EntityRepositoryPort>,
         committer: Arc<MutationCommitter>,
         resolver: Arc<dyn ProjectResolverPort>,
+        actor: &'static str,
     ) -> Self {
         Self {
             repo,
             committer,
             resolver,
+            actor,
         }
     }
 
@@ -174,12 +181,35 @@ impl EntityService {
         self.repo.get_character_state(id).await
     }
 
+    /// 改档案前先确认实体存在。
+    ///
+    /// 否则会走到 UPSERT，由 `entity_profile` 的外键失败兜底报出来——
+    /// 对外是 500（服务器错误），而真实原因是「这个实体不存在」，
+    /// 应该是 404。这里的错误文案与 `update_entity` 保持一致的 "entity {} not found",
+    /// 便于 handler 统一映射成 404。
+    async fn ensure_entity_exists(&self, id: Uuid) -> Result<()> {
+        self.repo
+            .get_entity(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("entity {} not found", id))?;
+        Ok(())
+    }
+
     pub async fn update_character_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
-        self.repo.update_character_profile(id, profile).await
+        self.ensure_entity_exists(id).await?;
+        // 改动前留档（拿不到旧档案说明是首次创建，没有「改前」可留）
+        if let Some(before) = self.repo.get_character_profile(id).await? {
+            self.repo.snapshot_profile(id, "character", &before, self.actor).await?;
+        }
+        self.repo.update_character_profile(id, profile, self.actor).await
     }
 
     pub async fn update_character_state(&self, id: Uuid, state: Value) -> Result<Value> {
-        self.repo.update_character_state(id, state).await
+        self.ensure_entity_exists(id).await?;
+        if let Some(before) = self.repo.get_character_state(id).await? {
+            self.repo.snapshot_profile(id, "character", &before, self.actor).await?;
+        }
+        self.repo.update_character_state(id, state, self.actor).await
     }
 
     pub async fn get_location_profile(&self, id: Uuid) -> Result<Option<Value>> {
@@ -187,7 +217,11 @@ impl EntityService {
     }
 
     pub async fn upsert_location_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
-        self.repo.upsert_location_profile(id, profile).await
+        self.ensure_entity_exists(id).await?;
+        if let Some(before) = self.repo.get_location_profile(id).await? {
+            self.repo.snapshot_profile(id, "location", &before, self.actor).await?;
+        }
+        self.repo.upsert_location_profile(id, profile, self.actor).await
     }
 
     pub async fn get_faction_profile(&self, id: Uuid) -> Result<Option<Value>> {
@@ -195,7 +229,11 @@ impl EntityService {
     }
 
     pub async fn upsert_faction_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
-        self.repo.upsert_faction_profile(id, profile).await
+        self.ensure_entity_exists(id).await?;
+        if let Some(before) = self.repo.get_faction_profile(id).await? {
+            self.repo.snapshot_profile(id, "faction", &before, self.actor).await?;
+        }
+        self.repo.upsert_faction_profile(id, profile, self.actor).await
     }
 
     pub async fn get_character_knowledge(&self, id: Uuid) -> Result<Vec<Value>> {

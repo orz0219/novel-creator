@@ -56,8 +56,9 @@ const cmds = computed(() => {
   return [
     { id: 'home', icon: Home, label: '返回首页', cat: '导航', action: () => router.push('/') },
     ...projectCmds,
-    { id: 'search', icon: Search, label: '全局搜索', cat: '工具', action: () => router.push('/search') },
-    { id: 'settings', icon: Settings, label: '设置', cat: '系统', action: () => router.push('/settings') },
+    // 带上来源路径，搜索页 / 设置页的「返回」按钮据此回到当前页面
+    { id: 'search', icon: Search, label: '全局搜索', cat: '工具', action: () => router.push({ path: '/search', query: { from: route.fullPath } }) },
+    { id: 'settings', icon: Settings, label: '设置', cat: '系统', action: () => router.push({ path: '/settings', query: { from: route.fullPath } }) },
   ]
 })
 const filtered = computed(() => {

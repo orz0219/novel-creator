@@ -36,8 +36,10 @@ impl IntoResponse for AppError {
             .and_then(|code| StatusCode::from_u16(code).ok())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-        let message = self.0.to_string();
-        tracing::error!("API error ({}): {}", status.as_u16(), self.0);
+        // anyhow 的 Display 只输出最外层 context，真实根因在 cause 链里。
+        // 用 {:#} 展开完整链，否则日志与响应都只剩一句无信息量的包装文案。
+        let message = format!("{:#}", self.0);
+        tracing::error!("API error ({}): {}", status.as_u16(), message);
         (status, Json(json!({ "error": message }))).into_response()
     }
 }

@@ -1,4 +1,7 @@
+pub mod ai_settings;
 pub mod connection;
+pub mod export;
+pub mod guide_progress;
 pub mod migration;
 pub mod mutation_committer;
 pub mod project_resolver;

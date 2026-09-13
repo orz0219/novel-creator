@@ -26,6 +26,7 @@ fn service(state: &AppState) -> EntityService {
         Arc::new(DbEntityRepositoryPort::new(state.pool.clone())),
         committer,
         resolver,
+        "user",
     )
 }
 
@@ -100,15 +101,26 @@ pub async fn get_character_state(State(state): State<AppState>, Path(id): Path<S
     Ok(Json(state_val.unwrap_or(serde_json::Value::Null)))
 }
 
+/// 实体不存在时返回 404 而不是 500：
+/// 原先要等 `entity_profile` 的外键失败才报出来，对外是「服务器错误」，
+/// 而真实原因只是「这个实体不存在」。
+fn not_found_or(e: anyhow::Error) -> AppError {
+    if e.to_string().contains("not found") {
+        AppError::with_status(axum::http::StatusCode::NOT_FOUND, e)
+    } else {
+        AppError(e)
+    }
+}
+
 pub async fn update_character_profile(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
-    let profile = service(&state).update_character_profile(id, body).await?;
+    let profile = service(&state).update_character_profile(id, body).await.map_err(not_found_or)?;
     Ok(Json(profile))
 }
 
 pub async fn update_character_state(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
-    let state_val = service(&state).update_character_state(id, body).await?;
+    let state_val = service(&state).update_character_state(id, body).await.map_err(not_found_or)?;
     Ok(Json(state_val))
 }
 
@@ -120,7 +132,7 @@ pub async fn get_location_profile(State(state): State<AppState>, Path(id): Path<
 
 pub async fn upsert_location_profile(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
-    let profile = service(&state).upsert_location_profile(id, body).await?;
+    let profile = service(&state).upsert_location_profile(id, body).await.map_err(not_found_or)?;
     Ok(Json(profile))
 }
 
@@ -132,7 +144,7 @@ pub async fn get_faction_profile(State(state): State<AppState>, Path(id): Path<S
 
 pub async fn upsert_faction_profile(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid entity ID")))?;
-    let profile = service(&state).upsert_faction_profile(id, body).await?;
+    let profile = service(&state).upsert_faction_profile(id, body).await.map_err(not_found_or)?;
     Ok(Json(profile))
 }
 
@@ -159,12 +171,18 @@ pub async fn create_location(State(state): State<AppState>, Path(world_id): Path
     Ok(Json(entity))
 }
 
-pub async fn get_location_entities(State(_state): State<AppState>, Path(_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    Ok(Json(serde_json::json!([])))
+/// 该地点的相关实体（来自 `relation` 表；此前写死返回空数组）。
+pub async fn get_location_entities(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid location ID")))?;
+    let list = db::repos::entity_version_repo::LocationLinksRepo::entities(&state.pool, id).await?;
+    Ok(Json(serde_json::json!(list)))
 }
 
-pub async fn get_location_events(State(_state): State<AppState>, Path(_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
-    Ok(Json(serde_json::json!([])))
+/// 该地点的相关事件（来自 `event_entity`；此前写死返回空数组）。
+pub async fn get_location_events(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid location ID")))?;
+    let list = db::repos::entity_version_repo::LocationLinksRepo::events(&state.pool, id).await?;
+    Ok(Json(serde_json::json!(list)))
 }
 
 pub async fn list_factions(s: State<AppState>, p: Path<String>) -> Result<Json<serde_json::Value>, AppError> { list_entities(s, p, Query(EntityTypeFilter { r#type: Some("Faction".to_string()) })).await }

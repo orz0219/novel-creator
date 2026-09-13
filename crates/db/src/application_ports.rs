@@ -200,6 +200,16 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
     }
 
     async fn get_node(&self, id: Uuid) -> Result<Option<Value>> {
+        // 带上实体类型名：详情页有「类型」这一行，但返回里一直没有这个字段，
+        // 于是那一行永远是空的（前端取 entity_type 取不到）。
+        //
+        // ⚠️ 两条硬约束（都踩过）：
+        //   1. SQL 必须写成**单行**。生成 SQLite 版的脚本按 `id::text` 这类文本模式
+        //      改写 SQL 与元组类型，用 `\` 续行的多行 SQL 会让规则失配。
+        //   2. `sqlx::query_as(` 与 SQL 字符串之间**不能有注释**。生成脚本用
+        //      `query_as\(\s*"..."` 匹配，注释会让它匹配不上，
+        //      于是元组类型不会从 String 改成 Uuid，运行时直接报
+        //      "String is not compatible with SQL type BLOB"。
         let row: Option<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, Option<String>, String, i32, String, String, String)> =
             sqlx::query_as(
                 "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE id = $1 AND status != 'Deleted'"
@@ -1939,10 +1949,14 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
     ) -> Result<Vec<Value>> {
         // attributes 可能是 NULL（直接 SQL 插的 entity 没设 attributes）：
         // 改成 Option<String> + 用 unwrap_or("{}") 兜底
+        //
+        // 类型过滤用 LOWER(...) 做大小写不敏感匹配：类型名在库中是 `Character` /
+        // `Location` 这类首字母大写形式，而 LLM 调用工具时常写成小写（`location`）。
+        // 精确匹配会静默返回空列表，看起来像"这个世界没有数据"。
         let rows: Vec<(String, String, String, Option<String>, Option<String>, Option<String>, i32, String, String)> =
             if let Some(t) = entity_type {
                 sqlx::query_as(
-                    "SELECT e.id::text, e.name, et.name, e.summary, e.description, e.attributes::text, e.version, e.created_at::text, e.updated_at::text FROM entity e JOIN entity_type et ON e.entity_type_id = et.id WHERE e.world_id = $1 AND et.name = $2 AND e.status != 'Deleted' ORDER BY e.name",
+                    "SELECT e.id::text, e.name, et.name, e.summary, e.description, e.attributes::text, e.version, e.created_at::text, e.updated_at::text FROM entity e JOIN entity_type et ON e.entity_type_id = et.id WHERE e.world_id = $1 AND LOWER(et.name) = LOWER($2) AND e.status != 'Deleted' ORDER BY e.name",
                 )
                 .bind(world_id)
                 .bind(t)
@@ -1986,18 +2000,21 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             String,
             String,
             String,
+            Option<String>,
         )> = sqlx::query_as(
-            "SELECT e.id::text, e.project_id::text, e.world_id::text, e.name, e.summary, e.description, e.attributes::text, e.version, e.created_by, e.created_at::text, e.updated_at::text FROM entity e WHERE e.id = $1 AND e.status != 'Deleted'",
+            "SELECT e.id::text, e.project_id::text, e.world_id::text, e.name, e.summary, e.description, e.attributes::text, e.version, e.created_by, e.created_at::text, e.updated_at::text, et.name FROM entity e LEFT JOIN entity_type et ON et.id = e.entity_type_id WHERE e.id = $1 AND e.status != 'Deleted'",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await
         .context("Failed to get entity")?;
 
-        Ok(row.map(|(id, pid, wid, name, summary, desc, attrs, ver, created_by, created, updated)| {
+        Ok(row.map(|(id, pid, wid, name, summary, desc, attrs, ver, created_by, created, updated, etype)| {
             serde_json::json!({
                 "id": id, "project_id": pid, "world_id": wid, "name": name,
                 "summary": summary, "description": desc,
+                // 类型名（Character / Location / Faction / Item …），详情页「类型」行用它
+                "entity_type": etype,
                 "attributes": Self::parse_json(&attrs), "version": ver,
                 "created_by": created_by, "created_at": created, "updated_at": updated
             })
@@ -2052,6 +2069,10 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         description: Option<&str>,
         attributes: Option<&Value>,
     ) -> Result<Value> {
+        // 改动前留档（版本历史的来源）。走的是与 MutationCommitter 同一条
+        // `EntityRepo::snapshot_tx`，保证「谁改的改动」都进得了历史。
+        crate::repos::entity_repo::EntityRepo::snapshot_tx(&self.pool, id).await?;
+
         if let Some(name) = name {
             sqlx::query(
                 "UPDATE entity SET name = $1, version = version + 1, updated_at = NOW() WHERE id = $2 AND status != 'Deleted' AND project_id = (SELECT project_id FROM entity WHERE id = $3)",
@@ -2120,25 +2141,52 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
     }
 
     async fn list_relations(&self, world_id: Uuid) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, String, String, Option<String>, String, String, String)> =
-            sqlx::query_as(
-                "SELECT r.id::text, r.source_entity_id::text, r.target_entity_id::text, r.relation_type, r.description, r.attributes::text, r.created_at::text, r.updated_at::text FROM relation r JOIN entity e ON r.source_entity_id = e.id WHERE e.world_id = $1 AND r.valid_until IS NULL",
-            )
-            .bind(world_id)
-            .fetch_all(&self.pool)
-            .await
-            .context("Failed to list relations")?;
+        // 顺带把两端实体的**名字**查出来。
+        //
+        // 原先只返回 uuid，前端拿不到名字就只能显示关系类型
+        // （一列「LocatedAt」「MemberOf」），用户根本看不出这条关系说的是谁和谁——
+        // 而关系列表的全部价值就在于此。
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT r.id::text, r.source_entity_id::text, r.target_entity_id::text, \
+                    src.name, tgt.name, r.relation_type, r.description, r.attributes::text, \
+                    r.created_at::text, r.updated_at::text \
+             FROM relation r \
+             JOIN entity src ON r.source_entity_id = src.id \
+             JOIN entity tgt ON r.target_entity_id = tgt.id \
+             WHERE src.world_id = $1 AND r.valid_until IS NULL \
+             ORDER BY src.name, tgt.name",
+        )
+        .bind(world_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list relations")?;
 
         Ok(rows
             .into_iter()
-            .map(|(id, src, tgt, rtype, desc, attrs, created, updated)| {
-                serde_json::json!({
-                    "id": id, "source_entity_id": src, "target_entity_id": tgt,
-                    "relation_type": rtype, "description": desc,
-                    "attributes": Self::parse_json(&attrs),
-                    "created_at": created, "updated_at": updated
-                })
-            })
+            .map(
+                |(id, src, tgt, src_name, tgt_name, rtype, desc, attrs, created, updated)| {
+                    serde_json::json!({
+                        "id": id, "source_entity_id": src, "target_entity_id": tgt,
+                        // 名字缺失时回退到 uuid 前 8 位，前端至少能看出是两条不同的记录
+                        "source_name": src_name,
+                        "target_name": tgt_name,
+                        "relation_type": rtype, "description": desc,
+                        "attributes": Self::parse_json(&attrs),
+                        "created_at": created, "updated_at": updated
+                    })
+                },
+            )
             .collect())
     }
 
@@ -2232,6 +2280,10 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         let arc = crate::repos::character_repo::CharacterArcRepo::new(self.pool.clone())
             .get_by_entity(id)
             .await?;
+        let arc_stages =
+            crate::repos::arc_stage_repo::EntityArcStageRepo::new(self.pool.clone())
+                .list_by_entity(id)
+                .await?;
         let extension = crate::repos::character_repo::CharacterExtensionRepo::new(self.pool.clone())
             .get_by_entity(id)
             .await?;
@@ -2258,6 +2310,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
                 "secrets": secrets,
                 "capabilities": capabilities,
                 "arc_potential": arc,
+                "arc_stages": arc_stages,
                 "extension": extension,
                 "created_at": p.created_at.to_rfc3339(),
                 "updated_at": p.updated_at.to_rfc3339()
@@ -2285,51 +2338,151 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         }))
     }
 
-    async fn update_character_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+    async fn update_character_profile(&self, id: Uuid, profile: Value, actor: &str) -> Result<Value> {
         use domain::character::*;
         let now = Utc::now();
         let s = |k: &str| profile.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
-        let age_range: Option<AgeRange> =
-            profile.get("age_range").and_then(|v| v.as_str()).map(AgeRange::from_str);
-        let gender: Option<Gender> =
-            profile.get("gender").and_then(|v| v.as_str()).map(Gender::from_str);
-        let role: Option<StoryRole> = profile
-            .get("role_in_story")
-            .and_then(|v| v.as_str())
-            .map(StoryRole::from_str);
-        let aliases: Vec<String> = profile
-            .get("aliases")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let social_position: Option<SocialPosition> = profile
-            .get("social_position")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let narrative_necessity: Option<NarrativeNecessity> = profile
-            .get("narrative_necessity")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
-        let existing: Option<(Uuid,)> =
-            sqlx::query_as("SELECT id::text FROM character_profile WHERE entity_id = $1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await
-                .context("check character profile")?;
+        /*
+         * 枚举必须严格解析。原先三个字段一律走 from_str，未知取值被静默降级
+         * （「男」→ Other、「青年」→ Unknown），库里留下错误值却没人察觉：
+         * 「填了男」和「确实填了 Other」在数据上完全无法区分。
+         *
+         * 但「严格」不等于「只认英文」——这是中文小说系统，中文写法会被
+         * parse() 明确映射到规范值；只有真正无法识别的取值才报错。
+         */
+        let age_range = match profile.get("age_range").and_then(|v| v.as_str()) {
+            Some(raw) => Some(AgeRange::parse(raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "age_range 无法识别：{}（可传中文如「青年」「中年」，或规范值 {}）",
+                    raw,
+                    AgeRange::ALL.join(" / ")
+                )
+            })?),
+            None => None,
+        };
+        let gender = match profile.get("gender").and_then(|v| v.as_str()) {
+            Some(raw) => Some(Gender::parse(raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "gender 无法识别：{}（可传中文如「男」「女」，或规范值 {}）",
+                    raw,
+                    Gender::ALL.join(" / ")
+                )
+            })?),
+            None => None,
+        };
+        let role = match profile.get("role_in_story").and_then(|v| v.as_str()) {
+            Some(raw) => Some(StoryRole::parse(raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "role_in_story 无法识别：{}（可传中文如「主角」「反派」，或规范值 {}）",
+                    raw,
+                    StoryRole::ALL.join(" / ")
+                )
+            })?),
+            None => None,
+        };
+
+        // 结构化字段：类型不符时报错，不静默丢弃。
+        // 原先的 .ok() 会把非法输入变成空值，调用方以为写成功了。
+        let aliases: Vec<String> = match profile.get("aliases") {
+            Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+                .map_err(|e| anyhow::anyhow!("aliases 应为字符串数组：{}", e))?,
+            _ => Vec::new(),
+        };
+        let social_position: Option<SocialPosition> = match profile.get("social_position") {
+            Some(v) if !v.is_null() => Some(serde_json::from_value(v.clone()).map_err(|e| {
+                anyhow::anyhow!("social_position 应为对象（rank / authority_level / social_access）：{}", e)
+            })?),
+            _ => None,
+        };
+        let narrative_necessity: Option<NarrativeNecessity> = match profile.get("narrative_necessity") {
+            Some(v) if !v.is_null() => Some(
+                serde_json::from_value(v.clone())
+                    .map_err(|e| anyhow::anyhow!("narrative_necessity 应为对象：{}", e))?,
+            ),
+            _ => None,
+        };
+
+        // 先取出旧值：**本次没传的字段要保持原值**。
+        //
+        // agent 工具 `update_character_profile` 的描述明确写着「只传需要设置的字段，
+        // 未传的保持原值」，模型就是照这句话调用的。原先这里整行 SET，只改
+        // identity 一个字段就会把外貌 / 性格 / 背景 / 别名全部清成 NULL——
+        // 用户侧表现为「设定莫名其妙没了」，而且没有任何提示。
+        let existing: Option<(
+            Uuid,
+            Option<String>,
+            serde_json::Value,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+            serde_json::Value,
+        )> = sqlx::query_as(
+            "SELECT id, name, aliases, age_range, gender, identity, appearance, \
+             background_origin, social_position, core_personality, \"values\", role_in_story, \
+             narrative_necessity, extra FROM character_profile WHERE entity_id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("check character profile")?;
         match existing {
-            Some((pid,)) => {
+            Some((
+                pid,
+                old_name,
+                old_aliases,
+                old_age,
+                old_gender,
+                old_identity,
+                old_appearance,
+                old_background,
+                old_social,
+                old_personality,
+                old_values,
+                old_role,
+                old_necessity,
+                old_extra,
+            )) => {
+                // 「传了就更新，没传就用旧值」——空串是有效输入（表示清空），null 一律视为未传
+                let kept = |new: Option<String>, old: Option<String>| new.or(old);
+                let aliases_final = match profile.get("aliases") {
+                    Some(v) if !v.is_null() => {
+                        serde_json::to_value(&aliases).unwrap_or(serde_json::Value::Null)
+                    }
+                    _ => old_aliases,
+                };
+                let social_final = match profile.get("social_position") {
+                    Some(v) if !v.is_null() => {
+                        serde_json::to_value(&social_position).unwrap_or(serde_json::Value::Null)
+                    }
+                    _ => old_social,
+                };
+                let necessity_final = match profile.get("narrative_necessity") {
+                    Some(v) if !v.is_null() => serde_json::to_value(&narrative_necessity)
+                        .unwrap_or(serde_json::Value::Null),
+                    _ => old_necessity,
+                };
                 sqlx::query("UPDATE character_profile SET name=$1, aliases=$2, age_range=$3, gender=$4, identity=$5, appearance=$6, background_origin=$7, social_position=$8, core_personality=$9, \"values\"=$10, role_in_story=$11, narrative_necessity=$12, extra=$13, updated_at=$14 WHERE id=$15")
-                    .bind(s("name"))
-                    .bind(serde_json::to_value(&aliases).unwrap_or(serde_json::Value::Null))
-                    .bind(age_range.map(|a| a.as_str()))
-                    .bind(gender.map(|g| g.as_str()))
-                    .bind(s("identity"))
-                    .bind(s("appearance"))
-                    .bind(s("background_origin"))
-                    .bind(serde_json::to_value(&social_position).unwrap_or(serde_json::Value::Null))
-                    .bind(s("core_personality"))
-                    .bind(s("values"))
-                    .bind(role.map(|r| r.as_str()))
-                    .bind(serde_json::to_value(&narrative_necessity).unwrap_or(serde_json::Value::Null))
-                    .bind(profile.get("extra").cloned().unwrap_or(serde_json::Value::Null))
+                    .bind(kept(s("name"), old_name))
+                    .bind(aliases_final)
+                    .bind(kept(age_range.map(|a| a.as_str().to_string()), old_age))
+                    .bind(kept(gender.map(|g| g.as_str().to_string()), old_gender))
+                    .bind(kept(s("identity"), old_identity))
+                    .bind(kept(s("appearance"), old_appearance))
+                    .bind(kept(s("background_origin"), old_background))
+                    .bind(social_final)
+                    .bind(kept(s("core_personality"), old_personality))
+                    .bind(kept(s("values"), old_values))
+                    .bind(kept(role.map(|r| r.as_str().to_string()), old_role))
+                    .bind(necessity_final)
+                    .bind(profile.get("extra").cloned().unwrap_or(old_extra))
                     .bind(now)
                     .bind(pid)
                     .execute(&self.pool).await.context("update character profile")?;
@@ -2356,32 +2509,199 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             }
         }
 
-        // Sync drive / capabilities / arc / extension if present
+        /*
+         * 同步人物扩展表（drive / capabilities / arc / extension / conflicts / secrets）。
+         *
+         * 原先这里一律是 `if let Ok(x) = from_value(...)`：反序列化失败就**静默跳过**，
+         * 调用方以为写成功了，实际什么都没落库——模型传字符串形态的 drive 时
+         * 正是这样被无声丢掉的。现在改为失败即报错，并把期望的形态写进消息。
+         */
         if let Some(d) = profile.get("drive") {
-            if let Ok(drive) = serde_json::from_value::<CharacterDrive>(d.clone()) {
+            if !d.is_null() {
+                // 字符串形态是模型最自然的写法（只给一段动机描述），
+                // 记为 motivation；对象形态则按字段解析。
+                let drive: CharacterDrive = match d {
+                    Value::String(s) if !s.trim().is_empty() => CharacterDrive {
+                        motivation: Some(s.trim().to_string()),
+                        ..Default::default()
+                    },
+                    _ => serde_json::from_value(d.clone()).map_err(|e| {
+                        anyhow::anyhow!(
+                            "drive 格式不对：{}（应为一句话描述，或含 primary_goal / motivation / fear / weakness / desire / contradiction 等字段的对象）",
+                            e
+                        )
+                    })?,
+                };
                 crate::repos::character_repo::CharacterDriveRepo::new(self.pool.clone())
                     .upsert(id, &drive)
                     .await?;
             }
         }
         if let Some(c) = profile.get("capabilities") {
-            if let Ok(cap) = serde_json::from_value::<CharacterCapability>(c.clone()) {
+            if !c.is_null() {
+                let cap: CharacterCapability = serde_json::from_value(c.clone())
+                    .map_err(|e| anyhow::anyhow!("capabilities 格式不对：{}（应为对象，含 skills / limitations 两个字符串数组）", e))?;
                 crate::repos::character_repo::CharacterCapabilityRepo::new(self.pool.clone())
                     .upsert(id, &cap)
                     .await?;
             }
         }
         if let Some(a) = profile.get("arc_potential") {
-            if let Ok(arc) = serde_json::from_value::<CharacterArcPotential>(a.clone()) {
+            if !a.is_null() {
+                let arc: CharacterArcPotential = serde_json::from_value(a.clone()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "arc_potential 格式不对：{}（应为对象，可含 starting_state / possible_change / resistance）",
+                        e
+                    )
+                })?;
                 crate::repos::character_repo::CharacterArcRepo::new(self.pool.clone())
                     .upsert(id, &arc)
                     .await?;
             }
         }
         if let Some(e) = profile.get("extension") {
-            if let Ok(ext) = serde_json::from_value::<CharacterExtension>(e.clone()) {
+            if !e.is_null() {
+                let ext: CharacterExtension = serde_json::from_value(e.clone())
+                    .map_err(|e| anyhow::anyhow!("extension 格式不对：{}", e))?;
                 crate::repos::character_repo::CharacterExtensionRepo::new(self.pool.clone())
                     .upsert(id, &ext)
+                    .await?;
+            }
+        }
+
+        // 冲突：整组替换。数组元素可以是对象（{conflict_type, description}），
+        // 也接受纯字符串（按 Internal 存），因为模型很自然地只给一段描述。
+        if let Some(c) = profile.get("conflicts") {
+            if !c.is_null() {
+                let arr = c
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("conflicts 应为数组"))?;
+                let mut items = Vec::with_capacity(arr.len());
+                for (i, item) in arr.iter().enumerate() {
+                    let description = match item {
+                        Value::String(s) => s.trim().to_string(),
+                        Value::Object(_) => item
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
+                        _ => String::new(),
+                    };
+                    if description.is_empty() {
+                        anyhow::bail!(
+                            "conflicts[{}] 缺少描述（元素应为字符串，或含 description 的对象）",
+                            i
+                        );
+                    }
+                    let conflict_type = match item.get("conflict_type").and_then(|v| v.as_str()) {
+                        Some(raw) => ConflictType::parse(raw).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "conflicts[{}].conflict_type 无法识别：{}（可传 Internal / External / Relationship / Ideology，或中文「内在」「外在」「关系」「理念」）",
+                                i,
+                                raw
+                            )
+                        })?,
+                        None => ConflictType::Internal,
+                    };
+                    let now = Utc::now();
+                    items.push(CharacterConflict {
+                        // 有 id 时保留，供 conflicts_mode=merge 的局部更新维持引用稳定。
+                        id: item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Uuid::parse_str(s).ok())
+                            .unwrap_or_else(Uuid::new_v4),
+                        entity_id: id,
+                        conflict_type,
+                        description,
+                        target_entity_id: item
+                            .get("target_entity_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Uuid::parse_str(s).ok()),
+                        resolution_status: item
+                            .get("resolution_status")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        // 该冲突从哪个阶段开始成立（对应 arc_stages[].stage）
+                        phase: item
+                            .get("phase")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                        created_at: now,
+                        updated_at: now,
+                    });
+                }
+                crate::repos::character_repo::CharacterConflictRepo::new(self.pool.clone())
+                    .replace_by_entity(id, &items)
+                    .await?;
+            }
+        }
+
+        // 阶段弧线（arc_stages）：外部时间线——何时上场、演什么、戏份多大。
+        // 与 conflicts / secrets 一样是「整组替换」；人物 / 势力 / 地点共用同一张表。
+        sync_arc_stages(&self.pool, id, &profile).await?;
+
+        // 秘密：整组替换，同样接受纯字符串元素。
+        if let Some(sv) = profile.get("secrets") {
+            if !sv.is_null() {
+                let arr = sv
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("secrets 应为数组"))?;
+                let mut items = Vec::with_capacity(arr.len());
+                for (i, item) in arr.iter().enumerate() {
+                    let content = match item {
+                        Value::String(s) => s.trim().to_string(),
+                        Value::Object(_) => item
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
+                        _ => String::new(),
+                    };
+                    if content.is_empty() {
+                        anyhow::bail!(
+                            "secrets[{}] 缺少内容（元素应为字符串，或含 content 的对象）",
+                            i
+                        );
+                    }
+                    let now = Utc::now();
+                    items.push(CharacterSecret {
+                        // 有 id 时保留，供 secrets_mode=merge 的局部更新维持引用稳定。
+                        id: item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Uuid::parse_str(s).ok())
+                            .unwrap_or_else(Uuid::new_v4),
+                        entity_id: id,
+                        content,
+                        importance: item
+                            .get("importance")
+                            .and_then(|v| v.as_i64())
+                            .map(|v| v as i32)
+                            .unwrap_or(3),
+                        reveal_condition: item
+                            .get("reveal_condition")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        related_entities: item
+                            .get("related_entities")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .filter_map(|s| Uuid::parse_str(s).ok())
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        created_at: now,
+                        updated_at: now,
+                    });
+                }
+                crate::repos::character_repo::CharacterSecretRepo::new(self.pool.clone())
+                    .replace_by_entity(id, &items)
                     .await?;
             }
         }
@@ -2391,34 +2711,49 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         Ok(out)
     }
 
-    async fn update_character_state(&self, id: Uuid, state: Value) -> Result<Value> {
+    async fn update_character_state(&self, id: Uuid, state: Value, _actor: &str) -> Result<Value> {
         let now = Utc::now();
         let s = |k: &str| state.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
-        let flags: Vec<String> = state
+        // flags 列是 jsonb，必须绑定 serde_json::Value；
+        // 绑定 Vec<String> 会按 text[] 编码，与列类型不匹配而报错。
+        let flags: Value = state
             .get("flags")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
         let extra: Value = state
             .get("extra")
             .cloned()
             .unwrap_or(serde_json::json!(null));
 
-        let existing: Option<(Uuid,)> =
-            sqlx::query_as("SELECT id::text FROM character_state WHERE entity_id = $1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await
-                .context("check character state")?;
+        // 同档案：未传的字段保持原值，不能整行覆盖成 NULL
+        let existing: Option<(
+            Uuid,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Value,
+            Value,
+        )> = sqlx::query_as(
+            "SELECT id, location, physical_state, mental_state, resource_state, social_state, \
+             flags, extra FROM character_state WHERE entity_id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("check character state")?;
         match existing {
-            Some((pid,)) => {
+            Some((pid, old_loc, old_phys, old_ment, old_res, old_soc, old_flags, old_extra)) => {
+                let kept = |new: Option<String>, old: Option<String>| new.or(old);
                 sqlx::query("UPDATE character_state SET location=$1, physical_state=$2, mental_state=$3, resource_state=$4, social_state=$5, flags=$6, extra=$7, updated_at=$8 WHERE id=$9")
-                    .bind(s("location"))
-                    .bind(s("physical_state"))
-                    .bind(s("mental_state"))
-                    .bind(s("resource_state"))
-                    .bind(s("social_state"))
-                    .bind(&flags)
-                    .bind(&extra)
+                    .bind(kept(s("location"), old_loc))
+                    .bind(kept(s("physical_state"), old_phys))
+                    .bind(kept(s("mental_state"), old_ment))
+                    .bind(kept(s("resource_state"), old_res))
+                    .bind(kept(s("social_state"), old_soc))
+                    .bind(if state.get("flags").is_some() { flags } else { old_flags })
+                    .bind(if state.get("extra").is_some() { extra } else { old_extra })
                     .bind(now)
                     .bind(pid)
                     .execute(&self.pool).await.context("update character state")?;
@@ -2444,6 +2779,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
     }
 
     async fn get_location_profile(&self, id: Uuid) -> Result<Option<Value>> {
+        let arc_stages = load_arc_stages(&self.pool, id).await?;
         let row: Option<(
             Option<String>, Option<String>, Option<String>, Option<String>,
             Option<String>, Option<String>, Option<String>,
@@ -2458,16 +2794,26 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         .fetch_optional(&self.pool)
         .await
         .context("Failed to get location profile")?;
-        Ok(row.map(|r| {
-            serde_json::json!({
-                "geography": r.0, "appearance": r.1, "population": r.2, "economy": r.3,
-                "rules": r.4, "history": r.5, "narrative_usage": r.6,
-                "location_type": r.7, "size": r.8, "climate": r.9, "era": r.10, "accessibility": r.11
-            })
-        }))
+        let Some(r) = row else {
+            // 可能只写了阶段弧线、还没写静态档案：这时也要能读到阶段
+            return Ok(if arc_stages.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!({
+                    "entity_id": id.to_string(),
+                    "arc_stages": arc_stages
+                }))
+            });
+        };
+        Ok(Some(serde_json::json!({
+            "geography": r.0, "appearance": r.1, "population": r.2, "economy": r.3,
+            "rules": r.4, "history": r.5, "narrative_usage": r.6,
+            "location_type": r.7, "size": r.8, "climate": r.9, "era": r.10, "accessibility": r.11,
+            "arc_stages": arc_stages
+        })))
     }
 
-    async fn upsert_location_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+    async fn upsert_location_profile(&self, id: Uuid, profile: Value, _actor: &str) -> Result<Value> {
         let s = |k: &str| profile.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
         let geography = s("geography");
         let appearance = s("appearance");
@@ -2482,12 +2828,32 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         let era = s("era");
         let accessibility = s("accessibility");
 
-        let lp: Option<(String,)> = sqlx::query_as("SELECT id::text FROM location_profile WHERE entity_id = $1")
-            .bind(id).fetch_optional(&self.pool).await.context("chk loc profile")?;
+        // 取出 uuid 本身（**不要** `id::text`）：若拿字符串回填到 `WHERE id = $n`，
+        // Postgres 会因 text 与 uuid 类型不符而报错，表现为更新已有档案时 500。
+        //
+        // 同时把旧值一起读出来：agent 工具契约是「只传需要设置的字段，未传的保持原值」，
+        // 整行覆盖会让模型只改一个字段就把其余字段（含另一张表里的）清空。
+        let lp: Option<(
+            Uuid,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT id, geography, appearance, population, economy, rules, history, \
+             narrative_usage FROM location_profile WHERE entity_id = $1",
+        )
+        .bind(id).fetch_optional(&self.pool).await.context("chk loc profile")?;
         match lp {
-            Some((pid,)) => {
-                sqlx::query("UPDATE location_profile SET geography=$1, appearance=$2, population=$3, economy=$4, rules=$5, history=$6, narrative_usage=$7 WHERE id=$8")
-                    .bind(&geography).bind(&appearance).bind(&population).bind(&economy).bind(&rules).bind(&history).bind(&narrative_usage).bind(pid)
+            Some((pid, g0, a0, p0, e0, r0, h0, n0)) => {
+                let kept = |new: Option<String>, old: Option<String>| new.or(old);
+                sqlx::query("UPDATE location_profile SET geography=$1, appearance=$2, population=$3, economy=$4, rules=$5, history=$6, narrative_usage=$7, updated_at=NOW() WHERE id=$8")
+                    .bind(kept(geography, g0)).bind(kept(appearance, a0)).bind(kept(population, p0))
+                    .bind(kept(economy, e0)).bind(kept(rules, r0)).bind(kept(history, h0))
+                    .bind(kept(narrative_usage, n0)).bind(pid)
                     .execute(&self.pool).await.context("upd loc profile")?;
             }
             None => {
@@ -2496,12 +2862,25 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
                     .execute(&self.pool).await.context("ins loc profile")?;
             }
         }
-        let li: Option<(String,)> = sqlx::query_as("SELECT id::text FROM location_identity WHERE entity_id = $1")
-            .bind(id).fetch_optional(&self.pool).await.context("chk loc identity")?;
+        // 地点身份信息同样「未传保持原值」
+        let li: Option<(
+            Uuid,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT id, location_type, size, climate, era, accessibility \
+             FROM location_identity WHERE entity_id = $1",
+        )
+        .bind(id).fetch_optional(&self.pool).await.context("chk loc identity")?;
         match li {
-            Some((pid,)) => {
-                sqlx::query("UPDATE location_identity SET location_type=$1, size=$2, climate=$3, era=$4, accessibility=$5 WHERE id=$6")
-                    .bind(&location_type).bind(&size).bind(&climate).bind(&era).bind(&accessibility).bind(pid)
+            Some((pid, lt0, sz0, cl0, er0, ac0)) => {
+                let kept = |new: Option<String>, old: Option<String>| new.or(old);
+                sqlx::query("UPDATE location_identity SET location_type=$1, size=$2, climate=$3, era=$4, accessibility=$5, updated_at=NOW() WHERE id=$6")
+                    .bind(kept(location_type, lt0)).bind(kept(size, sz0)).bind(kept(climate, cl0))
+                    .bind(kept(era, er0)).bind(kept(accessibility, ac0)).bind(pid)
                     .execute(&self.pool).await.context("upd loc identity")?;
             }
             None => {
@@ -2510,12 +2889,15 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
                     .execute(&self.pool).await.context("ins loc identity")?;
             }
         }
+        // 阶段弧线：人物 / 势力 / 地点共用同一张表
+        sync_arc_stages(&self.pool, id, &profile).await?;
         let mut out = profile.clone();
         out["entity_id"] = serde_json::json!(id.to_string());
         Ok(out)
     }
 
     async fn get_faction_profile(&self, id: Uuid) -> Result<Option<Value>> {
+        let arc_stages = load_arc_stages(&self.pool, id).await?;
         let row: Option<(
             Option<String>, Option<String>, Option<String>, Option<String>,
             Option<String>, Option<String>, Option<String>, Option<String>,
@@ -2527,16 +2909,26 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         .fetch_optional(&self.pool)
         .await
         .context("Failed to get faction profile")?;
-        Ok(row.map(|r| {
-            serde_json::json!({
-                "goals": r.0, "leader": r.1, "values": r.2, "resources": r.3,
-                "territory": r.4, "members": r.5, "enemies": r.6, "allies": r.7,
-                "internal_conflicts": r.8, "secrets": r.9, "modus_operandi": r.10
-            })
-        }))
+        let Some(r) = row else {
+            // 可能只写了阶段弧线、还没写静态档案：这时也要能读到阶段
+            return Ok(if arc_stages.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!({
+                    "entity_id": id.to_string(),
+                    "arc_stages": arc_stages
+                }))
+            });
+        };
+        Ok(Some(serde_json::json!({
+            "goals": r.0, "leader": r.1, "values": r.2, "resources": r.3,
+            "territory": r.4, "members": r.5, "enemies": r.6, "allies": r.7,
+            "internal_conflicts": r.8, "secrets": r.9, "modus_operandi": r.10,
+            "arc_stages": arc_stages
+        })))
     }
 
-    async fn upsert_faction_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
+    async fn upsert_faction_profile(&self, id: Uuid, profile: Value, _actor: &str) -> Result<Value> {
         let s = |k: &str| profile.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
         let goals = s("goals");
         let leader = s("leader");
@@ -2549,12 +2941,25 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         let internal_conflicts = s("internal_conflicts");
         let secrets = s("secrets");
         let modus_operandi = s("modus_operandi");
-        let existing: Option<(String,)> = sqlx::query_as("SELECT id::text FROM faction_profile WHERE entity_id = $1")
-            .bind(id).fetch_optional(&self.pool).await.context("chk faction profile")?;
+        // 未传的字段保持原值（agent 工具契约，见 update_faction_profile 的描述）
+        let existing: Option<(
+            Uuid, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>,
+            Option<String>, Option<String>, Option<String>, Option<String>, Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT id, goals, leader, \"values\", resources, territory, members, enemies, \
+             allies, internal_conflicts, secrets, modus_operandi \
+             FROM faction_profile WHERE entity_id = $1",
+        )
+        .bind(id).fetch_optional(&self.pool).await.context("chk faction profile")?;
         match existing {
-            Some((pid,)) => {
-                sqlx::query("UPDATE faction_profile SET goals=$1, leader=$2, \"values\"=$3, resources=$4, territory=$5, members=$6, enemies=$7, allies=$8, internal_conflicts=$9, secrets=$10, modus_operandi=$11 WHERE id=$12")
-                    .bind(&goals).bind(&leader).bind(&values).bind(&resources).bind(&territory).bind(&members).bind(&enemies).bind(&allies).bind(&internal_conflicts).bind(&secrets).bind(&modus_operandi).bind(pid)
+            Some((pid, g0, l0, v0, r0, t0, m0, e0, a0, ic0, s0, mo0)) => {
+                let kept = |new: Option<String>, old: Option<String>| new.or(old);
+                sqlx::query("UPDATE faction_profile SET goals=$1, leader=$2, \"values\"=$3, resources=$4, territory=$5, members=$6, enemies=$7, allies=$8, internal_conflicts=$9, secrets=$10, modus_operandi=$11, updated_at=NOW() WHERE id=$12")
+                    .bind(kept(goals, g0)).bind(kept(leader, l0)).bind(kept(values, v0))
+                    .bind(kept(resources, r0)).bind(kept(territory, t0)).bind(kept(members, m0))
+                    .bind(kept(enemies, e0)).bind(kept(allies, a0)).bind(kept(internal_conflicts, ic0))
+                    .bind(kept(secrets, s0)).bind(kept(modus_operandi, mo0)).bind(pid)
                     .execute(&self.pool).await.context("upd faction profile")?;
             }
             None => {
@@ -2563,6 +2968,8 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
                     .execute(&self.pool).await.context("ins faction profile")?;
             }
         }
+        // 阶段弧线：人物 / 势力 / 地点共用同一张表
+        sync_arc_stages(&self.pool, id, &profile).await?;
         let mut out = profile.clone();
         out["entity_id"] = serde_json::json!(id.to_string());
         Ok(out)
@@ -2584,9 +2991,39 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             .collect())
     }
 
+    async fn snapshot_profile(&self, id: Uuid, kind: &str, before: &Value, actor: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO entity_profile_snapshot (entity_id, project_id, kind, payload, actor) \
+             SELECT id, project_id, $2, $3, $4 FROM entity WHERE id = $1",
+        )
+        .bind(id)
+        .bind(kind)
+        .bind(before)
+        .bind(actor)
+        .execute(&self.pool)
+        .await
+        .context("Failed to snapshot entity profile")?;
+        Ok(())
+    }
+
     async fn get_character_relationships(&self, id: Uuid) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT r.id::text, r.relation_type, e2.name, e2.id::text, r.description FROM relation r JOIN entity e2 ON r.target_entity_id = e2.id WHERE r.source_entity_id = $1",
+        // 双向查：关系是**相互**的，但原先只按 `source_entity_id = $1` 过滤，
+        // 于是「王久财 → 周浩」这条在周浩的详情页里根本看不到——
+        // 用户会以为这条关系丢了。
+        //
+        // 同时统一字段名：原先返回 `target` / `target_id`，而前端按
+        // `source_name` / `target_name` 取名字，取不到就显示「未知对象」。
+        // 现在直接给「对方」的 id 与名字，并由 `outgoing` 标明方向。
+        let rows: Vec<(String, String, String, String, Option<String>, bool)> = sqlx::query_as(
+            "SELECT r.id::text, r.relation_type, other.id::text, other.name, r.description, \
+                    (r.source_entity_id = $1) AS outgoing \
+             FROM relation r \
+             JOIN entity other ON other.id = CASE \
+                 WHEN r.source_entity_id = $1 THEN r.target_entity_id \
+                 ELSE r.source_entity_id END \
+             WHERE (r.source_entity_id = $1 OR r.target_entity_id = $1) \
+               AND other.status != 'Deleted' \
+             ORDER BY other.name",
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -2594,10 +3031,15 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         .context("Failed to get character relationships")?;
         Ok(rows
             .into_iter()
-            .map(|(id, rtype, name, tid, desc)| {
+            .map(|(rel_id, rtype, other_id, other_name, desc, outgoing)| {
                 serde_json::json!({
-                    "id": id, "type": rtype, "target": name,
-                    "target_id": tid, "description": desc
+                    "id": rel_id,
+                    "relation_type": rtype,
+                    "other_id": other_id,
+                    "other_name": other_name,
+                    "description": desc,
+                    // true = 当前实体指向对方
+                    "outgoing": outgoing,
                 })
             })
             .collect())
@@ -2666,3 +3108,105 @@ impl DbSettingsRepositoryPort {
         Ok(settings)
     }
 }
+
+// ============================================================
+// 阶段弧线（entity_arc_stage）：人物 / 势力 / 地点共用
+// ============================================================
+
+/// 解析 `profile["arc_stages"]` 为结构化的阶段列表。
+///
+/// - 元素可写字符串（只给阶段名），也可写成对象
+/// - `screen_weight` 接受 Light/Medium/Heavy 或中文「轻/中/重」
+/// - `order` 缺省用数组下标，保证"没写 order"也能按给出顺序展示
+///
+/// 返回 `Ok(None)` 表示入参里**没有**这个字段（调用方应保持原值）。
+fn parse_arc_stages(entity_id: Uuid, raw: Option<&Value>) -> Result<Option<Vec<EntityArcStage>>> {
+    let Some(v) = raw else { return Ok(None) };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let arr = v
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("arc_stages 应为数组"))?;
+    let mut items = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let (stage, obj) = match item {
+            Value::String(s) => (s.trim().to_string(), None),
+            Value::Object(_) => {
+                let stage = item
+                    .get("stage")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                (stage, Some(item))
+            }
+            _ => (String::new(), None),
+        };
+        if stage.is_empty() {
+            anyhow::bail!(
+                "arc_stages[{}] 缺少阶段名（元素应为字符串，或含 stage 的对象）",
+                i
+            );
+        }
+        let field = |k: &str| -> Option<String> {
+            obj.and_then(|o| o.get(k))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let order = obj
+            .and_then(|o| o.get("order"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .unwrap_or(i as i32);
+        let screen_weight = match field("screen_weight") {
+            Some(raw) => Some(ScreenWeight::parse(&raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "arc_stages[{}].screen_weight 无法识别：{}（可传 Light / Medium / Heavy，或中文「轻」「中」「重」）",
+                    i,
+                    raw
+                )
+            })?),
+            None => None,
+        };
+        let now = Utc::now();
+        items.push(EntityArcStage {
+            id: obj
+                .and_then(|o| o.get("id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(Uuid::new_v4),
+            entity_id,
+            stage,
+            order,
+            role: field("role"),
+            screen_weight,
+            goal: field("goal"),
+            function: field("function"),
+            entry_trigger: field("entry_trigger"),
+            status: field("status"),
+            created_at: now,
+            updated_at: now,
+        });
+    }
+    Ok(Some(items))
+}
+
+/// 有 `arc_stages` 字段就整组替换落库（人物 / 势力 / 地点共用）。
+async fn sync_arc_stages(pool: &PgPool, entity_id: Uuid, profile: &Value) -> Result<()> {
+    if let Some(items) = parse_arc_stages(entity_id, profile.get("arc_stages"))? {
+        crate::repos::arc_stage_repo::EntityArcStageRepo::new(pool.clone())
+            .replace_by_entity(entity_id, &items)
+            .await?;
+    }
+    Ok(())
+}
+
+/// 读取某实体的阶段弧线（人物 / 势力 / 地点共用）。
+async fn load_arc_stages(pool: &PgPool, entity_id: Uuid) -> Result<Vec<EntityArcStage>> {
+    crate::repos::arc_stage_repo::EntityArcStageRepo::new(pool.clone())
+        .list_by_entity(entity_id)
+        .await
+}
+

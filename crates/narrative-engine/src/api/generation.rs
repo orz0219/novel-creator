@@ -29,16 +29,12 @@ fn generation_executor(state: &AppState) -> GenerationExecutor {
     let snapshots = Arc::new(db::application_ports::DbContextSnapshotRepositoryPort::new(
         pool.clone(),
     ));
-    // 注册真实 OpenAI 兼容 Provider（opencode.ai / mimo-v2.5），通过环境变量配置。
-    let base_url = std::env::var("OPENCODE_BASE_URL")
-        .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string());
-    let api_key = std::env::var("OPENCODE_API_KEY").ok();
-    let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "mimo-v2.5".to_string());
+    // 真实 OpenAI 兼容 Provider：网关参数由运行时 AI 配置提供（设置页可改）。
     let mut llm_client = LlmClient::new("opencode".to_string());
     llm_client.add_provider(Arc::new(OpenAiCompatibleProvider::new(
-        base_url, api_key, model,
+        state.ai_settings.clone(),
     )));
-    let llm = Arc::new(InfraLlmPort::new(llm_client));
+    let llm = Arc::new(InfraLlmPort::new(llm_client, state.ai_settings.clone()));
     GenerationExecutor::new(
         Arc::new(DbGenerationRepositoryPort::new(pool.clone())),
         snapshots,

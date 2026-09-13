@@ -7,7 +7,8 @@ pub mod port_impl;
 
 pub use provider::LlmProvider;
 pub use provider::OpenAiCompatibleProvider;
+pub use provider::StaticAiSettings;
 pub use provider::TokenStream;
 pub use client::LlmClient;
-pub use types::{LlmRequest, LlmResponse, LlmUsage};
+pub use types::{LlmRequest, LlmResponse, LlmUsage, Message};
 pub use port_impl::InfraLlmPort;

@@ -13,11 +13,12 @@ mod integration_tests {
 
 
 
+    /// 连**测试库**（库名带 _test，自动创建并迁移）。
+    ///
+    /// 这些测试会真的建项目；直连开发库会把测试数据写进用户数据里
+    /// （实测一天积了 75 个 "Test Project …"），所以统一走 testkit。
     async fn test_pool() -> Result<PgPool> {
-        let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://novel:novel_pass@localhost:5432/novel_engine".to_string());
-        let pool = sqlx::PgPool::connect(&database_url).await?;
-        Ok(pool)
+        testkit::test_pool().await
     }
 
     // Ensure a generation_task exists for the given task_id.

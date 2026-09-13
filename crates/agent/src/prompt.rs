@@ -6,31 +6,92 @@
 use crate::guide::{find_step, INITIAL_STEP};
 use crate::types::ToolMeta;
 
-/// 从 JSON Schema 中提取"必填字段名列表"（用于在 prompt 里展示给 LLM）。
+/// 把 JSON Schema 的字段类型压缩成适合放进 prompt 的一行描述。
+///
+/// 会展开一层到两层嵌套，例如：
+/// - `capabilities` → `object{skills: array<string>, limitations: array<string>}`
+/// - `arc_potential` → `object{starting_state: string, possible_change: string, resistance: string}`
+///
+/// 这样模型能看到复杂字段的**形状**，又不会把完整 JSON Schema 的 `properties`
+/// 误当成应该嵌套传入的 input。
+fn compact_type_desc(schema: &serde_json::Value, depth: usize) -> String {
+    // enum 优先展示，让模型直接看到合法取值。
+    if let Some(values) = schema.get("enum").and_then(|v| v.as_array()) {
+        let names: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
+        if !names.is_empty() {
+            return format!("enum({})", names.join("|"));
+        }
+    }
+
+    let ty = match schema.get("type") {
+        Some(serde_json::Value::String(t)) => t.clone(),
+        Some(serde_json::Value::Array(types)) => types
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("|"),
+        _ => "any".to_string(),
+    };
+
+    if depth < 2 {
+        // object 或 "string|object" 这类联合类型：展开 properties。
+        if ty.contains("object") {
+            if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+                let inner = props
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, compact_type_desc(v, depth + 1)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !inner.is_empty() {
+                    let shape = format!("object{{{}}}", inner);
+                    return if ty == "object" {
+                        shape
+                    } else {
+                        ty.replace("object", &shape)
+                    };
+                }
+            }
+        }
+        if ty == "array" {
+            if let Some(items) = schema.get("items") {
+                return format!("array<{}>", compact_type_desc(items, depth + 1));
+            }
+        }
+    }
+
+    ty
+}
+
+/// 从 JSON Schema 中提取"字段名 + 类型形状"（用于在 prompt 里展示给 LLM）。
 /// 不暴露完整 schema（避免 LLM 把 "properties" 字段当 input 嵌套）。
 fn required_fields_str(schema: &serde_json::Value) -> String {
     let obj = match schema.as_object() {
         Some(o) => o,
         None => return "（无）".to_string(),
     };
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(req) = obj.get("required").and_then(|r| r.as_array()) {
-        for r in req {
-            if let Some(s) = r.as_str() {
-                parts.push(s.to_string());
-            }
-        }
-    }
-    if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
-        for (k, v) in props {
-            let t = v
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("?");
-            let marker = if parts.contains(k) { "*" } else { " " };
-            parts.push(format!("{}{}: {}", marker, k, t));
-        }
-    }
+
+    let required = obj
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<&str>>()
+        })
+        .unwrap_or_default();
+
+    let Some(props) = obj.get("properties").and_then(|p| p.as_object()) else {
+        return "（无）".to_string();
+    };
+
+    let parts: Vec<String> = props
+        .iter()
+        .map(|(k, v)| {
+            let marker = if required.contains(&k.as_str()) { "*" } else { " " };
+            format!("{}{}: {}", marker, k, compact_type_desc(v, 0))
+        })
+        .collect();
+
     if parts.is_empty() {
         "（无）".to_string()
     } else {
@@ -157,7 +218,7 @@ pub fn build_system_prompt(
             // 工具列表：只展示 name + description + 字段列表（避免把 JSON schema
             // 原文塞进 prompt——LLM 看到 "properties" 字段会误以为应该嵌套）
             p.push_str(&format!("- {}：{}\n", t.name, t.description));
-            p.push_str(&format!("  必填字段：{}\n", required_fields_str(&t.input_schema)));
+            p.push_str(&format!("  字段（* 为必填）：{}\n", required_fields_str(&t.input_schema)));
         }
     }
 
@@ -177,11 +238,17 @@ pub fn build_system_prompt(
     p.push_str("1. input 必须是**平铺的 JSON 对象**——字段直接放在 input 顶层，**不要**嵌套在 \"properties\" 里。\n");
     p.push_str("   ❌ 错误：{\"input\":{\"properties\":{\"premise\":\"...\"},\"type\":\"object\"}}\n");
     p.push_str("   ✅ 正确：{\"input\":{\"premise\":\"...\"}}\n");
-    p.push_str("2. 字段名必须与上方的「必填字段」完全一致（区分大小写）。带 * 的是必填。\n");
-    p.push_str("3. project_id 不用填——系统会自动注入当前项目 id。\n");
-    p.push_str("4. 若入参校验未通过，系统会把错误作为工具结果返回给你；请依据错误修正 input 后重新输出工具调用（最多重试数次），不要编造结果。\n");
-    p.push_str("5. 工具执行成功后，系统会返回结果（JSON）；请据此继续与用户对话，或进一步调用其它工具补全信息。\n");
-    p.push_str("6. 一次只调用一个工具；不要在工具调用之外附带正文。\n");
+    p.push_str("2. 字段名必须与上方的「字段」完全一致（区分大小写）。带 * 的是必填。\n");
+    p.push_str("3. 类型写成 object{...} / array<...> 的字段，必须按括号里的子字段传。例如 capabilities 应传 {\"skills\":[...],\"limitations\":[...]}，不要传 {\"abilities\":[...],\"limits\":[...]}。\n");
+    p.push_str("4. project_id 不用填——系统会自动注入当前项目 id。\n");
+    p.push_str("5. 单次 input 建议控制在 2000 个汉字以内；内容太多时拆成多次工具调用，避免 JSON 被截断。\n");
+    p.push_str("6. 若入参校验未通过，系统会把错误作为工具结果返回给你；请依据错误修正 input 后重新输出工具调用（最多重试数次），不要编造结果。\n");
+    p.push_str("7. 工具执行成功后，系统会返回结果（JSON）；请据此继续与用户对话，或进一步调用其它工具补全信息。\n");
+    p.push_str("8. 一次只调用一个工具；不要在工具调用之外附带正文。\n");
+    p.push_str("\n**格式纪律**（违反 = 本轮调用完全不会执行：你会以为调用了、其实没有，于是反复重试空转）：\n");
+    p.push_str("- 只允许 <<CALL_TOOL>>{...}<<END>> 这一种格式。\n");
+    p.push_str("- **禁止** XML/DSML 风格调用：不要出现 <tool_calls> / <calls> / <invoke> / <parameter> / <function_call> / \u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C} 这类标签。\n");
+    p.push_str("- **禁止**把调用写进 ``` 代码块；**禁止**用 JSON-Schema 包裹（不要出现 \"type\":\"object\"、\"properties\"、\"required\"）。\n");
     p.push_str("\n**正例**：调用 update_project 写入脑洞：\n");
     p.push_str("<<CALL_TOOL>>{\"name\":\"update_project\",\"input\":{\"premise\":\"现代都市，主角捡到一块花不完的钱\"}}<<END>>\n");
     p

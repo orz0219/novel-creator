@@ -40,8 +40,8 @@ mod e2e_tests {
     }
 
     async fn setup_db() -> Database {
-        let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://novel:novel_pass@localhost:5432/novel_engine".to_string());
+        // 连测试库（库名带 _test），避免把测试数据写进开发库
+        let url = testkit::test_database_url().await.unwrap();
         let db = Database::open(&url).await.unwrap();
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let migrations_dir = format!("{}/../db/migrations", manifest_dir);

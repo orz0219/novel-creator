@@ -19,16 +19,9 @@ use db::migration;
 use db::mutation_committer::DbMutationCommitter;
 use domain::mutation::{MutationCommand, MutationPayload, MutationSource, MutationTargetType};
 
+/// 连**测试库**（库名带 _test，自动创建并迁移），不碰开发库
 async fn pool() -> PgPool {
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://novel:novel_pass@localhost:5432/novel_engine".to_string()
-    });
-    let database = Database::open(&url).await.expect("open database");
-    let migrations_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../db/migrations");
-    migration::run_migrations(database.pool(), migrations_dir)
-        .await
-        .expect("run migrations");
-    database.pool().clone()
+    testkit::test_pool().await.expect("连接测试库失败")
 }
 
 async fn setup(pool: &PgPool) -> (Uuid, Uuid) {

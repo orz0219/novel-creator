@@ -11,5 +11,13 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
+# Mobile (Tauri Android)
+mobile/node_modules/
+mobile/src-tauri/target/
+mobile/src-tauri/gen/schemas/
+.kotlin/
+*.apk
+*.aab
+
 # macOS
 .DS_Store

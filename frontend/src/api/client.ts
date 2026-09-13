@@ -12,8 +12,9 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   })
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: response.statusText }))
-    throw new Error(error.message || 'Request failed')
+    const body = await response.json().catch(() => null)
+    const detail = body?.message || body?.error || response.statusText
+    throw new Error(`HTTP ${response.status} ${url} — ${detail}`)
   }
 
   if (response.status === 204) return undefined as T
