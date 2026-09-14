@@ -6,57 +6,29 @@
 use domain::*;
 
 /// NarrativeNodeType -> String
+///
+/// 规范词表与中文别名定义在 `domain::NarrativeNodeType`，这里只做委托：
+/// 存库形态只有一份定义，不会出现「domain 认一种写法、db 认另一种」。
 pub fn narrative_node_type_str(nt: &NarrativeNodeType) -> String {
-    match nt {
-        NarrativeNodeType::Volume => "Volume".into(),
-        NarrativeNodeType::Arc => "Arc".into(),
-        NarrativeNodeType::Sequence => "Sequence".into(),
-        NarrativeNodeType::Chapter => "Chapter".into(),
-        NarrativeNodeType::Scene => "Scene".into(),
-        NarrativeNodeType::Beat => "Beat".into(),
-        NarrativeNodeType::Storyline => "Storyline".into(),
-        NarrativeNodeType::SubArc => "SubArc".into(),
-        NarrativeNodeType::Special => "Special".into(),
-    }
+    nt.as_db_str()
 }
 
-/// NarrativeNodeStatus -> String
+/// NarrativeNodeStatus -> String（委托 domain，存库形态只有一份定义）
 pub fn narrative_node_status_str(ns: &NarrativeNodeStatus) -> String {
-    match ns {
-        NarrativeNodeStatus::Draft => "Draft".into(),
-        NarrativeNodeStatus::Planned => "Planned".into(),
-        NarrativeNodeStatus::InProgress => "InProgress".into(),
-        NarrativeNodeStatus::Completed => "Completed".into(),
-        NarrativeNodeStatus::Archived => "Archived".into(),
-    }
+    ns.as_db_str()
 }
 
-/// String -> NarrativeNodeType
-pub fn parse_narrative_node_type(s: &str) -> NarrativeNodeType {
-    match s {
-        "Volume" => NarrativeNodeType::Volume,
-        "Arc" => NarrativeNodeType::Arc,
-        "Sequence" => NarrativeNodeType::Sequence,
-        "Chapter" => NarrativeNodeType::Chapter,
-        "Scene" => NarrativeNodeType::Scene,
-        "Beat" => NarrativeNodeType::Beat,
-        "Storyline" => NarrativeNodeType::Storyline,
-        "SubArc" => NarrativeNodeType::SubArc,
-        "Special" => NarrativeNodeType::Special,
-        _ => NarrativeNodeType::Scene,
-    }
+/// String -> NarrativeNodeType（**严格**：不认识的取值直接报错）
+///
+/// 旧实现把未知取值静默当成 `Scene`，后果是「拼错的类型写进库、读回来变成另一种类型」
+/// 而两头都不报错。现在解析失败会带着原始值与合法取值列表一起抛出。
+pub fn parse_narrative_node_type(s: &str) -> anyhow::Result<NarrativeNodeType> {
+    NarrativeNodeType::parse_strict(s)
 }
 
-/// String -> NarrativeNodeStatus
-pub fn parse_narrative_node_status(s: &str) -> NarrativeNodeStatus {
-    match s {
-        "Draft" => NarrativeNodeStatus::Draft,
-        "Planned" => NarrativeNodeStatus::Planned,
-        "InProgress" => NarrativeNodeStatus::InProgress,
-        "Completed" => NarrativeNodeStatus::Completed,
-        "Archived" => NarrativeNodeStatus::Archived,
-        _ => NarrativeNodeStatus::Draft,
-    }
+/// String -> NarrativeNodeStatus（**严格**：未知取值报错，不静默落回 `Draft`）
+pub fn parse_narrative_node_status(s: &str) -> anyhow::Result<NarrativeNodeStatus> {
+    NarrativeNodeStatus::parse_strict(s)
 }
 
 /// TaskStatus -> String

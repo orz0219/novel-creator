@@ -177,101 +177,182 @@ impl DbNarrativeRepositoryPort {
 #[async_trait]
 impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
     async fn list_nodes(&self, project_id: Uuid) -> Result<Vec<Value>> {
-        let rows: Vec<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, Option<String>, String, i32, String, String, String)> =
-            sqlx::query_as(
-                "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE project_id = $1 AND status != 'Deleted' ORDER BY sort_order"
-            )
-            .bind(project_id)
-            .fetch_all(&self.pool)
-            .await
-            .context("Failed to list narrative nodes")?;
+        let rows: Vec<NarrativeNodeJsonRow> = sqlx::query_as(
+            "SELECT n.id, n.project_id, n.world_id, n.node_type, n.parent_id, n.title, n.description, n.content, n.attributes, n.sort_order, n.status, n.storyline_id, n.arc_stage, n.stage_refs, n.participant_entity_ids, n.location_id, n.item_ids, n.estimated_chapters, n.estimated_words, n.story_time, n.created_at::text AS created_at, n.updated_at::text AS updated_at, s.name AS storyline_name, (SELECT COUNT(*) FROM narrative_node c WHERE c.parent_id = n.id AND c.status != 'Deleted') AS child_count FROM narrative_node n LEFT JOIN storyline s ON s.id = n.storyline_id WHERE n.project_id = $1 AND n.status != 'Deleted' ORDER BY n.sort_order, n.created_at"
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list narrative nodes")?;
 
-        Ok(rows
-            .into_iter()
-            .map(|(id, pid, wid, nt, par, title, desc, content, attrs, ord, st, cr, up)| {
-                serde_json::json!({
-                    "id": id, "project_id": pid, "world_id": wid, "node_type": nt,
-                    "parent_id": par, "title": title, "description": desc, "content": content,
-                    "attributes": serde_json::from_str::<Value>(&attrs).unwrap_or(serde_json::json!({})),
-                    "sort_order": ord, "status": st, "created_at": cr, "updated_at": up
-                })
-            })
-            .collect())
+        rows.into_iter().map(node_row_to_json).collect()
     }
 
     async fn get_node(&self, id: Uuid) -> Result<Option<Value>> {
-        // 带上实体类型名：详情页有「类型」这一行，但返回里一直没有这个字段，
-        // 于是那一行永远是空的（前端取 entity_type 取不到）。
-        //
-        // ⚠️ 两条硬约束（都踩过）：
-        //   1. SQL 必须写成**单行**。生成 SQLite 版的脚本按 `id::text` 这类文本模式
-        //      改写 SQL 与元组类型，用 `\` 续行的多行 SQL 会让规则失配。
-        //   2. `sqlx::query_as(` 与 SQL 字符串之间**不能有注释**。生成脚本用
-        //      `query_as\(\s*"..."` 匹配，注释会让它匹配不上，
-        //      于是元组类型不会从 String 改成 Uuid，运行时直接报
-        //      "String is not compatible with SQL type BLOB"。
-        let row: Option<(Uuid, Uuid, Uuid, String, Option<Uuid>, String, Option<String>, Option<String>, String, i32, String, String, String)> =
-            sqlx::query_as(
-                "SELECT id, project_id, world_id, node_type, parent_id, title, description, content, attributes::text, sort_order, status, created_at::text, updated_at::text                  FROM narrative_node WHERE id = $1 AND status != 'Deleted'"
-            )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .context("Failed to get narrative node")?;
+        // 详情里带上故事线名字与子节点数：模型与前端都不必再为一行节点多查两次。
+        let row: Option<NarrativeNodeJsonRow> = sqlx::query_as(
+            "SELECT n.id, n.project_id, n.world_id, n.node_type, n.parent_id, n.title, n.description, n.content, n.attributes, n.sort_order, n.status, n.storyline_id, n.arc_stage, n.stage_refs, n.participant_entity_ids, n.location_id, n.item_ids, n.estimated_chapters, n.estimated_words, n.story_time, n.created_at::text AS created_at, n.updated_at::text AS updated_at, s.name AS storyline_name, (SELECT COUNT(*) FROM narrative_node c WHERE c.parent_id = n.id AND c.status != 'Deleted') AS child_count FROM narrative_node n LEFT JOIN storyline s ON s.id = n.storyline_id WHERE n.id = $1 AND n.status != 'Deleted'"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get narrative node")?;
 
-        Ok(row.map(|(id, pid, wid, nt, par, title, desc, content, attrs, ord, st, cr, up)| {
-            serde_json::json!({
-                "id": id, "project_id": pid, "world_id": wid, "node_type": nt,
-                "parent_id": par, "title": title, "description": desc, "content": content,
-                "attributes": serde_json::from_str::<Value>(&attrs).unwrap_or(serde_json::json!({})),
-                "sort_order": ord, "status": st, "created_at": cr, "updated_at": up
-            })
-        }))
+        row.map(node_row_to_json).transpose()
     }
 
-    async fn create_node(
-        &self,
-        project_id: Uuid,
-        node_type: &str,
-        parent_id: Option<Uuid>,
-        title: &str,
-        description: Option<&str>,
-        attributes: Value,
-    ) -> Result<Value> {
-        let id = Uuid::new_v4();
+    async fn create_node_full(&self, input: domain::narrative::NewNarrativeNode) -> Result<Value> {
+        // 词表校验（严格：拼错就报错，不静默造出新的节点类型）
+        let node_type = NarrativeNodeType::parse_strict(&input.node_type)?;
+        let status = match input.status.as_deref() {
+            Some(s) => NarrativeNodeStatus::parse_strict(s)?,
+            None => NarrativeNodeStatus::Draft,
+        };
+        if input.title.trim().is_empty() {
+            anyhow::bail!("title 不能为空");
+        }
+        if let Some(o) = input.sort_order {
+            if o < 1 {
+                anyhow::bail!("sort_order 从 1 起（同父下的序号），收到 {}", o);
+            }
+        }
+        if input.arc_stage.is_some() && input.storyline_id.is_none() {
+            anyhow::bail!("arc_stage 需要同时给 storyline_id：阶段属于某条故事线");
+        }
+
         let world_id: (Uuid,) = sqlx::query_as("SELECT id FROM world WHERE project_id = $1 LIMIT 1")
-            .bind(project_id)
+            .bind(input.project_id)
             .fetch_one(&self.pool)
             .await
             .context("Failed to get world for project")?;
 
-        let sort_order: (i32,) = sqlx::query_as(
-            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM narrative_node WHERE project_id = $1 AND parent_id IS NOT DISTINCT FROM $2"
-        )
-        .bind(project_id)
-        .bind(parent_id)
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to get sort order")?;
+        // 让位 + 插入必须在同一事务里：兄弟序号的唯一约束是 DEFERRABLE，
+        // 只有事务内才允许「先让位、后落位」这种瞬时重复。
+        let mut tx = self.pool.begin().await.context("Failed to begin node tx")?;
 
+        if let Some(p) = input.parent_id {
+            if p == input.project_id {
+                anyhow::bail!("parent_id 不是项目 id");
+            }
+            let parent_project: Option<Uuid> = sqlx::query_scalar(
+                "SELECT project_id FROM narrative_node WHERE id=$1 AND status != 'Deleted'",
+            )
+            .bind(p)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to read parent narrative node")?;
+            match parent_project {
+                None => anyhow::bail!("父节点不存在或已被删除：{}", p),
+                Some(pid) if pid != input.project_id => {
+                    anyhow::bail!("父节点 {} 不属于本项目", p)
+                }
+                Some(_) => {}
+            }
+        }
+
+        if let Some(sid) = input.storyline_id {
+            crate::narrative_checks::ensure_storyline_stage(
+                &mut tx,
+                input.project_id,
+                sid,
+                input.arc_stage.as_deref(),
+            )
+            .await?;
+        }
+        for r in &input.stage_refs {
+            crate::narrative_checks::ensure_storyline_stage(
+                &mut tx,
+                input.project_id,
+                r.storyline_id,
+                r.arc_stage.as_deref(),
+            )
+            .await?;
+        }
+        crate::narrative_checks::ensure_entities_in_project(
+            &mut tx,
+            input.project_id,
+            &input.participant_entity_ids,
+            "participant_entity_ids",
+        )
+        .await?;
+        if let Some(lid) = input.location_id {
+            crate::narrative_checks::ensure_entities_in_project(
+                &mut tx,
+                input.project_id,
+                &[lid],
+                "location_id",
+            )
+            .await?;
+        }
+        crate::narrative_checks::ensure_entities_in_project(
+            &mut tx,
+            input.project_id,
+            &input.item_ids,
+            "item_ids",
+        )
+        .await?;
+
+        // 序号：显式给了就先给同父的其他节点让位，否则追加到末尾。
+        let sort_order: i32 = match input.sort_order {
+            Some(o) => {
+                sqlx::query(
+                    "UPDATE narrative_node SET sort_order = sort_order + 1, updated_at = NOW() WHERE project_id = $1 AND parent_id IS NOT DISTINCT FROM $2 AND sort_order >= $3",
+                )
+                .bind(input.project_id)
+                .bind(input.parent_id)
+                .bind(o)
+                .execute(&mut *tx)
+                .await
+                .context("Failed to shift sibling sort_order")?;
+                o
+            }
+            None => {
+                let max: (i32,) = sqlx::query_as(
+                    "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM narrative_node WHERE project_id = $1 AND parent_id IS NOT DISTINCT FROM $2",
+                )
+                .bind(input.project_id)
+                .bind(input.parent_id)
+                .fetch_one(&mut *tx)
+                .await
+                .context("Failed to get sort order")?;
+                max.0
+            }
+        };
+
+        let id = Uuid::new_v4();
+        let status_str = status.as_db_str();
         sqlx::query(
-            "INSERT INTO narrative_node (id, project_id, world_id, node_type, parent_id, title, description, attributes, sort_order, status)              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Draft')"
+            "INSERT INTO narrative_node (id, project_id, world_id, node_type, parent_id, title, description, content, attributes, sort_order, status, storyline_id, arc_stage, stage_refs, participant_entity_ids, location_id, item_ids, estimated_chapters, estimated_words, story_time) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
         )
         .bind(&id)
-        .bind(project_id)
+        .bind(input.project_id)
         .bind(&world_id.0)
-        .bind(node_type)
-        .bind(parent_id)
-        .bind(title)
-        .bind(description)
-        .bind(&attributes)
-        .bind(sort_order.0)
-        .execute(&self.pool)
+        .bind(node_type.as_db_str())
+        .bind(input.parent_id)
+        .bind(&input.title)
+        .bind(&input.description)
+        .bind(&input.content)
+        .bind(&input.attributes)
+        .bind(sort_order)
+        .bind(&status_str)
+        .bind(input.storyline_id)
+        .bind(&input.arc_stage)
+        .bind(serde_json::to_value(&input.stage_refs).context("stage_refs 序列化失败")?)
+        .bind(serde_json::to_value(&input.participant_entity_ids).context("participant_entity_ids 序列化失败")?)
+        .bind(input.location_id)
+        .bind(serde_json::to_value(&input.item_ids).context("item_ids 序列化失败")?)
+        .bind(input.estimated_chapters)
+        .bind(input.estimated_words)
+        .bind(&input.story_time)
+        .execute(&mut *tx)
         .await
         .context("Failed to create narrative node")?;
 
-        self.get_node(id).await?
-            .ok_or_else(|| anyhow::anyhow!("Node disappeared after creation"))
+        tx.commit().await.context("Failed to commit node tx")?;
+
+        self.get_node(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("新建的叙事节点读不回来（id={}）", id))
     }
 
     async fn update_node(
@@ -291,10 +372,10 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
 
         match exists {
             Some((s,)) if s == "Deleted" => {
-                return Err(anyhow::anyhow!("Cannot update deleted narrative node"));
+                return Err(anyhow::anyhow!("叙事节点已逻辑删除，不能再修改（id={}）", id));
             }
             None => {
-                return Err(anyhow::anyhow!("Narrative node not found"));
+                return Err(anyhow::anyhow!("叙事节点不存在（id={}）", id));
             }
             _ => {}
         }
@@ -308,12 +389,62 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
                 .bind(d).bind(id).bind(id).execute(&self.pool).await?;
         }
         if let Some(s) = status {
+            let parsed = NarrativeNodeStatus::parse_strict(s)?;
             sqlx::query("UPDATE narrative_node SET status=$1, updated_at=NOW() WHERE id=$2 AND project_id = (SELECT project_id FROM narrative_node WHERE id = $3)")
-                .bind(s).bind(id).bind(id).execute(&self.pool).await?;
+                .bind(parsed.as_db_str()).bind(id).bind(id).execute(&self.pool).await?;
         }
 
         self.get_node(id).await?
-            .ok_or_else(|| anyhow::anyhow!("Node disappeared after update"))
+            .ok_or_else(|| anyhow::anyhow!("叙事节点更新后读不回来（id={}）", id))
+    }
+
+    async fn list_nodes_page(
+        &self,
+        project_id: Uuid,
+        filter: &domain::narrative::NarrativeNodeFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<Value>, usize)> {
+        if filter.parent_id.is_some() && filter.roots_only {
+            anyhow::bail!("parent_id 与 roots_only 不能同时给：一个是下钻某个父节点，一个是只看顶层");
+        }
+        // 节点类型过滤同样走严格词表：拼错的类型应该报错，而不是静默返回空列表
+        let node_type: Option<String> = match filter.node_type.as_deref() {
+            Some(t) => Some(NarrativeNodeType::parse_strict(t)?.as_db_str()),
+            None => None,
+        };
+        // 过滤条件写进同一条 SQL 的可选参数里（不拼接字符串），LIMIT/OFFSET 下推到数据库
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM narrative_node n WHERE n.project_id = $1 AND n.status != 'Deleted' AND ($2::uuid IS NULL OR n.parent_id = $2) AND ($3::varchar IS NULL OR n.node_type = $3) AND ($4::uuid IS NULL OR n.storyline_id = $4) AND (NOT $5::bool OR n.parent_id IS NULL)",
+        )
+        .bind(project_id)
+        .bind(filter.parent_id)
+        .bind(&node_type)
+        .bind(filter.storyline_id)
+        .bind(filter.roots_only)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to count narrative nodes")?;
+
+        let rows: Vec<NarrativeNodeJsonRow> = sqlx::query_as(
+            "SELECT n.id, n.project_id, n.world_id, n.node_type, n.parent_id, n.title, n.description, n.content, n.attributes, n.sort_order, n.status, n.storyline_id, n.arc_stage, n.stage_refs, n.participant_entity_ids, n.location_id, n.item_ids, n.estimated_chapters, n.estimated_words, n.story_time, n.created_at::text AS created_at, n.updated_at::text AS updated_at, s.name AS storyline_name, (SELECT COUNT(*) FROM narrative_node c WHERE c.parent_id = n.id AND c.status != 'Deleted') AS child_count FROM narrative_node n LEFT JOIN storyline s ON s.id = n.storyline_id WHERE n.project_id = $1 AND n.status != 'Deleted' AND ($2::uuid IS NULL OR n.parent_id = $2) AND ($3::varchar IS NULL OR n.node_type = $3) AND ($4::uuid IS NULL OR n.storyline_id = $4) AND (NOT $5::bool OR n.parent_id IS NULL) ORDER BY n.sort_order, n.created_at LIMIT $6 OFFSET $7",
+        )
+        .bind(project_id)
+        .bind(filter.parent_id)
+        .bind(&node_type)
+        .bind(filter.storyline_id)
+        .bind(filter.roots_only)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list narrative nodes page")?;
+
+        let items = rows
+            .into_iter()
+            .map(node_row_to_json)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((items, total.0 as usize))
     }
 
     async fn delete_node(&self, id: Uuid) -> Result<()> {
@@ -326,11 +457,75 @@ impl NarrativeRepositoryPort for DbNarrativeRepositoryPort {
         .context("Failed to delete narrative node")?;
 
         if result.rows_affected() == 0 {
-            return Err(anyhow::anyhow!("Narrative node not found or already deleted"));
+            return Err(anyhow::anyhow!("叙事节点不存在或已逻辑删除（id={}）", id));
         }
 
         Ok(())
     }
+}
+
+/// 叙事节点的行投影（含故事线名与直接子节点数）。
+///
+/// 为什么不再用位置元组：加了细纲的九列之后元组有 22 个元素，
+/// 而 sqlx 只为最多 16 元的元组实现 FromRow——继续用元组会直接编译不过；
+/// 而且位置元组加一列就要改所有解构点，很容易错位。
+#[derive(sqlx::FromRow)]
+struct NarrativeNodeJsonRow {
+    id: Uuid,
+    project_id: Uuid,
+    world_id: Uuid,
+    node_type: String,
+    parent_id: Option<Uuid>,
+    title: String,
+    description: Option<String>,
+    content: Option<String>,
+    attributes: Option<Value>,
+    sort_order: i32,
+    status: String,
+    storyline_id: Option<Uuid>,
+    arc_stage: Option<String>,
+    stage_refs: Option<Value>,
+    participant_entity_ids: Option<Value>,
+    location_id: Option<Uuid>,
+    item_ids: Option<Value>,
+    estimated_chapters: Option<i32>,
+    estimated_words: Option<i32>,
+    story_time: Option<String>,
+    created_at: String,
+    updated_at: String,
+    storyline_name: Option<String>,
+    child_count: i64,
+}
+
+/// 行 -> JSON。JSONB 列缺省即空（NULL 与 '[]' 同义），不做静默改写。
+fn node_row_to_json(r: NarrativeNodeJsonRow) -> Result<Value> {
+    let empty_array = Value::Array(Vec::new());
+    Ok(serde_json::json!({
+        "id": r.id,
+        "project_id": r.project_id,
+        "world_id": r.world_id,
+        "node_type": r.node_type,
+        "parent_id": r.parent_id,
+        "title": r.title,
+        "description": r.description,
+        "content": r.content,
+        "attributes": r.attributes.unwrap_or_else(|| serde_json::json!({})),
+        "sort_order": r.sort_order,
+        "status": r.status,
+        "storyline_id": r.storyline_id,
+        "storyline_name": r.storyline_name,
+        "arc_stage": r.arc_stage,
+        "stage_refs": r.stage_refs.unwrap_or_else(|| empty_array.clone()),
+        "participant_entity_ids": r.participant_entity_ids.unwrap_or_else(|| empty_array.clone()),
+        "location_id": r.location_id,
+        "item_ids": r.item_ids.unwrap_or_else(|| empty_array.clone()),
+        "estimated_chapters": r.estimated_chapters,
+        "estimated_words": r.estimated_words,
+        "story_time": r.story_time,
+        "child_count": r.child_count,
+        "created_at": r.created_at,
+        "updated_at": r.updated_at,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1817,6 +2012,33 @@ impl DbHistoryRepositoryPort {
     }
 }
 
+/// 事件要挂到的叙事节点必须存在、属于本项目、且未被逻辑删除。
+///
+/// 不写悬空引用：挂错节点的事后表现是「事件列表里那一章是空的」，
+/// 查起来比当场报错贵得多。
+async fn ensure_event_node_in_project(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    node_id: Uuid,
+) -> Result<()> {
+    let found: Option<Uuid> =
+        sqlx::query_scalar("SELECT project_id FROM narrative_node WHERE id = $1 AND status != 'Deleted'")
+            .bind(node_id)
+            .fetch_optional(pool)
+            .await
+            .context("校验叙事节点是否存在失败")?;
+    match found {
+        None => anyhow::bail!(
+            "叙事节点 {} 不存在或已删除：事件要挂的节点必须真实存在（先用 list_nodes 查）",
+            node_id
+        ),
+        Some(pid) if pid != project_id => {
+            anyhow::bail!("叙事节点 {} 不属于本项目", node_id)
+        }
+        Some(_) => Ok(()),
+    }
+}
+
 /// 按 id 读回一条事件：`update_event` 用它回显修改后的完整对象。
 ///
 /// 原先只回 `{"updated":true}`，调用方（AI）改完看不到写进去的是什么。
@@ -1824,21 +2046,27 @@ async fn fetch_event_row(pool: &sqlx::PgPool, id: Uuid) -> Result<Value> {
     let row: (
         String, String, String, Option<String>, Option<String>,
         Option<String>, Option<String>, Value, String, Option<i32>,
+        Option<String>, Option<String>,
     ) = sqlx::query_as(
         "SELECT id::text, name, description, event_type, timestamp, \
-                event_time, duration, attributes, created_at::text, era_order \
+                event_time, duration, attributes, created_at::text, era_order, \
+                narrative_node_id::text, \
+                (SELECT title FROM narrative_node n WHERE n.id = event.narrative_node_id) \
          FROM event WHERE id=$1",
     )
     .bind(id)
     .fetch_one(pool)
     .await
     .context("Failed to read back event")?;
-    let (id, name, desc, etype, ts, event_time, duration, attrs, created, era_order) = row;
+    let (id, name, desc, etype, ts, event_time, duration, attrs, created, era_order, node_id, node_title) = row;
     Ok(serde_json::json!({
         "id": id, "name": name, "description": desc,
         "event_type": etype, "timestamp": ts,
         "event_time": event_time, "duration": duration, "attributes": attrs,
         "era_order": era_order,
+        // 事件挂在哪一章 / 哪一场（连同节点标题一起给，省一次往返）
+        "narrative_node_id": node_id,
+        "narrative_node_title": node_title,
         "created_at": created
     }))
 }
@@ -1858,7 +2086,9 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
         };
         let sql = format!(
             "SELECT id::text, name, description, event_type, timestamp, \
-                    event_time, duration, attributes, created_at::text, era_order \
+                    event_time, duration, attributes, created_at::text, era_order, \
+                    narrative_node_id::text, \
+                    (SELECT title FROM narrative_node n WHERE n.id = event.narrative_node_id) \
              FROM event WHERE project_id = $1 AND status != 'Deleted' {order_clause} LIMIT $2"
         );
         let rows = sqlx::query_as::<
@@ -1866,6 +2096,7 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
             (
                 String, String, String, Option<String>, Option<String>,
                 Option<String>, Option<String>, Value, String, Option<i32>,
+                Option<String>, Option<String>,
             ),
         >(&sql)
         .bind(project_id)
@@ -1876,13 +2107,15 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, desc, etype, ts, event_time, duration, attrs, created, era_order)| {
+            .map(|(id, name, desc, etype, ts, event_time, duration, attrs, created, era_order, node_id, node_title)| {
                 serde_json::json!({
                     "id": id, "name": name, "description": desc,
                     "event_type": etype, "timestamp": ts,
                     // when / where / participants / consequences / reveal_at 都在 attributes 里
                     "event_time": event_time, "duration": duration, "attributes": attrs,
                     "era_order": era_order,
+                    "narrative_node_id": node_id,
+                    "narrative_node_title": node_title,
                     "created_at": created
                 })
             })
@@ -1899,10 +2132,14 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
         duration: Option<&str>,
         attributes: &Value,
         era_order: Option<i64>,
+        narrative_node_id: Option<Uuid>,
     ) -> Result<Value> {
         let id = Uuid::new_v4();
+        if let Some(node_id) = narrative_node_id {
+            ensure_event_node_in_project(&self.pool, project_id, node_id).await?;
+        }
         sqlx::query(
-            "INSERT INTO event (id, project_id, name, description, event_type, event_time, duration, attributes, era_order) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            "INSERT INTO event (id, project_id, name, description, event_type, event_time, duration, attributes, era_order, narrative_node_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         )
         .bind(&id)
         .bind(project_id)
@@ -1913,6 +2150,7 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
         .bind(duration)
         .bind(attributes)
         .bind(era_order)
+        .bind(narrative_node_id)
         .execute(&self.pool)
         .await
         .context("Failed to create event")?;
@@ -1930,7 +2168,19 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
         duration: Option<&str>,
         attributes: Option<&Value>,
         era_order: Option<i64>,
+        narrative_node_id: Option<Uuid>,
+        clear_narrative_node: bool,
     ) -> Result<Value> {
+        // 事件所属项目：既用于节点归属校验，也避免跨项目改到别人的事件
+        let project_id: Option<Uuid> = sqlx::query_scalar("SELECT project_id FROM event WHERE id=$1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("Failed to read event project")?;
+        let project_id = project_id.ok_or_else(|| anyhow::anyhow!("事件不存在: {}", id))?;
+        if let Some(node_id) = narrative_node_id {
+            ensure_event_node_in_project(&self.pool, project_id, node_id).await?;
+        }
         // 未传的字段保持原值：拼接时只带上明确给出的列
         let mut sql = String::from("UPDATE event SET updated_at = NOW()");
         let mut next_index = 1;
@@ -1941,6 +2191,7 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
         let mut bind_duration = false;
         let mut bind_attributes = false;
         let mut bind_era_order = false;
+        let mut bind_narrative_node = false;
         if name.is_some() {
             sql.push_str(&format!(", name=${}", next_index));
             next_index += 1;
@@ -1976,6 +2227,12 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
             next_index += 1;
             bind_era_order = true;
         }
+        // 挂 / 换 / 解绑叙事节点：解绑与「设成 NULL」都写成显式的 NULL，不靠缺省值猜测
+        if narrative_node_id.is_some() || clear_narrative_node {
+            sql.push_str(&format!(", narrative_node_id=${}", next_index));
+            next_index += 1;
+            bind_narrative_node = true;
+        }
         sql.push_str(&format!(" WHERE id=${}", next_index));
 
         let mut q = sqlx::query(&sql);
@@ -1986,6 +2243,7 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
         if bind_duration { q = q.bind(duration); }
         if bind_attributes { q = q.bind(attributes); }
         if bind_era_order { q = q.bind(era_order); }
+        if bind_narrative_node { q = q.bind(narrative_node_id); }
         q = q.bind(id);
         q.execute(&self.pool)
             .await

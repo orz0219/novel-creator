@@ -96,14 +96,30 @@ pub async fn create_node(State(state): State<AppState>, Path(project_id): Path<S
         .map_err(|_| AppError(anyhow::anyhow!("Invalid parent ID")))?;
 
     let service = narrative_service(&state);
-    let node = service.create_node(
-        project_id,
-        &input.node_type,
-        parent_id,
-        &input.title,
-        input.description.as_deref(),
-        input.attributes.unwrap_or(serde_json::json!({})),
-    ).await?;
+    // 细纲的结构与挂载字段（父节点序号、故事线阶段、在场实体、元数据）由 Agent 工具维护；
+    // 这个 HTTP 端点只承载前端建节点用得到的基础字段。
+    let node = service
+        .create_node(domain::narrative::NewNarrativeNode {
+            project_id,
+            node_type: input.node_type.clone(),
+            parent_id,
+            title: input.title.clone(),
+            description: input.description.clone(),
+            content: None,
+            attributes: input.attributes.clone().unwrap_or(serde_json::json!({})),
+            sort_order: None,
+            status: None,
+            storyline_id: None,
+            arc_stage: None,
+            stage_refs: Vec::new(),
+            participant_entity_ids: Vec::new(),
+            location_id: None,
+            item_ids: Vec::new(),
+            estimated_chapters: None,
+            estimated_words: None,
+            story_time: None,
+        })
+        .await?;
 
     Ok(Json(node))
 }
@@ -111,13 +127,17 @@ pub async fn create_node(State(state): State<AppState>, Path(project_id): Path<S
 pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<UpdateNodeInput>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid node ID")))?;
     let service = narrative_service(&state);
-    let node = service.update_node(
-        id,
-        input.title.as_deref(),
-        input.description.as_deref(),
-        input.content.as_deref(),
-        input.status.as_deref(),
-    ).await?;
+    // 结构 / 挂载补丁走默认值（什么都不改）：前端这个端点只改文本与状态
+    let node = service
+        .update_node(
+            id,
+            input.title.as_deref(),
+            input.description.as_deref(),
+            input.content.as_deref(),
+            input.status.as_deref(),
+            domain::narrative::NarrativeNodeOutlinePatch::default(),
+        )
+        .await?;
 
     Ok(Json(node))
 }

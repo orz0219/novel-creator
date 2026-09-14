@@ -109,6 +109,8 @@ pub enum MutationPayload {
         attributes: Option<serde_json::Value>,
         content: Option<String>,
         status: Option<String>,
+        /// 结构与挂载补丁（细纲：换父 / 重排 / 挂线挂阶段 / 挂实体 / 元数据）
+        outline: crate::narrative::NarrativeNodeOutlinePatch,
     },
     UpdateStoryline {
         title: Option<String>,
@@ -506,6 +508,7 @@ impl MutationCommand {
         attributes: Option<serde_json::Value>,
         content: Option<String>,
         status: Option<String>,
+        outline: crate::narrative::NarrativeNodeOutlinePatch,
     ) -> Self {
         MutationCommand::new(
             project_id,
@@ -519,6 +522,7 @@ impl MutationCommand {
                 attributes,
                 content,
                 status,
+                outline,
             },
         )
     }

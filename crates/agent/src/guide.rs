@@ -129,6 +129,12 @@ pub enum MinComplete {
         min_sub: i64,
         min_attached: i64,
     },
+    /// 细纲：至少 N 个卷节点，且每条重要故事线都要有节点挂到它
+    Beats {
+        min_volumes: i64,
+        /// 是否要求「importance 为 Main / Important 的线都至少有 1 个节点」
+        require_arc_for_important_storylines: bool,
+    },
 }
 
 /// 校验报告：成功时 `passed=true`；失败时 `passed=false` + `missing` 列表
@@ -158,7 +164,7 @@ pub struct MissingItem {
     pub detail: String,
 }
 
-/// 10 步工作流定义表（5 骨架 + 4 血肉 + 1 占位）
+/// 10 步工作流定义表（6 骨架 + 4 血肉）
 ///
 /// ## 顺序流
 /// 骨架（严格顺序）：
@@ -415,17 +421,32 @@ pub const STEPS: &[GuideStep] = &[
         requires_all_flesh: false,
     },
 
-    // ===== 占位：beats =====
+    // ===== 骨架 6/6：细纲（beats） =====
     GuideStep {
         key: STEP_BEATS,
         title: "细纲",
         group: StepGroup::Skeleton,
-        prompt_for_step: "（本轮未实现；占位 step）\n\
-                          本步用于把每条故事线细化为 narrative_node 树（卷/弧/章/场）。\n\
-                          当前 min_complete 设为 AlwaysSatisfied，推进时不会卡。\n\
-                          实际实现留待后续。",
-        completion_signal: "占位 step——本轮未实现，没有产物要求。",
-        min_complete: MinComplete::AlwaysSatisfied,
+        prompt_for_step: "本步：把故事线与阶段落成叙事节点树（卷 → 弧 → 章 → 场 → 节拍）。\n\
+                          落点：narrative_node（create_node / bulk_create_nodes 建树，\n\
+                          revise_node 移动、重排、挂线与阶段、挂在场角色与地点与道具）。\n\
+                          你的工作方式：\n\
+                          - 先建卷（顶层节点），再在同一批里用 key / parent_key 建下一层，\n\
+                            一次调用把「卷 → 弧 → 章」整棵子树建出来；\n\
+                          - 每个节点用 storyline_id + arc_stage 认领它服务的那条线与那个阶段，\n\
+                            一个节点服务多条线时用 stage_refs；\n\
+                          - 场景级节点补 participant_entity_ids / location_id / item_ids；\n\
+                          - 预计章数 / 字数 / 故事时间跨度用 estimated_chapters / estimated_words / story_time；\n\
+                          - **建错位置不要 retire 重建**：用 revise_node 改 parent_id / sort_order 移动即可，\n\
+                            节点 id 不变，伏笔的埋点与回收点因此不会脱钩。",
+        completion_signal: "本步产物就绪条件：\n\
+                           - 至少 1 个卷节点（node_type='Volume'）；\n\
+                           - 每条重要故事线（importance 为 Main / Important）都至少有 1 个节点挂到它\n\
+                             （create_node 的 storyline_id 指向该线，通常是一个弧或章）。\n\
+                           满足 → 告诉用户'细纲已就绪，可以推进了。请点下方\"确认推进\"按钮。'",
+        min_complete: MinComplete::Beats {
+            min_volumes: 1,
+            require_arc_for_important_storylines: true,
+        },
         next: "",
         requires_all_flesh: false,
     },
@@ -599,6 +620,33 @@ pub fn validate_step(key: &str, snapshot: &MinCompleteSnapshot) -> ValidationRep
                 });
             }
         }
+        MinComplete::Beats {
+            min_volumes,
+            require_arc_for_important_storylines,
+        } => {
+            if snapshot.volume_node_count < *min_volumes {
+                missing.push(MissingItem {
+                    kind: "volume_node".into(),
+                    detail: format!(
+                        "细纲至少需要 {} 个卷节点（node_type='Volume'），当前 {} 个",
+                        min_volumes, snapshot.volume_node_count
+                    ),
+                });
+            }
+            if *require_arc_for_important_storylines
+                && snapshot.important_storylines_without_node > 0
+            {
+                missing.push(MissingItem {
+                    kind: "storyline_without_node".into(),
+                    detail: format!(
+                        "还有 {} 条重要故事线（Main / Important）没有任何节点挂到它：\
+                         每条重要线至少要有 1 个节点（通常是一个弧或章），\
+                         用 create_node 的 storyline_id 认领",
+                        snapshot.important_storylines_without_node
+                    ),
+                });
+            }
+        }
     }
 
     // 2) 血肉闸门（如果本 step 标记了 requires_all_flesh=true）
@@ -672,6 +720,10 @@ pub struct MinCompleteSnapshot {
     pub storyline_total_count: i64,
     pub sub_storyline_count: i64,        // 副线数（importance != Main）
     pub attached_storyline_count: i64,   // 副线中有 parent_id 挂载的条数
+    /// 细纲：卷节点数（node_type = 'Volume'）
+    pub volume_node_count: i64,
+    /// 细纲：还没有任何节点挂到它的重要故事线（importance 为 Main / Important）条数
+    pub important_storylines_without_node: i64,
 }
 
 #[cfg(test)]
@@ -911,8 +963,26 @@ mod tests {
     }
 
     #[test]
-    fn test_beats_step_always_passes() {
+    fn test_beats_step_requires_volume_and_storyline_nodes() {
+        // 细纲步不再是占位：空快照必须卡住
         let r = validate_step(STEP_BEATS, &empty_snapshot());
+        assert!(!r.passed);
+        assert_eq!(r.next_step, None);
+        let kinds: Vec<&str> = r.missing.iter().map(|m| m.kind.as_str()).collect();
+        assert!(kinds.contains(&"volume_node"), "{:?}", kinds);
+
+        // 有 1 个卷、但重要故事线还没挂节点 → 仍然卡住
+        let mut s = empty_snapshot();
+        s.volume_node_count = 1;
+        s.important_storylines_without_node = 2;
+        let r = validate_step(STEP_BEATS, &s);
+        assert!(!r.passed);
+        assert_eq!(r.missing.len(), 1);
+        assert_eq!(r.missing[0].kind, "storyline_without_node");
+
+        // 卷有了、重要线也都挂上了节点 → 通过（且这是最后一步，没有下一步）
+        s.important_storylines_without_node = 0;
+        let r = validate_step(STEP_BEATS, &s);
         assert!(r.passed);
         assert_eq!(r.next_step, None);
     }

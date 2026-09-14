@@ -348,6 +348,20 @@ pub trait ContextSnapshotRepositoryPort: Send + Sync {
 pub trait NarrativeRepositoryPort: Send + Sync {
     async fn list_nodes(&self, project_id: Uuid) -> Result<Vec<serde_json::Value>>;
     async fn get_node(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
+
+    /// 新建叙事节点（细纲字段齐全：挂线挂阶段、挂实体、元数据、显式序号、初始状态）。
+    ///
+    /// 校验（父节点归属、故事线归属、实体存在性、阶段名）由实现内部完成，
+    /// 缺前置条件直接报错，不做猜测。
+    async fn create_node_full(
+        &self,
+        input: crate::narrative::NewNarrativeNode,
+    ) -> Result<serde_json::Value>;
+
+    /// 兼容入口：只带基础字段的新建。
+    ///
+    /// 内部委托 [`Self::create_node_full`]（追加到同父末尾），
+    /// 因此「建节点」只有一份实现，不会出现两条路径各写一套 SQL。
     async fn create_node(
         &self,
         project_id: Uuid,
@@ -356,7 +370,30 @@ pub trait NarrativeRepositoryPort: Send + Sync {
         title: &str,
         description: Option<&str>,
         attributes: serde_json::Value,
-    ) -> Result<serde_json::Value>;
+    ) -> Result<serde_json::Value> {
+        self.create_node_full(crate::narrative::NewNarrativeNode {
+            project_id,
+            node_type: node_type.to_string(),
+            parent_id,
+            title: title.to_string(),
+            description: description.map(str::to_string),
+            content: None,
+            attributes,
+            sort_order: None,
+            status: None,
+            storyline_id: None,
+            arc_stage: None,
+            stage_refs: Vec::new(),
+            participant_entity_ids: Vec::new(),
+            location_id: None,
+            item_ids: Vec::new(),
+            estimated_chapters: None,
+            estimated_words: None,
+            story_time: None,
+        })
+        .await
+    }
+
     async fn update_node(
         &self,
         id: Uuid,
@@ -364,6 +401,19 @@ pub trait NarrativeRepositoryPort: Send + Sync {
         description: Option<&str>,
         status: Option<&str>,
     ) -> Result<serde_json::Value>;
+
+    /// 列表 + 过滤 + **真分页**（LIMIT/OFFSET 下推到 SQL）：返回本页与命中总数。
+    ///
+    /// 过渡期的 `list_nodes` 是全量取回，300 章时「拉全量自己拼树」已经拉不动；
+    /// 细纲树的下钻（按父节点 / 类型 / 故事线筛）走这条。
+    async fn list_nodes_page(
+        &self,
+        project_id: Uuid,
+        filter: &crate::narrative::NarrativeNodeFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<serde_json::Value>, usize)>;
+
     async fn delete_node(&self, id: Uuid) -> Result<()>;
 }
 
@@ -747,6 +797,8 @@ pub trait HistoryRepositoryPort: Send + Sync {
         // 历史轴排序锚（越小越早）。`when` 是给人看的自由文本（「远昔」「缓变」），
         // 中文没法比大小，所以另给一个数值锚；`None` = 未标定。
         era_order: Option<i64>,
+        // 事件发生在哪个叙事节点（章 / 场）。`None` = 不挂节点。
+        narrative_node_id: Option<Uuid>,
     ) -> Result<serde_json::Value>;
     /// 修改事件（含结构化字段）。`None` 表示保持原值。
     async fn update_event(
@@ -759,6 +811,9 @@ pub trait HistoryRepositoryPort: Send + Sync {
         duration: Option<&str>,
         attributes: Option<&serde_json::Value>,
         era_order: Option<i64>,
+        // 改挂到另一个叙事节点；`None` 且 `clear_narrative_node = false` 时保持原值。
+        narrative_node_id: Option<Uuid>,
+        clear_narrative_node: bool,
     ) -> Result<serde_json::Value>;
     /// 语义化结束事件（`status='Deleted'`，不物理删除）。
     ///

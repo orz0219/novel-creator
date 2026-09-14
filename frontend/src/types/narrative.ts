@@ -12,6 +12,8 @@ export type NarrativeNodeType =
   | 'Storyline'
   | 'SubArc'
   | 'Special'
+  // 自定义类型必须显式带 custom: 前缀（后端严格校验，拼错会报错而不是静默降级）
+  | `custom:${string}`
 
 export type NarrativeNodeStatus =
   | 'Draft'
@@ -19,6 +21,12 @@ export type NarrativeNodeStatus =
   | 'InProgress'
   | 'Completed'
   | 'Archived'
+
+/** 一条「节点服务哪条故事线的哪个阶段」的引用（附加挂载，可多条） */
+export interface NarrativeStageRef {
+  storyline_id: string
+  arc_stage?: string
+}
 
 export interface NarrativeNode extends Timestamps {
   id: string
@@ -32,6 +40,28 @@ export interface NarrativeNode extends Timestamps {
   attributes: Record<string, unknown>
   sort_order: number
   status: NarrativeNodeStatus
+  /** 主挂载：这条节点服务的故事线 */
+  storyline_id?: string
+  /** 故事线名字（后端 join 带出，省一次往返） */
+  storyline_name?: string
+  /** 主挂载：推进到该故事线的哪个阶段 */
+  arc_stage?: string
+  /** 附加挂载：多条线 × 多个阶段 */
+  stage_refs?: NarrativeStageRef[]
+  /** 场景级挂载：在场角色 */
+  participant_entity_ids?: string[]
+  /** 场景级挂载：地点 */
+  location_id?: string
+  /** 场景级挂载：道具 */
+  item_ids?: string[]
+  /** 预计章数 */
+  estimated_chapters?: number
+  /** 预计字数 */
+  estimated_words?: number
+  /** 故事内时间跨度（自由文本） */
+  story_time?: string
+  /** 直接子节点数（后端带出，用于树上展开） */
+  child_count?: number
 }
 
 export interface VolumeAttributes {

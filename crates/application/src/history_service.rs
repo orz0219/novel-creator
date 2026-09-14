@@ -75,6 +75,7 @@ impl HistoryService {
         duration: Option<&str>,
         attributes: &Value,
         era_order: Option<i64>,
+        narrative_node_id: Option<Uuid>,
     ) -> Result<Value> {
         self.repo
             .create_event(
@@ -86,6 +87,7 @@ impl HistoryService {
                 duration,
                 attributes,
                 era_order,
+                narrative_node_id,
             )
             .await
     }
@@ -111,6 +113,8 @@ impl HistoryService {
         duration: Option<&str>,
         attributes: Option<&Value>,
         era_order: Option<i64>,
+        narrative_node_id: Option<Uuid>,
+        clear_narrative_node: bool,
     ) -> Result<Value> {
         self.repo
             .update_event(
@@ -122,6 +126,8 @@ impl HistoryService {
                 duration,
                 attributes,
                 era_order,
+                narrative_node_id,
+                clear_narrative_node,
             )
             .await
     }

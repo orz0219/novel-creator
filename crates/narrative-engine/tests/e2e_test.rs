@@ -14,6 +14,43 @@ mod e2e_tests {
     use db::connection::Database;
     use std::sync::Arc;
 
+
+    /// 建节点：细纲字段很多，端到端测试只用到基础字段，这里统一包一层。
+    /// 返回 Result，调用点照旧 `.await.unwrap()`。
+    #[allow(clippy::too_many_arguments)]
+    async fn mk_node(
+        service: &NarrativeService,
+        project_id: uuid::Uuid,
+        node_type: &str,
+        parent_id: Option<uuid::Uuid>,
+        title: &str,
+        description: Option<&str>,
+        attributes: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        service
+            .create_node(domain::narrative::NewNarrativeNode {
+                project_id,
+                node_type: node_type.to_string(),
+                parent_id,
+                title: title.to_string(),
+                description: description.map(str::to_string),
+                content: None,
+                attributes,
+                sort_order: None,
+                status: None,
+                storyline_id: None,
+                arc_stage: None,
+                stage_refs: Vec::new(),
+                participant_entity_ids: Vec::new(),
+                location_id: None,
+                item_ids: Vec::new(),
+                estimated_chapters: None,
+                estimated_words: None,
+                story_time: None,
+            })
+            .await
+    }
+
     fn build_context_engine(pool: sqlx::PgPool) -> runtime::context_engine::ContextEngine {
         let deps = runtime::context_engine::ContextEngineDeps {
             narrative: Arc::new(db::runtime_ports::DbNarrativePort::new(pool.clone())),
@@ -100,13 +137,13 @@ mod e2e_tests {
             ))),
             std::sync::Arc::new(db::project_resolver::DbProjectResolverPort::new(pool.clone())),
         );
-        let vol = narrative.create_node(project.id, "Volume", None, "Volume 1", Some("Lin Fan's journey begins"), serde_json::json!({"mission": "Lin Fan enters the cultivation world"})).await.unwrap();
+        let vol = mk_node(&narrative, project.id, "Volume", None, "Volume 1", Some("Lin Fan's journey begins"), serde_json::json!({"mission": "Lin Fan enters the cultivation world"})).await.unwrap();
         let vol_id: uuid::Uuid = serde_json::from_value(vol["id"].clone()).unwrap();
-        let arc = narrative.create_node(project.id, "Arc", Some(vol_id), "Black Market Arc", Some("Lin Fan discovers the underground market"), serde_json::json!({})).await.unwrap();
+        let arc = mk_node(&narrative, project.id, "Arc", Some(vol_id), "Black Market Arc", Some("Lin Fan discovers the underground market"), serde_json::json!({})).await.unwrap();
         let arc_id: uuid::Uuid = serde_json::from_value(arc["id"].clone()).unwrap();
-        let chapter = narrative.create_node(project.id, "Chapter", Some(arc_id), "Chapter 1: Arrival", Some("Lin Fan arrives at Black Stone City"), serde_json::json!({})).await.unwrap();
+        let chapter = mk_node(&narrative, project.id, "Chapter", Some(arc_id), "Chapter 1: Arrival", Some("Lin Fan arrives at Black Stone City"), serde_json::json!({})).await.unwrap();
         let chapter_id: uuid::Uuid = serde_json::from_value(chapter["id"].clone()).unwrap();
-        let scene = narrative.create_node(project.id, "Scene", Some(chapter_id), "Enter Black Market", Some("Lin Fan enters the underground market"),
+        let scene = mk_node(&narrative, project.id, "Scene", Some(chapter_id), "Enter Black Market", Some("Lin Fan enters the underground market"),
             serde_json::json!({
                 "objective": "Lin Fan explores the black market",
                 "pov_character_id": lin_fan.id,
@@ -115,7 +152,7 @@ mod e2e_tests {
                 "information_goal": "Reader learns about the black market"
             })).await.unwrap();
         let scene_id: uuid::Uuid = serde_json::from_value(scene["id"].clone()).unwrap();
-        narrative.create_node(project.id, "Beat", Some(scene_id), "Enter city", None,
+        mk_node(&narrative, project.id, "Beat", Some(scene_id), "Enter city", None,
             serde_json::json!({"action": "Lin Fan walks toward the city gates", "emotion": "cautious"})).await.unwrap();
 
         // 4. Build context with different policies
@@ -178,13 +215,13 @@ mod e2e_tests {
             ))),
             std::sync::Arc::new(db::project_resolver::DbProjectResolverPort::new(pool.clone())),
         );
-        let vol = narrative.create_node(project.id, "Volume", None, "Vol 1", None, serde_json::json!({})).await.unwrap();
+        let vol = mk_node(&narrative, project.id, "Volume", None, "Vol 1", None, serde_json::json!({})).await.unwrap();
         let vol_id: uuid::Uuid = serde_json::from_value(vol["id"].clone()).unwrap();
-        let arc = narrative.create_node(project.id, "Arc", Some(vol_id), "Arc 1", None, serde_json::json!({})).await.unwrap();
+        let arc = mk_node(&narrative, project.id, "Arc", Some(vol_id), "Arc 1", None, serde_json::json!({})).await.unwrap();
         let arc_id: uuid::Uuid = serde_json::from_value(arc["id"].clone()).unwrap();
-        let chapter = narrative.create_node(project.id, "Chapter", Some(arc_id), "Ch 1", None, serde_json::json!({})).await.unwrap();
+        let chapter = mk_node(&narrative, project.id, "Chapter", Some(arc_id), "Ch 1", None, serde_json::json!({})).await.unwrap();
         let chapter_id: uuid::Uuid = serde_json::from_value(chapter["id"].clone()).unwrap();
-        let scene = narrative.create_node(project.id, "Scene", Some(chapter_id), "Scene 1", None,
+        let scene = mk_node(&narrative, project.id, "Scene", Some(chapter_id), "Scene 1", None,
             serde_json::json!({"pov_character_id": char.id})).await.unwrap();
         let scene_id: uuid::Uuid = serde_json::from_value(scene["id"].clone()).unwrap();
 
@@ -265,13 +302,13 @@ mod e2e_tests {
             ))),
             std::sync::Arc::new(db::project_resolver::DbProjectResolverPort::new(pool.clone())),
         );
-        let vol = narrative.create_node(project.id, "Volume", None, "Vol 1", None, serde_json::json!({})).await.unwrap();
+        let vol = mk_node(&narrative, project.id, "Volume", None, "Vol 1", None, serde_json::json!({})).await.unwrap();
         let vol_id: uuid::Uuid = serde_json::from_value(vol["id"].clone()).unwrap();
-        let arc = narrative.create_node(project.id, "Arc", Some(vol_id), "Arc 1", None, serde_json::json!({})).await.unwrap();
+        let arc = mk_node(&narrative, project.id, "Arc", Some(vol_id), "Arc 1", None, serde_json::json!({})).await.unwrap();
         let arc_id: uuid::Uuid = serde_json::from_value(arc["id"].clone()).unwrap();
-        let chapter = narrative.create_node(project.id, "Chapter", Some(arc_id), "Ch 1", None, serde_json::json!({})).await.unwrap();
+        let chapter = mk_node(&narrative, project.id, "Chapter", Some(arc_id), "Ch 1", None, serde_json::json!({})).await.unwrap();
         let chapter_id: uuid::Uuid = serde_json::from_value(chapter["id"].clone()).unwrap();
-        let scene = narrative.create_node(project.id, "Scene", Some(chapter_id), "Scene 1", None,
+        let scene = mk_node(&narrative, project.id, "Scene", Some(chapter_id), "Scene 1", None,
             serde_json::json!({"pov_character_id": char.id})).await.unwrap();
         let scene_id: uuid::Uuid = serde_json::from_value(scene["id"].clone()).unwrap();
 

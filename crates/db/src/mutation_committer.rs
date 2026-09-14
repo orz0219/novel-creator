@@ -563,6 +563,7 @@ async fn apply(
             attributes,
             content,
             status,
+            outline,
         } => {
             // 叙事节点乐观锁（提案 四 / 六）：CAS on version，绝不物理 DELETE。
             let current_version: Option<i32> =
@@ -592,8 +593,12 @@ async fn apply(
                 node.attributes = v;
             }
             if let Some(v) = status {
-                node.status = crate::ser::parse_narrative_node_status(&v);
+                node.status = crate::ser::parse_narrative_node_status(&v)
+                    .map_err(|e| MutationError::Validation(e.to_string()))?;
             }
+            // 结构与挂载（细纲）：换父 / 兄弟重排 / 挂线挂阶段 / 挂实体 / 元数据。
+            // 必须在写回之前完成——它可能改动 node.parent_id 与 node.sort_order。
+            apply_node_outline_tx(&mut **tx, project_id, &mut node, outline).await?;
             let expected = current_version.unwrap_or(1);
             let ok = crate::repos::narrative_repo::NarrativeRepo::update_node_tx(&mut **tx, &node, expected)
                 .await?;
@@ -718,5 +723,222 @@ async fn record_event(
     .context("Failed to persist domain event")
     .map_err(MutationError::from)?;
     result.event_ids.push(event.id);
+    Ok(())
+}
+
+// ============================================================
+// 细纲（叙事节点）结构与挂载：补丁应用
+// ============================================================
+
+/// 应用叙事节点的「结构与挂载」补丁。
+///
+/// 校验一律「缺前置条件就报错」，不猜测：
+/// - 父节点必须存在、属于同一项目，且不能是自己的子孙（否则树成环）；
+/// - 故事线必须属于本项目；地点 / 在场角色 / 道具必须是本项目的 entity；
+/// - `arc_stage` 若给了阶段名，且该故事线的 `arc_stages` 非空，则阶段名必须对得上
+///   （阶段表还没建时不拦——那时无从判断，硬拦会把「先建树后补阶段表」堵死）。
+///
+/// 换父或显式给 `sort_order` 时做**兄弟重排**：把目标父节点下的兄弟按最终顺序
+/// 重新编号 1..n（不留空洞）。瞬时重复由 DEFERRABLE 唯一约束在提交时校验，
+/// 见 `migrations/040_narrative_node_outline.sql`。
+async fn apply_node_outline_tx(
+    conn: &mut PgConnection,
+    project_id: Uuid,
+    node: &mut domain::NarrativeNode,
+    patch: domain::narrative::NarrativeNodeOutlinePatch,
+) -> std::result::Result<(), MutationError> {
+    if patch.parent_id.is_some() && patch.move_to_root {
+        return Err(MutationError::Validation(
+            "parent_id 与 move_to_root 不能同时给：前者是换父，后者是移到顶层".into(),
+        ));
+    }
+    if patch.storyline_id.is_some() && patch.clear_storyline {
+        return Err(MutationError::Validation(
+            "storyline_id 与 clear_storyline 不能同时给".into(),
+        ));
+    }
+    if patch.location_id.is_some() && patch.clear_location {
+        return Err(MutationError::Validation(
+            "location_id 与 clear_location 不能同时给".into(),
+        ));
+    }
+
+    if let Some(raw) = patch.node_type.as_deref() {
+        node.node_type = domain::narrative::NarrativeNodeType::parse_strict(raw)
+            .map_err(|e| MutationError::Validation(e.to_string()))?;
+    }
+
+    // ---------- 换父 / 移到顶层 ----------
+    let mut target_parent = node.parent_id;
+    let mut parent_changed = false;
+    if patch.move_to_root {
+        target_parent = None;
+        parent_changed = node.parent_id.is_some();
+    } else if let Some(p) = patch.parent_id {
+        if p == node.id {
+            return Err(MutationError::Validation(
+                "父节点不能是自己".into(),
+            ));
+        }
+        let parent_project: Option<Uuid> =
+            sqlx::query_scalar("SELECT project_id FROM narrative_node WHERE id=$1 AND status != 'Deleted'")
+                .bind(p)
+                .fetch_optional(&mut *conn)
+                .await
+                .context("Failed to read parent narrative node")?;
+        match parent_project {
+            None => {
+                return Err(MutationError::Validation(format!(
+                    "父节点不存在或已被删除：{}",
+                    p
+                )))
+            }
+            Some(pid) if pid != project_id => {
+                return Err(MutationError::Validation(format!(
+                    "父节点 {} 不属于本项目",
+                    p
+                )))
+            }
+            Some(_) => {}
+        }
+        let is_descendant: bool = sqlx::query_scalar(
+            "WITH RECURSIVE sub(id) AS (SELECT id FROM narrative_node WHERE id = $1 \
+             UNION ALL SELECT n.id FROM narrative_node n JOIN sub s ON n.parent_id = s.id) \
+             SELECT EXISTS(SELECT 1 FROM sub WHERE id = $2)",
+        )
+        .bind(node.id)
+        .bind(p)
+        .fetch_one(&mut *conn)
+        .await
+        .context("Failed to check narrative node cycle")?;
+        if is_descendant {
+            return Err(MutationError::Validation(format!(
+                "不能把节点 {} 移动到它自己的子孙 {} 之下（树会成环）",
+                node.id, p
+            )));
+        }
+        target_parent = Some(p);
+        parent_changed = node.parent_id != Some(p);
+    }
+
+    // ---------- 兄弟重排 ----------
+    if let Some(o) = patch.sort_order {
+        if o < 1 {
+            return Err(MutationError::Validation(format!(
+                "sort_order 从 1 起（同父下的序号），收到 {}",
+                o
+            )));
+        }
+    }
+    if patch.sort_order.is_some() || parent_changed {
+        let siblings: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM narrative_node WHERE project_id=$1 AND parent_id IS NOT DISTINCT FROM $2 \
+             AND id <> $3 AND status != 'Deleted' ORDER BY sort_order, created_at",
+        )
+        .bind(project_id)
+        .bind(target_parent)
+        .bind(node.id)
+        .fetch_all(&mut *conn)
+        .await
+        .context("Failed to list sibling narrative nodes")?;
+
+        // 目标位置（0 起下标）：显式给了就用它（超出则落到末尾），否则追加到末尾
+        let pos = match patch.sort_order {
+            Some(o) => ((o - 1) as usize).min(siblings.len()),
+            None => siblings.len(),
+        };
+
+        // 兄弟按最终顺序编号：自己占住 pos，故 pos 及其后的兄弟各后移一位
+        let mut ids: Vec<Uuid> = Vec::with_capacity(siblings.len());
+        let mut ords: Vec<i32> = Vec::with_capacity(siblings.len());
+        for (i, (sid,)) in siblings.iter().enumerate() {
+            let ord = if i < pos { i + 1 } else { i + 2 };
+            ids.push(*sid);
+            ords.push(ord as i32);
+        }
+        if !ids.is_empty() {
+            sqlx::query(
+                "UPDATE narrative_node AS n SET sort_order = v.ord, updated_at = NOW() \
+                 FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::int[]) AS ord) AS v \
+                 WHERE n.id = v.id",
+            )
+            .bind(&ids)
+            .bind(&ords)
+            .execute(&mut *conn)
+            .await
+            .context("Failed to renumber sibling narrative nodes")?;
+        }
+        node.parent_id = target_parent;
+        node.sort_order = (pos + 1) as i32;
+    }
+
+    // ---------- 挂载：故事线 / 阶段 ----------
+    if let Some(sid) = patch.storyline_id {
+        crate::narrative_checks::ensure_storyline_in_project(conn, project_id, sid)
+            .await
+            .map_err(|e| MutationError::Validation(e.to_string()))?;
+        node.storyline_id = Some(sid);
+    } else if patch.clear_storyline {
+        node.storyline_id = None;
+        node.arc_stage = None;
+    }
+    if let Some(stage) = patch.arc_stage.clone() {
+        let sid = node.storyline_id.ok_or_else(|| {
+            MutationError::Validation(
+                "arc_stage 需要先指定 storyline_id：阶段属于某条故事线".into(),
+            )
+        })?;
+        crate::narrative_checks::ensure_stage_exists(conn, sid, &stage)
+            .await
+            .map_err(|e| MutationError::Validation(e.to_string()))?;
+        node.arc_stage = Some(stage);
+    }
+    if let Some(refs) = patch.stage_refs.clone() {
+        for r in &refs {
+            crate::narrative_checks::ensure_storyline_in_project(conn, project_id, r.storyline_id)
+                .await
+                .map_err(|e| MutationError::Validation(e.to_string()))?;
+            if let Some(stage) = r.arc_stage.as_deref() {
+                crate::narrative_checks::ensure_stage_exists(conn, r.storyline_id, stage)
+                    .await
+                    .map_err(|e| MutationError::Validation(e.to_string()))?;
+            }
+        }
+        node.stage_refs = refs;
+    }
+
+    // ---------- 挂载：实体（在场角色 / 地点 / 道具） ----------
+    if let Some(ids) = patch.participant_entity_ids.clone() {
+        crate::narrative_checks::ensure_entities_in_project(conn, project_id, &ids, "participant_entity_ids")
+            .await
+            .map_err(|e| MutationError::Validation(e.to_string()))?;
+        node.participant_entity_ids = ids;
+    }
+    if let Some(lid) = patch.location_id {
+        crate::narrative_checks::ensure_entities_in_project(conn, project_id, &[lid], "location_id")
+            .await
+            .map_err(|e| MutationError::Validation(e.to_string()))?;
+        node.location_id = Some(lid);
+    } else if patch.clear_location {
+        node.location_id = None;
+    }
+    if let Some(ids) = patch.item_ids.clone() {
+        crate::narrative_checks::ensure_entities_in_project(conn, project_id, &ids, "item_ids")
+            .await
+            .map_err(|e| MutationError::Validation(e.to_string()))?;
+        node.item_ids = ids;
+    }
+
+    // ---------- 元数据 ----------
+    if let Some(v) = patch.estimated_chapters {
+        node.estimated_chapters = Some(v);
+    }
+    if let Some(v) = patch.estimated_words {
+        node.estimated_words = Some(v);
+    }
+    if let Some(v) = patch.story_time.clone() {
+        node.story_time = Some(v);
+    }
+
     Ok(())
 }

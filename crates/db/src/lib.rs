@@ -4,6 +4,7 @@ pub mod export;
 pub mod guide_progress;
 pub mod migration;
 pub mod mutation_committer;
+pub mod narrative_checks;
 pub mod project_resolver;
 pub mod schema;
 pub mod repos;

@@ -735,9 +735,12 @@ impl AgentRuntime {
                                     "\n判定：不是截断（finish_reason 不是 length），问题在模型输出的 JSON 本身。",
                                 ),
                                 None => message.push_str(
-                                    "\n判定：**无法判定**是否截断——网关没有返回 finish_reason。\
-                                     请对照 json_length 与上面的上限自行判断；若 json_length 远小于上限，\
-                                     更可能是网关中途断流而不是截断。",
+                                    "\n判定：本次**已完整收到 <<END>> 结束标记**（没收到就不会进入解析这一步），\
+                                     所以不是网关中途断流；usage / finish_reason 分片排在 <<END>> 之后，\
+                                     本轮没有继续采集，因此这两个字段为空**并不代表截断**。\
+                                     请直接看 raw_error 里的字符级定位与结构诊断：\
+                                     若诊断为「某处少了闭合符」，就是模型算错了括号层级，\
+                                     把这一批拆小或把嵌套压平后重发即可。",
                                 ),
                             }
                             if parse_retries >= MAX_PARSE_RETRIES {
@@ -1268,12 +1271,119 @@ fn parse_tool_call(s: &str) -> Result<(String, serde_json::Value)> {
                     return Err(anyhow::anyhow!("工具调用 JSON 解析失败: {}", first_msg));
                 }
             } else {
-                return Err(anyhow::anyhow!("工具调用 JSON 解析失败: {}", first_msg));
+                return Err(anyhow::anyhow!(
+                    "工具调用 JSON 解析失败: {}\n{}",
+                    first_msg,
+                    json_error_diagnosis(&json, &first)
+                ));
             }
         }
     };
 
     finish_parse_tool_value(v)
+}
+
+/// 解析失败时给出**字符级**定位与结构诊断。
+///
+/// 为什么需要：serde_json 报的 `column` 是**字节**偏移，中文报文里它会明显大于
+/// 人眼数出来的字符位置（实测 867 字符的 batch_call 报 column 759，而真正的缺陷
+/// 在字符 429 附近），照着报错位置去看根本看不到问题点。
+///
+/// 这里换算成字符列、给出出错点前后各 40 字，并用栈扫描判断「是不是少闭合符号、
+/// 少几个」。刻意**不做自动补齐**：缺陷在 JSON 中间时，补错位置会静默写出结构不对的
+/// 数据（例如 attributes 少一层），比报错难查得多——诊断给足，让模型自己重发。
+fn json_error_diagnosis(json: &str, err: &serde_json::Error) -> String {
+    let byte_col = err.column();
+    let prefix = json
+        .as_bytes()
+        .get(..byte_col.saturating_sub(1))
+        .unwrap_or_default();
+    let char_col = String::from_utf8_lossy(prefix).chars().count() + 1;
+
+    let chars: Vec<char> = json.chars().collect();
+    let start = char_col.saturating_sub(41);
+    let end = (char_col + 40).min(chars.len());
+    let snippet: String = chars[start..end].iter().collect();
+
+    // 括号栈扫描（忽略字符串字面量里的括号）
+    let mut opens: Vec<(char, usize)> = Vec::new();
+    let mut extra_closes = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, ch) in chars.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *ch == '\\' {
+                escaped = true;
+            } else if *ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => opens.push((*ch, i + 1)),
+            '}' => {
+                if matches!(opens.last(), Some(('{', _))) {
+                    opens.pop();
+                } else {
+                    extra_closes += 1;
+                }
+            }
+            ']' => {
+                if matches!(opens.last(), Some(('[', _))) {
+                    opens.pop();
+                } else {
+                    extra_closes += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = format!(
+        "出错位置：第 {} 个字符（serde 报的是**字节**列 {}，含中文时两者不同）\n出错点附近：{}…\n",
+        char_col, byte_col, snippet
+    );
+    if opens.is_empty() && extra_closes == 0 {
+        out.push_str(
+            "结构诊断：括号是配平的，缺陷多半在**逗号 / 引号 / 键名**\
+             （例如对象里漏写键名，或两个值之间少了逗号）。\n",
+        );
+    } else {
+        if !opens.is_empty() {
+            let detail: Vec<String> = opens
+                .iter()
+                .take(3)
+                .map(|(ch, at)| format!("{}（第 {} 个字符处开启）", ch, at))
+                .collect();
+            let missing: String = opens
+                .iter()
+                .rev()
+                .map(|(ch, _)| match ch {
+                    '{' => '}',
+                    '[' => ']',
+                    other => *other,
+                })
+                .collect();
+            out.push_str(&format!(
+                "结构诊断：有 {} 个容器没有闭合——{}。缺少的闭合符是「{}」。\
+                 这类缺陷往往**不在报文末尾**，框架只在末尾补括号，所以这次不会自动修。\
+                 请把这一批拆小（或把嵌套压平）后重发本次调用。\n",
+                opens.len(),
+                detail.join(" / "),
+                missing
+            ));
+        }
+        if extra_closes > 0 {
+            out.push_str(&format!(
+                "结构诊断：另有 {} 个多余的闭合符（多打了 }} 或 ]）。\n",
+                extra_closes
+            ));
+        }
+    }
+    out
 }
 
 fn finish_parse_tool_value(v: serde_json::Value) -> Result<(String, serde_json::Value)> {
@@ -1409,6 +1519,26 @@ mod tests_parse_tool_call {
     fn does_not_repair_unterminated_string() {
         // 字符串没闭合时无法安全猜测，应拒绝修复。
         assert!(repair_incomplete_json("{\"a\":\"").is_none());
+    }
+
+    #[test]
+    fn diagnoses_missing_brace_in_the_middle() {
+        // 实测样本（batch_call：嵌套 attributes + 多工具）：`attributes` 少一个 `}`。
+        // 正确结构需要 3 个 `}`（beats 数组 → attributes → 子调用），样本里只有 2 个，
+        // 于是报错落在**报文中间**（`key must be a string`），旧的末尾补括号逻辑不触发。
+        let broken = r#"{"name":"batch_call","input":{"calls":[{"tool":"create_node","input":{"title":"卷一","attributes":{"beats":["a"]}},{"tool":"get_node","input":{"id":"x"}}]}}"#;
+        let err = parse_tool_call(broken).unwrap_err().to_string();
+        assert!(err.contains("工具调用 JSON 解析失败"), "{}", err);
+        assert!(
+            err.contains("没有闭合"),
+            "诊断应指出有容器没闭合，实际：{}",
+            err
+        );
+        assert!(
+            err.contains("第 ") && err.contains("个字符"),
+            "诊断应给出字符级位置，实际：{}",
+            err
+        );
     }
 }
 

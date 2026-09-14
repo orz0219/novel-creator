@@ -71,6 +71,8 @@ pub async fn create_event(State(state): State<AppState>, Path(project_id): Path<
             &attributes,
             // era_order：HTTP 侧暂不暴露（结构化字段由 AI 走工具写）
             None,
+            // narrative_node_id 同理：事件挂哪个节点由 AI 走 create_event 工具决定
+            None,
         )
         .await?;
     Ok(Json(event))

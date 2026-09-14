@@ -70,12 +70,6 @@ fn opt_str_owned(v: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn opt_uuid(v: &Value, key: &str) -> Option<Uuid> {
-    v.get(key)
-        .and_then(|x| x.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-}
-
 /// 解析**枚举型字符串入参**：把中西文写法归一到 DB 存的英文值。
 ///
 /// 存在的意义是「脏数据在这里就拦住」。此前工具层把 `importance` / `hint_level`
@@ -669,7 +663,7 @@ impl AgentTool for EntityTool {
 }
 
 // ============================================================
-// Narrative 聚合
+// Narrative 聚合（细纲：卷 → 弧 → 章 → 场 → 节拍）
 // ============================================================
 
 #[derive(Clone, Copy)]
@@ -702,6 +696,8 @@ pub fn register_narrative_tools(registry: &ToolRegistry, service: Arc<NarrativeS
     ] {
         registry.register(Arc::new(NarrativeTool::new(a, service.clone())));
     }
+    // 批量建树：细纲一次要建几十个节点，逐条调用会把一轮对话拆成几十轮往返
+    registry.register(Arc::new(BulkCreateNodesTool::new(service)));
 }
 
 fn narrative_name(a: NarrativeAction) -> &'static str {
@@ -716,43 +712,226 @@ fn narrative_name(a: NarrativeAction) -> &'static str {
 
 fn narrative_description(a: NarrativeAction) -> String {
     match a {
-        NarrativeAction::CreateNode => "创建叙事节点（卷/弧/章/场/节拍），挂到某项目下（可指定父节点）。".into(),
-        NarrativeAction::ReviseNode => "修改叙事节点的标题/描述/内容/状态。这会修改已有产物。".into(),
-        NarrativeAction::RemoveNode => "逻辑删除（软删除 status=Deleted）一个叙事节点。删除前请先用 get_node 确认目标 id。".into(),
-        NarrativeAction::GetNode => "读取单一叙事节点（修改 / 删除前应先确认目标）。".into(),
-        NarrativeAction::ListNodes => "列出某项目的全部叙事节点，用于检索上下文。".into(),
+        NarrativeAction::CreateNode => "创建叙事节点（卷/弧/章/场/节拍，也支持 custom:自有词表）。\
+            可指定父节点、同父下的序号、初始状态，并直接挂载它服务的故事线与阶段、\
+            在场的角色 / 地点 / 道具、以及预计章数 / 字数 / 故事时间跨度。"
+            .into(),
+        NarrativeAction::ReviseNode => "修改叙事节点：文本 / 状态，以及**结构与挂载**——\
+            换父节点（移动子树）、兄弟重排（序号自动顺移）、改节点类型、挂载或解绑故事线与阶段、\
+            挂载在场角色 / 地点 / 道具、补预计章数 / 字数 / 故事时间跨度。\
+            这会修改已有产物；改父节点不会改变节点 id，因此伏笔的埋点 / 回收点不会脱钩。"
+            .into(),
+        NarrativeAction::RemoveNode => "逻辑删除（软删除 status=Deleted）一个叙事节点及其子树。删除前请先用 get_node 确认目标 id。".into(),
+        NarrativeAction::GetNode => "读取单一叙事节点（含故事线名与子节点数）；修改 / 删除前应先确认目标。".into(),
+        NarrativeAction::ListNodes => "列出某项目的叙事节点：可分页、可按父节点下钻、只看顶层、\
+            按节点类型或故事线筛选；每行带 child_count（直接子节点数），便于逐层展开而不必拉全量。"
+            .into(),
+    }
+}
+
+/// `attributes` 只是**补充**：结构与挂载都有专门字段了，别再往这里塞。
+fn attributes_arg(input: &Value) -> Result<Value> {
+    match input.get("attributes") {
+        None | Some(Value::Null) => Ok(json!({})),
+        Some(v @ Value::Object(_)) => Ok(v.clone()),
+        Some(other) => anyhow::bail!("attributes 应为对象，收到：{}", other),
+    }
+}
+
+fn opt_bool(v: &Value, key: &str) -> Result<bool> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => anyhow::bail!("{} 应为 true / false，收到：{}", key, other),
+    }
+}
+
+fn opt_i32_strict(v: &Value, key: &str) -> Result<Option<i32>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .and_then(|x| i32::try_from(x).ok())
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("{} 应为 32 位整数，收到：{}", key, n)),
+        Some(other) => anyhow::bail!("{} 应为整数，收到：{}", key, other),
+    }
+}
+
+/// UUID 数组入参。解析失败直接报错，不静默丢弃写错的 id。
+fn opt_uuid_array(v: &Value, key: &str) -> Result<Option<Vec<Uuid>>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let s = item
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("{}[{}] 应为 UUID 字符串，收到：{}", key, i, item))?;
+                out.push(
+                    Uuid::parse_str(s.trim())
+                        .map_err(|_| anyhow::anyhow!("{}[{}] 不是合法 UUID：{}", key, i, s))?,
+                );
+            }
+            Ok(Some(out))
+        }
+        Some(other) => anyhow::bail!("{} 应为 UUID 数组，收到：{}", key, other),
+    }
+}
+
+/// `stage_refs`：附加的「线 × 阶段」引用数组。
+fn opt_stage_refs(v: &Value, key: &str) -> Result<Option<Vec<domain::narrative::NarrativeStageRef>>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let sid = item
+                    .get("storyline_id")
+                    .or_else(|| item.get("storyline"))
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("{}[{}] 缺少 storyline_id（每条阶段引用都必须指明是哪条线）", key, i)
+                    })?;
+                let storyline_id = Uuid::parse_str(sid.trim()).map_err(|_| {
+                    anyhow::anyhow!("{}[{}].storyline_id 不是合法 UUID：{}", key, i, sid)
+                })?;
+                let arc_stage = item
+                    .get("arc_stage")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                out.push(domain::narrative::NarrativeStageRef {
+                    storyline_id,
+                    arc_stage,
+                });
+            }
+            Ok(Some(out))
+        }
+        Some(other) => anyhow::bail!("{} 应为对象数组，收到：{}", key, other),
+    }
+}
+
+/// 从入参读出「结构与挂载」补丁（create 与 revise 共用同一套字段名与解析规则）。
+fn node_outline_patch_from(input: &Value) -> Result<domain::narrative::NarrativeNodeOutlinePatch> {
+    Ok(domain::narrative::NarrativeNodeOutlinePatch {
+        node_type: opt_str_owned(input, "node_type"),
+        parent_id: opt_uuid_strict(input, "parent_id")?,
+        move_to_root: opt_bool(input, "move_to_root")?,
+        sort_order: opt_i32_strict(input, "sort_order")?,
+        storyline_id: opt_uuid_strict(input, "storyline_id")?,
+        clear_storyline: opt_bool(input, "clear_storyline")?,
+        arc_stage: opt_str_owned(input, "arc_stage"),
+        stage_refs: opt_stage_refs(input, "stage_refs")?,
+        participant_entity_ids: opt_uuid_array(input, "participant_entity_ids")?,
+        location_id: opt_uuid_strict(input, "location_id")?,
+        clear_location: opt_bool(input, "clear_location")?,
+        item_ids: opt_uuid_array(input, "item_ids")?,
+        estimated_chapters: opt_i32_strict(input, "estimated_chapters")?,
+        estimated_words: opt_i32_strict(input, "estimated_words")?,
+        story_time: opt_str_owned(input, "story_time"),
+    })
+}
+
+/// 节点挂载字段的 schema 片段（create / revise / bulk 三处共用一份）。
+fn node_outline_props() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "storyline_id",
+            json!({ "type": "string", "description": "**可选**：这条节点服务的故事线（主挂载）。先用 list_storylines 拿 id" }),
+        ),
+        (
+            "arc_stage",
+            json!({ "type": "string", "description": "**可选**：推进到该故事线的哪个阶段（与 storyline.arc_stages[].stage 同名）。要给就必须同时给 storyline_id" }),
+        ),
+        (
+            "stage_refs",
+            json!({
+                "type": "array",
+                "description": "**可选**：附加的「线 × 阶段」引用——一个节点可以同时服务多条线。整体替换（空数组 = 清空）",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "storyline_id": { "type": "string", "description": "故事线 id（必填）" },
+                        "arc_stage": { "type": "string", "description": "**可选**：阶段名" }
+                    },
+                    "required": ["storyline_id"]
+                }
+            }),
+        ),
+        (
+            "participant_entity_ids",
+            json!({ "type": "array", "items": { "type": "string" }, "description": "**可选**：在场角色的 entity id 数组（整体替换，空数组 = 清空）" }),
+        ),
+        (
+            "location_id",
+            json!({ "type": "string", "description": "**可选**：发生地点的 entity id" }),
+        ),
+        (
+            "item_ids",
+            json!({ "type": "array", "items": { "type": "string" }, "description": "**可选**：用到的道具 entity id 数组（整体替换）" }),
+        ),
+        (
+            "estimated_chapters",
+            json!({ "type": "number", "description": "**可选**：预计章数" }),
+        ),
+        (
+            "estimated_words",
+            json!({ "type": "number", "description": "**可选**：预计字数" }),
+        ),
+        (
+            "story_time",
+            json!({ "type": "string", "description": "**可选**：故事内时间跨度（自由文本，例如「第三天黄昏」）" }),
+        ),
+    ]
+}
+
+fn insert_props(target: &mut Value, props: Vec<(&'static str, Value)>) {
+    if let Some(map) = target.as_object_mut() {
+        for (k, v) in props {
+            map.insert(k.to_string(), v);
+        }
     }
 }
 
 fn narrative_schema(a: NarrativeAction) -> Value {
     match a {
-        NarrativeAction::CreateNode => json!({
-            "type": "object",
-            "properties": {
-                "node_type": { "type": "string", "description": "Volume / Arc / Chapter / Scene / Beat" },
-                "parent_id": { "type": "string", "description": "可选：父节点 UUID" },
+        NarrativeAction::CreateNode => {
+            let mut props = json!({
+                "node_type": { "type": "string", "description": format!("节点类型。{}", domain::narrative::NarrativeNodeType::legal_values_hint()) },
+                "parent_id": { "type": "string", "description": "**可选**：父节点 UUID。不给就是顶层节点（卷通常不带父节点）" },
                 "title": { "type": "string" },
                 "description": { "type": "string" },
-                "attributes": { "type": "object" },
-                "content": { "type": "string", "description": "章节 / 节点正文（可选）。长正文被输出上限截断时，可先建节点再用 revise_node + append:true 分次续写。" }
-            },
-            "required": ["node_type", "title"]
-        }),
-        NarrativeAction::ReviseNode => json!({
-            "type": "object",
-            "properties": {
+                "content": { "type": "string", "description": "章节 / 节点正文（可选）。长正文被输出上限截断时，可先建节点再用 revise_node + append:true 分次续写。" },
+                "attributes": { "type": "object", "description": "补充属性（自由对象）。结构与挂载都有专门字段了，这里只放本工具没有对应字段的补充信息" },
+                "sort_order": { "type": "number", "description": "**可选**：同父下的序号（1 起）。给了就插到这个位置、后面的兄弟自动顺移；不给就追加到同父末尾" },
+                "status": { "type": "string", "description": "**可选**：初始状态（Draft/Planned/InProgress/Completed/Archived，也接受中文）；不给就是 Draft" }
+            });
+            insert_props(&mut props, node_outline_props());
+            json!({ "type": "object", "properties": props, "required": ["node_type", "title"] })
+        }
+        NarrativeAction::ReviseNode => {
+            let mut props = json!({
                 "id": { "type": "string" },
                 "title": { "type": "string" },
                 "description": { "type": "string" },
                 "content": { "type": "string" },
-                "status": { "type": "string" },
+                "status": { "type": "string", "description": "**可选**：新状态（Draft/Planned/InProgress/Completed/Archived，也接受中文）" },
                 "append": {
                     "type": "boolean",
                     "description": "为 true 时把本次的 description / content **追加**到原值后面（默认 false = 覆盖）。长章节分次写时用它。"
-                }
-            },
-            "required": ["id"]
-        }),
+                },
+                "node_type": { "type": "string", "description": format!("**可选**：改节点类型。{}", domain::narrative::NarrativeNodeType::legal_values_hint()) },
+                "parent_id": { "type": "string", "description": "**可选**：换到新的父节点（整个子树跟着移动，节点 id 不变）。与 move_to_root 互斥" },
+                "move_to_root": { "type": "boolean", "description": "**可选**：移到顶层（parent_id 置空）。与 parent_id 互斥" },
+                "sort_order": { "type": "number", "description": "**可选**：同父下的目标序号（1 起）。给了就**重排**：同父其他节点自动顺移，序号保持 1..n 连续；换父但没给序号时追加到新父末尾" },
+                "clear_storyline": { "type": "boolean", "description": "**可选**：解绑故事线（连 arc_stage 一起清空）" },
+                "clear_location": { "type": "boolean", "description": "**可选**：解绑地点" }
+            });
+            insert_props(&mut props, node_outline_props());
+            json!({ "type": "object", "properties": props, "required": ["id"] })
+        }
         NarrativeAction::RemoveNode | NarrativeAction::GetNode => json!({
             "type": "object",
             "properties": { "id": { "type": "string" } },
@@ -762,7 +941,11 @@ fn narrative_schema(a: NarrativeAction) -> Value {
             "type": "object",
             "properties": {
                 "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
-                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" },
+                "parent_id": { "type": "string", "description": "**可选**：只看该父节点下的直接子节点（逐层下钻用）" },
+                "roots_only": { "type": "boolean", "description": "**可选**：只看顶层节点（没有父节点的卷 / 弧）。与 parent_id 互斥" },
+                "node_type": { "type": "string", "description": format!("**可选**：只看某种节点类型。{}", domain::narrative::NarrativeNodeType::legal_values_hint()) },
+                "storyline_id": { "type": "string", "description": "**可选**：只看服务某条故事线的节点" }
             },
             "required": []
         }),
@@ -785,46 +968,42 @@ impl AgentTool for NarrativeTool {
         match self.action {
             NarrativeAction::CreateNode => {
                 let project_id = parse_uuid(&input, "project_id")?;
-                let node_type = opt_str(&input, "node_type").ok_or_else(|| anyhow::anyhow!("node_type 缺失"))?;
-                let title = opt_str(&input, "title").ok_or_else(|| anyhow::anyhow!("title 缺失"))?;
-                let attributes = input.get("attributes").cloned().unwrap_or(json!({}));
-                let node = self
-                    .service
-                    .create_node(project_id, node_type, opt_uuid(&input, "parent_id"), title, opt_str(&input, "description"), attributes)
-                    .await?;
-                // 正文（content）：create_node 只落结构字段，直接传 content 会被静默丢掉。
-                // 这里显式补写一次——创建章节时顺手写正文是最自然的用法。
-                let content = opt_str(&input, "content");
-                if let Some(c) = content {
-                    let c = c.to_string();
-                    if !c.trim().is_empty() {
-                        let node_id = parse_uuid(&node, "id")?;
-                        let updated = self
-                            .service
-                            .update_node(node_id, None, None, Some(c.as_str()), None)
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "节点已创建（id={}），但写入正文失败：{}",
-                                    node_id,
-                                    e
-                                )
-                            })?;
-                        return Ok(json!({ "ok": true, "action": "create_node", "data": updated }));
-                    }
-                }
+                let node_type = opt_str(&input, "node_type")
+                    .ok_or_else(|| anyhow::anyhow!("node_type 缺失"))?
+                    .to_string();
+                let title = opt_str(&input, "title")
+                    .ok_or_else(|| anyhow::anyhow!("title 缺失"))?
+                    .to_string();
+                let outline = node_outline_patch_from(&input)?;
+                let new_node = domain::narrative::NewNarrativeNode {
+                    project_id,
+                    node_type,
+                    parent_id: outline.parent_id,
+                    title,
+                    description: opt_str_owned(&input, "description"),
+                    content: opt_str_owned(&input, "content"),
+                    attributes: attributes_arg(&input)?,
+                    sort_order: outline.sort_order,
+                    status: opt_str_owned(&input, "status"),
+                    storyline_id: outline.storyline_id,
+                    arc_stage: outline.arc_stage,
+                    stage_refs: outline.stage_refs.unwrap_or_default(),
+                    participant_entity_ids: outline.participant_entity_ids.unwrap_or_default(),
+                    location_id: outline.location_id,
+                    item_ids: outline.item_ids.unwrap_or_default(),
+                    estimated_chapters: outline.estimated_chapters,
+                    estimated_words: outline.estimated_words,
+                    story_time: outline.story_time,
+                };
+                let node = self.service.create_node(new_node).await?;
                 Ok(json!({ "ok": true, "action": "create_node", "data": node }))
             }
             NarrativeAction::ReviseNode => {
                 let id = parse_uuid(&input, "id")?;
                 // append=true：description / content 追加写入。
                 // 章节正文是系统里最长的文本，被输出上限截断时靠它分次续写。
-                let append = input
-                    .get("append")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let mut description: Option<String> =
-                    opt_str(&input, "description").map(str::to_string);
+                let append = opt_bool(&input, "append")?;
+                let mut description: Option<String> = opt_str(&input, "description").map(str::to_string);
                 let mut content: Option<String> = opt_str(&input, "content").map(str::to_string);
                 if append {
                     let existing = self
@@ -845,9 +1024,17 @@ impl AgentTool for NarrativeTool {
                     content = content
                         .map(|s| agent::append_or_replace(old_content.as_deref(), &s, true));
                 }
+                let outline = node_outline_patch_from(&input)?;
                 let node = self
                     .service
-                    .update_node(id, opt_str(&input, "title"), description.as_deref(), content.as_deref(), opt_str(&input, "status"))
+                    .update_node(
+                        id,
+                        opt_str(&input, "title"),
+                        description.as_deref(),
+                        content.as_deref(),
+                        opt_str(&input, "status"),
+                        outline,
+                    )
                     .await?;
                 Ok(json!({ "ok": true, "action": "revise_node", "data": node }))
             }
@@ -858,21 +1045,267 @@ impl AgentTool for NarrativeTool {
             }
             NarrativeAction::GetNode => {
                 let id = parse_uuid(&input, "id")?;
-                let node = self.service.get_node(id).await?.ok_or_else(|| anyhow::anyhow!("叙事节点不存在: {}", id))?;
+                let node = self
+                    .service
+                    .get_node(id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("叙事节点不存在: {}", id))?;
                 Ok(json!({ "ok": true, "action": "get_node", "data": node }))
             }
             NarrativeAction::ListNodes => {
                 let project_id = parse_uuid(&input, "project_id")?;
                 let (limit, offset) = agent::parse_page_args(&input)?;
-                let (items, total) = self.service.list_nodes_page(project_id, limit, offset).await?;
-                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
+                let filter = domain::narrative::NarrativeNodeFilter {
+                    parent_id: opt_uuid_strict(&input, "parent_id")?,
+                    roots_only: opt_bool(&input, "roots_only")?,
+                    node_type: opt_str_owned(&input, "node_type"),
+                    storyline_id: opt_uuid_strict(&input, "storyline_id")?,
+                };
+                let filtered = filter.parent_id.is_some()
+                    || filter.roots_only
+                    || filter.node_type.is_some()
+                    || filter.storyline_id.is_some();
+                let (items, total) = self
+                    .service
+                    .list_nodes_page(project_id, &filter, limit, offset)
+                    .await?;
+                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）。
+                // child_count 让模型不必为了「这一层还有几条」再拉一次全量。
                 let data: Vec<Value> = items
                     .iter()
-                    .map(|x| agent::pick_fields(x, &["id", "title", "node_type", "status", "parent_id"]))
+                    .map(|x| {
+                        agent::pick_fields(
+                            x,
+                            &[
+                                "id",
+                                "title",
+                                "node_type",
+                                "status",
+                                "parent_id",
+                                "sort_order",
+                                "child_count",
+                                "storyline_id",
+                                "storyline_name",
+                                "arc_stage",
+                            ],
+                        )
+                    })
                     .collect();
-                Ok(agent::list_envelope("list_nodes", data, total, limit, offset, "叙事节点", vec![]))
+                // 过滤生效时在信封里显式回带条件：否则模型看到一个较小的 total，
+                // 很容易误以为「项目里就这么多节点」
+                let extras: Vec<(&str, Value)> = if filtered {
+                    vec![(
+                        "filter",
+                        json!({
+                            "parent_id": filter.parent_id,
+                            "roots_only": filter.roots_only,
+                            "node_type": filter.node_type,
+                            "storyline_id": filter.storyline_id,
+                            "note": "total 是**命中过滤**的条数，不是项目全量",
+                        }),
+                    )]
+                } else {
+                    vec![]
+                };
+                Ok(agent::list_envelope(
+                    "list_nodes", data, total, limit, offset, "叙事节点", extras,
+                ))
             }
         }
+    }
+}
+
+/// 单次 `bulk_create_nodes` 的条目上限。
+///
+/// 与人物 / 地点档案的批量工具同一考虑：一次几百项会同时撞上 JSON 长度与超时，
+/// 宁可让模型自己分批（建一棵长篇小说细纲通常 20~40 个节点一批正合适）。
+pub const BULK_CREATE_NODES_MAX_ITEMS: usize = 50;
+
+/// 批量新建叙事节点（细纲建树）。
+///
+/// 逐条执行、逐条报错（不静默跳过）：失败的条目进 `failures` 并带上原因，
+/// 成功的条目进 `created` 并回带新 id。
+///
+/// 树形引用：同一批次内可以用 `key` 给节点起临时标识，后面的条目用
+/// `parent_key` 引用它——一次调用就能建出「卷 → 弧 → 章」整棵子树。
+pub struct BulkCreateNodesTool {
+    service: Arc<NarrativeService>,
+}
+
+impl BulkCreateNodesTool {
+    pub fn new(service: Arc<NarrativeService>) -> Self {
+        Self { service }
+    }
+}
+
+/// 批量建节点的条目 schema = 单条 create_node 的 schema + `key` / `parent_key`。
+fn bulk_create_nodes_item_schema() -> Value {
+    let mut schema = narrative_schema(NarrativeAction::CreateNode);
+    if let Some(props) = schema.get_mut("properties") {
+        insert_props(
+            props,
+            vec![
+                (
+                    "key",
+                    json!({ "type": "string", "description": "**可选**：本批次内的临时标识（例如 vol1）。同一批次里后面的节点可以用 parent_key 引用它——一次调用建出整棵子树" }),
+                ),
+                (
+                    "parent_key",
+                    json!({ "type": "string", "description": "**可选**：父节点用同批次里更早出现的 key 引用。与 parent_id 互斥" }),
+                ),
+            ],
+        );
+    }
+    schema
+}
+
+#[async_trait]
+impl AgentTool for BulkCreateNodesTool {
+    fn name(&self) -> String {
+        "bulk_create_nodes".to_string()
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "一次按顺序新建多个叙事节点（最多 {} 项），用于把细纲整棵树建出来。\
+             同一批次里可以用 key 给节点起临时标识，后面的条目用 parent_key 引用它，\
+             因此「先建卷、再在同一批里建它下面的弧和章」不需要分多轮。\
+             逐条执行、逐条报错：失败的条目会带上原因返回，不会静默跳过。\
+             每条字段与 create_node 完全一致（project_id 由框架注入，不要手写）。",
+            BULK_CREATE_NODES_MAX_ITEMS
+        )
+    }
+
+    /// 聚合器：一次代替多次调用，预算按累计口径给（与 batch_call 同理）。
+    fn result_budget(&self) -> usize {
+        agent::BATCH_RESULT_MAX_CHARS
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "nodes": {
+                    "type": "array",
+                    "description": format!("要新建的节点数组，按父在前、子在后排列（parent_key 只能引用更早出现的 key）。建议每批 20~40 条，上限 {} 条", BULK_CREATE_NODES_MAX_ITEMS),
+                    "items": bulk_create_nodes_item_schema()
+                }
+            },
+            "required": ["nodes"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let project_id = parse_uuid(&input, "project_id")?;
+        let arr = input
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow::anyhow!("nodes 必须是非空数组"))?;
+        if arr.is_empty() {
+            anyhow::bail!("nodes 不能为空：至少要给一个节点");
+        }
+        if arr.len() > BULK_CREATE_NODES_MAX_ITEMS {
+            anyhow::bail!(
+                "nodes 有 {} 项，超过单次上限 {} 项：请拆成多次 bulk_create_nodes",
+                arr.len(),
+                BULK_CREATE_NODES_MAX_ITEMS
+            );
+        }
+
+        let creator = NarrativeTool::new(NarrativeAction::CreateNode, self.service.clone());
+        // 本批次内 key -> 新节点 id
+        let mut key_map: BTreeMap<String, Uuid> = BTreeMap::new();
+        let mut created: Vec<Value> = Vec::with_capacity(arr.len());
+        let mut failures: Vec<Value> = Vec::new();
+
+        for (index, item) in arr.iter().enumerate() {
+            let mut payload = item.clone();
+            let Some(obj) = payload.as_object_mut() else {
+                failures.push(json!({ "index": index, "error": "条目应为对象" }));
+                continue;
+            };
+            // key / parent_key 是本工具的编排字段，不能透传给 create_node
+            // （否则会被「字段名不存在」拦下，或者更糟：被当成未知字段忽略）
+            let key = obj
+                .remove("key")
+                .and_then(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
+            let parent_key = obj
+                .remove("parent_key")
+                .and_then(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
+
+            if let Some(pk) = parent_key.as_deref() {
+                if obj.contains_key("parent_id") {
+                    failures.push(json!({
+                        "index": index,
+                        "key": key,
+                        "error": "parent_key 与 parent_id 不能同时给",
+                    }));
+                    continue;
+                }
+                match key_map.get(pk) {
+                    Some(pid) => {
+                        obj.insert("parent_id".to_string(), json!(pid.to_string()));
+                    }
+                    None => {
+                        failures.push(json!({
+                            "index": index,
+                            "key": key,
+                            "error": format!("parent_key「{}」在本批次里找不到：它必须引用**同一批次里更早出现**的 key", pk),
+                        }));
+                        continue;
+                    }
+                }
+            }
+
+            obj.insert("project_id".to_string(), json!(project_id.to_string()));
+            match creator.execute(payload).await {
+                Ok(value) => {
+                    let data = value.get("data").cloned().unwrap_or_else(|| json!({}));
+                    let id = data.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                    if let (Some(k), Some(id_str)) = (key.clone(), id.clone()) {
+                        match Uuid::parse_str(&id_str) {
+                            Ok(uuid) => {
+                                if key_map.insert(k.clone(), uuid).is_some() {
+                                    failures.push(json!({
+                                        "index": index,
+                                        "key": k,
+                                        "error": "key 在本批次里重复：节点本身已创建，但后续 parent_key 引用它会有歧义",
+                                    }));
+                                }
+                            }
+                            Err(_) => failures.push(json!({
+                                "index": index,
+                                "key": k,
+                                "error": format!("新建节点返回的 id 不是合法 UUID：{}", id_str),
+                            })),
+                        }
+                    }
+                    created.push(json!({
+                        "index": index,
+                        "key": key,
+                        "id": id,
+                        "title": data.get("title"),
+                        "node_type": data.get("node_type"),
+                        "parent_id": data.get("parent_id"),
+                        "sort_order": data.get("sort_order"),
+                    }));
+                }
+                Err(e) => failures.push(json!({
+                    "index": index,
+                    "key": key,
+                    "title": item.get("title"),
+                    "error": e.to_string(),
+                })),
+            }
+        }
+
+        Ok(json!({
+            "ok": failures.is_empty(),
+            "action": "bulk_create_nodes",
+            "created_count": created.len(),
+            "created": created,
+            "failures": failures,
+        }))
     }
 }
 
@@ -2291,7 +2724,8 @@ fn history_schema(a: HistoryAction) -> Value {
                     }
                 },
                 "consequences": { "type": "string", "description": "直接后果（可多条，用换行分隔）" },
-                "reveal_at": { "type": "string", "description": "揭示时机（如「暗线，前期不透」「第三卷揭露」）" }
+                "reveal_at": { "type": "string", "description": "揭示时机（如「暗线，前期不透」「第三卷揭露」）" },
+                "narrative_node_id": { "type": "string", "description": "**可选**：这件事发生在哪个叙事节点（章 / 场）——填了才能和细纲对上，也才能按节点回溯「这一章发生了什么」。先用 list_nodes 拿 id" }
             },
             "required": ["name", "description"]
         }),
@@ -2320,7 +2754,9 @@ fn history_schema(a: HistoryAction) -> Value {
                     }
                 },
                 "consequences": { "type": "string" },
-                "reveal_at": { "type": "string" }
+                "reveal_at": { "type": "string" },
+                "narrative_node_id": { "type": "string", "description": "**可选**：改挂到另一个叙事节点（章 / 场）" },
+                "clear_narrative_node": { "type": "boolean", "description": "**可选**：解绑叙事节点（与 narrative_node_id 互斥）" }
             },
             "required": ["id"]
         }),
@@ -2397,6 +2833,7 @@ impl AgentTool for HistoryTool {
                         opt_str(&input, "duration"),
                         &attributes,
                         opt_i64_strict(&input, "era_order")?,
+                        opt_uuid_strict(&input, "narrative_node_id")?,
                     )
                     .await?;
                 Ok(json!({ "ok": true, "action": "create_event", "data": e }))
@@ -2426,6 +2863,8 @@ impl AgentTool for HistoryTool {
                         opt_str_owned(&input, "duration").as_deref(),
                         attributes.as_ref(),
                         opt_i64_strict(&input, "era_order")?,
+                        opt_uuid_strict(&input, "narrative_node_id")?,
+                        opt_bool(&input, "clear_narrative_node")?,
                     )
                     .await?;
                 Ok(json!({ "ok": true, "action": "revise_event", "data": e }))
@@ -2460,7 +2899,7 @@ impl AgentTool for HistoryTool {
                 // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
                 let data: Vec<Value> = items
                     .iter()
-                    .map(|x| agent::pick_fields(x, &["id", "name", "event_type", "event_time", "duration", "description"]))
+                    .map(|x| agent::pick_fields(x, &["id", "name", "event_type", "event_time", "duration", "description", "narrative_node_id", "narrative_node_title"]))
                     .collect();
                 Ok(agent::list_envelope("list_events", data, total, limit, offset, "历史事件", vec![]))
             }
@@ -2671,6 +3110,25 @@ async fn project_status_snapshot(
     .await
     .context("统计副线挂载数失败")?;
     snapshot.attached_storyline_count = attached_count;
+
+    // 细纲：卷节点数 + 还没有节点挂靠的重要故事线
+    let (volume_node_count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM narrative_node WHERE project_id = $1 AND node_type = 'Volume' AND status != 'Deleted'",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .context("统计卷节点数失败")?;
+    snapshot.volume_node_count = volume_node_count;
+
+    let (important_without_node,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM storyline s WHERE s.project_id = $1 AND s.importance IN ('Main', 'Important') AND NOT EXISTS (SELECT 1 FROM narrative_node n WHERE n.storyline_id = s.id AND n.status != 'Deleted')",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .context("统计未挂节点的重要故事线失败")?;
+    snapshot.important_storylines_without_node = important_without_node;
 
     Ok((snapshot, config))
 }
