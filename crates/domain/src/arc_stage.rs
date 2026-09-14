@@ -70,7 +70,10 @@ pub struct EntityArcStage {
     /// 排序用整数（越小越早）
     #[serde(rename = "order")]
     pub order: i32,
-    /// 此阶段的身份 / 功能位
+    /// 此阶段的定位（人物：他是谁；势力：它在主角眼里的分量；地点：叙事位置）。
+    ///
+    /// 列名沿用 `role`（不迁移已有数据），对外同时接受等价写法 `stage_role`——
+    /// 「role」写在势力 / 地点上读起来别扭，但原地改列名会让已有数据与前端一起失效。
     pub role: Option<String>,
     /// 戏份：Light / Medium / Heavy
     pub screen_weight: Option<ScreenWeight>,

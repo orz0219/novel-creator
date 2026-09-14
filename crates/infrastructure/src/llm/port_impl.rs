@@ -2,7 +2,7 @@
 //!
 //! 包裹已有的 LlmClient，把领域端口 `domain::ports::LlmPort` 对接到具体 Provider。
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::pin::Pin;
 use futures::Stream;
@@ -25,19 +25,24 @@ impl InfraLlmPort {
     }
 
     /// 每次请求前读取运行时配置，使设置页保存后的 max_output_tokens 立即生效。
-    async fn max_output_tokens(&self) -> u32 {
-        self.settings
+    ///
+    /// 读不到配置**直接报错**：这里原先兜底成 22000，于是设置页里写的 50000
+    /// 会在读取失败时被静默忽略，用 22000 去发请求——请求「成功」但输出莫名变短，
+    /// 排查时完全看不出是配置没读到。
+    async fn max_output_tokens(&self) -> Result<u32> {
+        let config = self
+            .settings
             .load()
             .await
-            .map(|config| config.max_output_tokens)
-            .unwrap_or(22_000)
+            .context("读取运行时 AI 配置失败（max_output_tokens）")?;
+        Ok(config.max_output_tokens)
     }
 }
 
 #[async_trait]
 impl LlmPort for InfraLlmPort {
     async fn complete(&self, system_prompt: &str, user_prompt: &str, model: &str) -> Result<String> {
-        let max_tokens = self.max_output_tokens().await;
+        let max_tokens = self.max_output_tokens().await?;
         let request = LlmRequest {
             messages: vec![
                 Message {
@@ -63,7 +68,7 @@ impl LlmPort for InfraLlmPort {
         user_prompt: &str,
         model: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk>> + Send>>> {
-        let max_tokens = self.max_output_tokens().await;
+        let max_tokens = self.max_output_tokens().await?;
         let request = LlmRequest {
             messages: vec![
                 Message {

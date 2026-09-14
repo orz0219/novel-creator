@@ -605,6 +605,43 @@ impl DbStorylineRepositoryPort {
     }
 }
 
+/// 按 id 读回一条剧情线：`update_storyline` 用它回显修改后的**完整对象**。
+///
+/// 原先只回 `{"updated":true}`——调用方（AI）看不到写进去的是什么，只能再 list
+/// 一遍；本项目的 storyline 全文近万字，重复拉取代价很大（上下文也是钱）。
+async fn fetch_storyline_row_opt(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<Value>> {
+    let row: Option<(
+        String, String, String, Option<String>, String, String, String, String, String, String, Value,
+    )> = sqlx::query_as(
+        "SELECT id::text, project_id::text, name, description, status, importance, \
+                COALESCE(tone,'light'), COALESCE(visibility,'visible'), \
+                created_at::text, updated_at::text, arc_stages \
+         FROM storyline WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to read back storyline")?;
+    Ok(row.map(
+        |(id, project_id, name, desc, st, imp, tone, vis, cr, up, arc_stages)| {
+            serde_json::json!({
+                "id": id, "project_id": project_id, "name": name,
+                "description": desc, "status": st, "importance": imp,
+                "tone": tone, "visibility": vis,
+                "arc_stages": arc_stages,
+                "created_at": cr, "updated_at": up
+            })
+        },
+    ))
+}
+
+/// 读回一条剧情线，不存在则报错。
+async fn fetch_storyline_row(pool: &sqlx::PgPool, id: Uuid) -> Result<Value> {
+    fetch_storyline_row_opt(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("剧情线不存在: {}", id))
+}
+
 #[async_trait]
 impl StorylineRepositoryPort for DbStorylineRepositoryPort {
     async fn list_by_project(&self, project_id: Uuid) -> Result<Vec<Storyline>> {
@@ -614,9 +651,9 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
     }
 
     async fn list_storylines(&self, project_id: Uuid) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, Option<String>, String, String, String, String, String, String)> =
+        let rows: Vec<(String, String, Option<String>, String, String, String, String, String, String, Value)> =
             sqlx::query_as(
-                "SELECT id::text, name, description, status, importance, COALESCE(tone,'light'), COALESCE(visibility,'visible'), created_at::text, updated_at::text FROM storyline WHERE project_id=$1 ORDER BY importance, name",
+                "SELECT id::text, name, description, status, importance, COALESCE(tone,'light'), COALESCE(visibility,'visible'), created_at::text, updated_at::text, arc_stages FROM storyline WHERE project_id=$1 ORDER BY importance, name",
             )
             .bind(project_id)
             .fetch_all(&self.pool)
@@ -624,15 +661,20 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
             .context("Failed to list storylines")?;
         Ok(rows
             .into_iter()
-            .map(|(id, name, desc, st, imp, tone, vis, cr, up)| {
+            .map(|(id, name, desc, st, imp, tone, vis, cr, up, arc_stages)| {
                 serde_json::json!({
                     "id": id, "project_id": project_id.to_string(), "name": name,
                     "description": desc, "status": st, "importance": imp,
                     "tone": tone, "visibility": vis,
+                    "arc_stages": arc_stages,
                     "created_at": cr, "updated_at": up
                 })
             })
             .collect())
+    }
+
+    async fn get_storyline(&self, id: Uuid) -> Result<Option<Value>> {
+        fetch_storyline_row_opt(&self.pool, id).await
     }
 
     async fn create_storyline(
@@ -640,10 +682,12 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
         project_id: Uuid,
         name: &str,
         description: Option<&str>,
+        status: &str,
         importance: &str,
         tone: &str,
         visibility: &str,
         parent_id: Option<Uuid>,
+        arc_stages: Option<&Value>,
     ) -> Result<Value> {
         // 业务规则：
         //   - Main 主线必须 parent_id=None
@@ -653,16 +697,20 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
             anyhow::bail!("Main 主线不能挂到其他 story line 下");
         }
         let id = Uuid::new_v4();
+        // 未提供阶段弧线就是空列表（列本身有 DEFAULT '[]'，这里显式给值以免落 NULL）
+        let arc_stages = arc_stages.cloned().unwrap_or_else(|| serde_json::json!([]));
         sqlx::query(
-            "INSERT INTO storyline (id, project_id, name, description, status, importance, tone, visibility) VALUES ($1,$2,$3,$4,'Planned',$5,$6,$7)",
+            "INSERT INTO storyline (id, project_id, name, description, status, importance, tone, visibility, arc_stages) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         )
         .bind(&id)
         .bind(project_id)
         .bind(name)
         .bind(description)
+        .bind(status)
         .bind(importance)
         .bind(tone)
         .bind(visibility)
+        .bind(&arc_stages)
         .execute(&self.pool)
         .await
         .context("Failed to create storyline")?;
@@ -680,30 +728,56 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
             .context("Failed to create storyline_relation")?;
         }
 
-        Ok(serde_json::json!({
-            "id": id.to_string(),
-            "project_id": project_id.to_string(),
-            "name": name,
-            "importance": importance,
-            "tone": tone,
-            "visibility": visibility,
-            "parent_id": parent_id.map(|x| x.to_string()),
-            "status": "Planned"
-        }))
+        // 回显**完整对象**（含刚写入的 arc_stages 与 parent_id），
+        // 与 update 的回显保持一致：调用方建完就能看到实际落库的内容。
+        let mut created = fetch_storyline_row(&self.pool, id).await?;
+        if let Some(pid) = parent_id {
+            created["parent_id"] = serde_json::json!(pid.to_string());
+        }
+        Ok(created)
     }
 
     async fn update_storyline(
         &self,
         id: Uuid,
-        name: &str,
+        name: Option<&str>,
         description: Option<&str>,
+        status: Option<&str>,
         tone: Option<&str>,
         visibility: Option<&str>,
+        arc_stages: Option<&Value>,
     ) -> Result<Value> {
-        // 动态 SET 拼接（仅在 tone/visibility 提供时更新）
-        let mut sql = String::from("UPDATE storyline SET name=$1, description=$2, updated_at=NOW()");
-        if tone.is_some() { sql.push_str(", tone=$5"); }
-        if visibility.is_some() { sql.push_str(", visibility=$6"); }
+        // 动态 SET 拼接：未传的字段保持原值。
+        // 占位符编号必须与绑定顺序严格对应，因此这里显式记录每个字段用到的编号。
+        // name / description 走 COALESCE：None（不传）保持原值。
+        // 原先是无条件写入 —— 「只改名字」会把描述一起清空（实测语义陷阱）。
+        let mut sql = String::from(
+            "UPDATE storyline SET name=COALESCE($1, name), \
+             description=COALESCE($2, description), updated_at=NOW()",
+        );
+        let mut next_index = 5;
+        let mut bind_status = false;
+        let mut bind_tone = false;
+        let mut bind_visibility = false;
+        let mut bind_arc_stages = false;
+        if status.is_some() {
+            sql.push_str(&format!(", status=${}", next_index));
+            next_index += 1;
+            bind_status = true;
+        }
+        if tone.is_some() {
+            sql.push_str(&format!(", tone=${}", next_index));
+            next_index += 1;
+            bind_tone = true;
+        }
+        if visibility.is_some() {
+            sql.push_str(&format!(", visibility=${}", next_index));
+            bind_visibility = true;
+        }
+        if arc_stages.is_some() {
+            sql.push_str(&format!(", arc_stages=${}", next_index));
+            bind_arc_stages = true;
+        }
         sql.push_str(" WHERE id=$3 AND project_id = (SELECT project_id FROM storyline WHERE id = $4)");
 
         let mut q = sqlx::query(&sql)
@@ -711,10 +785,21 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
             .bind(description)
             .bind(id)
             .bind(id);
-        if let Some(t) = tone { q = q.bind(t); }
-        if let Some(v) = visibility { q = q.bind(v); }
+        if bind_status {
+            q = q.bind(status);
+        }
+        if bind_tone {
+            q = q.bind(tone);
+        }
+        if bind_visibility {
+            q = q.bind(visibility);
+        }
+        if bind_arc_stages {
+            q = q.bind(arc_stages);
+        }
         q.execute(&self.pool).await.context("Failed to update storyline")?;
-        Ok(serde_json::json!({ "id": id.to_string(), "updated": true }))
+        // 回显修改后的完整对象（原先只回 {"updated":true}，调用方只能再 list 全文）
+        fetch_storyline_row(&self.pool, id).await
     }
 
     async fn delete_storyline(&self, id: Uuid) -> Result<()> {
@@ -726,13 +811,58 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
         Ok(())
     }
 
+    async fn relate_storylines(
+        &self,
+        project_id: Uuid,
+        from_storyline_id: Uuid,
+        to_storyline_id: Uuid,
+        relation_type: &str,
+    ) -> Result<Value> {
+        if from_storyline_id == to_storyline_id {
+            anyhow::bail!("不能把一条剧情线连到它自己");
+        }
+        // 幂等：同 (from, to) 已存在就更新类型（表上有 UNIQUE(parent_id, child_id)）
+        let (id, relation_type): (String, String) = sqlx::query_as(
+            "INSERT INTO storyline_relation (id, project_id, parent_id, child_id, relation_type) \
+             VALUES (gen_random_uuid(), $1, $2, $3, $4) \
+             ON CONFLICT (parent_id, child_id) DO UPDATE SET relation_type = EXCLUDED.relation_type \
+             RETURNING id::text, relation_type",
+        )
+        .bind(project_id)
+        .bind(from_storyline_id)
+        .bind(to_storyline_id)
+        .bind(relation_type)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to relate storylines")?;
+        Ok(serde_json::json!({
+            "id": id,
+            "project_id": project_id.to_string(),
+            "parent_id": from_storyline_id.to_string(),
+            "child_id": to_storyline_id.to_string(),
+            "relation_type": relation_type,
+        }))
+    }
+
+    async fn unrelate_storylines(&self, id: Uuid) -> Result<()> {
+        let result = sqlx::query("DELETE FROM storyline_relation WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete storyline relation")?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("剧情线关系不存在: {}", id);
+        }
+        Ok(())
+    }
+
     async fn list_storyline_relations(
         &self,
         project_id: Uuid,
     ) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT id::text, parent_id::text, child_id::text, created_at::text \
-             FROM storyline_relation WHERE project_id = $1",
+        let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT id::text, parent_id::text, child_id::text, relation_type, created_at::text \
+             FROM storyline_relation WHERE project_id = $1 ORDER BY created_at",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -740,10 +870,11 @@ impl StorylineRepositoryPort for DbStorylineRepositoryPort {
         .context("Failed to list storyline_relations")?;
         Ok(rows
             .into_iter()
-            .map(|(id, parent, child, cr)| {
+            .map(|(id, parent, child, relation_type, cr)| {
                 serde_json::json!({
                     "id": id, "project_id": project_id.to_string(),
                     "parent_id": parent, "child_id": child,
+                    "relation_type": relation_type,
                     "created_at": cr
                 })
             })
@@ -765,28 +896,103 @@ impl DbForeshadowRepositoryPort {
     }
 }
 
+
+/// 伏笔行（含所属剧情线名字）：`list_foreshadows` 与「更新后回显」共用同一份，
+/// 避免两处字段清单不一致——历史上 hint_level 的语义就在两处漂移过。
+#[derive(sqlx::FromRow)]
+struct ForeshadowRow {
+    id: String,
+    project_id: String,
+    name: String,
+    description: Option<String>,
+    status: String,
+    importance: String,
+    hint_level: String,
+    hint_note: Option<String>,
+    introduced_at: Option<String>,
+    expected_reveal_at: Option<String>,
+    actual_reveal_at: Option<String>,
+    planted_node_id: Option<String>,
+    payoff_node_id: Option<String>,
+    parent_foreshadow_id: Option<String>,
+    created_at: String,
+    updated_at: String,
+    storyline_id: Option<String>,
+    storyline_name: Option<String>,
+}
+
+impl ForeshadowRow {
+    fn into_json(self) -> Value {
+        serde_json::json!({
+            "id": self.id,
+            "project_id": self.project_id,
+            "name": self.name,
+            "description": self.description,
+            "status": self.status,
+            "importance": self.importance,
+            "hint_level": self.hint_level,
+            "hint_note": self.hint_note,
+            "introduced_at": self.introduced_at,
+            "expected_reveal_at": self.expected_reveal_at,
+            "actual_reveal_at": self.actual_reveal_at,
+            "planted_node_id": self.planted_node_id,
+            "payoff_node_id": self.payoff_node_id,
+            "parent_foreshadow_id": self.parent_foreshadow_id,
+            "storyline_id": self.storyline_id,
+            "storyline_name": self.storyline_name,
+            "related_entity_ids": [],
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        })
+    }
+}
+
+/// 伏笔行的统一查询（列清单只有一份，`where_clause` 由调用方给）。
+fn foreshadow_select(where_clause: &str) -> String {
+    format!(
+        "SELECT f.id::text AS id, f.project_id::text AS project_id, f.name AS name, \
+                f.description AS description, f.status AS status, \
+                f.importance AS importance, f.hint_level AS hint_level, \
+                f.hint_note AS hint_note, f.introduced_at AS introduced_at, \
+                f.expected_reveal_at AS expected_reveal_at, \
+                f.actual_reveal_at AS actual_reveal_at, \
+                f.planted_node_id::text AS planted_node_id, \
+                f.payoff_node_id::text AS payoff_node_id, \
+                f.parent_foreshadow_id::text AS parent_foreshadow_id, \
+                f.created_at::text AS created_at, f.updated_at::text AS updated_at, \
+                f.storyline_id::text AS storyline_id, s.name AS storyline_name \
+         FROM foreshadowing f LEFT JOIN storyline s ON s.id = f.storyline_id {where_clause}"
+    )
+}
+
+/// 按 id 读回一条伏笔：`update_foreshadow` 用它回显（省掉调用方再 list 一遍全文），
+/// `create_foreshadow` 也用它返回完整对象。
+///
+/// 顺带修掉一个隐患：原先 update 不校验 id 是否存在，改一个不存在的 id 也会回
+/// `{"updated":true}`；现在读回失败会明确报错。
+///
+/// 刻意**不**放进 `ForeshadowRepositoryPort`：它是实现细节，端口只描述业务能力。
+async fn fetch_foreshadow_row(pool: &sqlx::PgPool, id: Uuid) -> Result<Value> {
+    let row: ForeshadowRow = sqlx::query_as(&foreshadow_select("WHERE f.id=$1"))
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to read back foreshadow")?;
+    Ok(row.into_json())
+}
+
 #[async_trait]
 impl ForeshadowRepositoryPort for DbForeshadowRepositoryPort {
     async fn list_foreshadows(&self, project_id: Uuid) -> Result<Vec<Value>> {
-        let rows: Vec<(String, String, Option<String>, String, String, String, String, String)> =
-            sqlx::query_as(
-                "SELECT id::text, name, description, status, importance, hint_level, created_at::text, updated_at::text FROM foreshadowing WHERE project_id=$1",
-            )
-            .bind(project_id)
-            .fetch_all(&self.pool)
-            .await
-            .context("Failed to list foreshadows")?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, name, desc, st, imp, hint, cr, up)| {
-                serde_json::json!({
-                    "id": id, "project_id": project_id.to_string(), "name": name,
-                    "description": desc, "status": st, "importance": imp,
-                    "hint_level": hint, "related_entity_ids": [],
-                    "created_at": cr, "updated_at": up
-                })
-            })
-            .collect())
+        // 顺带把所属剧情线的**名字**查出来：只有 uuid 的话，调用方还得再查一次才知道
+        // 这条伏笔挂在哪条线上，而无主的伏笔（storyline_id IS NULL）必须一眼能看出来。
+        let rows: Vec<ForeshadowRow> =
+            sqlx::query_as(&foreshadow_select("WHERE f.project_id=$1 ORDER BY f.created_at"))
+                .bind(project_id)
+                .fetch_all(&self.pool)
+                .await
+                .context("Failed to list foreshadows")?;
+        Ok(rows.into_iter().map(|r| r.into_json()).collect())
     }
 
     async fn create_foreshadow(
@@ -794,47 +1000,129 @@ impl ForeshadowRepositoryPort for DbForeshadowRepositoryPort {
         project_id: Uuid,
         name: &str,
         description: Option<&str>,
+        status: &str,
         importance: &str,
         hint_level: &str,
+        hint_note: Option<&str>,
+        introduced_at: Option<&str>,
+        expected_reveal_at: Option<&str>,
+        planted_node_id: Option<Uuid>,
+        payoff_node_id: Option<Uuid>,
+        parent_foreshadow_id: Option<Uuid>,
+        storyline_id: Option<Uuid>,
     ) -> Result<Value> {
         let id = Uuid::new_v4();
+        // 写入前归一：这两个字段此前被 HTTP 路径直接透传，库里混进了
+        // '重要' / 'Main' / 'Major' / '低（前期只透风，不揭示）' 这类自由文本，
+        // 前端无法排序过滤（见迁移 034）。归一放在仓储层=最后一道闸：
+        // 无论从 HTTP、工具还是以后新增的入口进来，都只可能落枚举值。
+        let importance = domain::foreshadowing::ForeshadowingImportance::parse(importance)
+            .ok_or_else(|| anyhow::anyhow!(
+                "importance 无法识别：{}（合法取值：{}，也可写中文）",
+                importance,
+                domain::foreshadowing::FORESHADOWING_IMPORTANCES.join(" / ")
+            ))?
+            .as_str();
+        let hint_level = domain::foreshadowing::HintLevel::parse(hint_level)
+            .ok_or_else(|| anyhow::anyhow!(
+                "hint_level 无法识别：{}（合法取值：{}，也可写中文）",
+                hint_level,
+                domain::foreshadowing::HINT_LEVELS.join(" / ")
+            ))?
+            .as_str();
         sqlx::query(
-            "INSERT INTO foreshadowing (id, project_id, name, description, status, importance, hint_level) VALUES ($1,$2,$3,$4,'Planned',$5,$6)",
+            "INSERT INTO foreshadowing (id, project_id, name, description, status, importance, \
+             hint_level, hint_note, introduced_at, expected_reveal_at, \
+             planted_node_id, payoff_node_id, parent_foreshadow_id, storyline_id) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
         )
         .bind(&id)
         .bind(project_id)
         .bind(name)
         .bind(description)
+        .bind(status)
         .bind(importance)
         .bind(hint_level)
+        .bind(hint_note)
+        .bind(introduced_at)
+        .bind(expected_reveal_at)
+        .bind(planted_node_id)
+        .bind(payoff_node_id)
+        .bind(parent_foreshadow_id)
+        .bind(storyline_id)
         .execute(&self.pool)
         .await
         .context("Failed to create foreshadow")?;
-        Ok(serde_json::json!({
-            "id": id.to_string(),
-            "project_id": project_id.to_string(),
-            "name": name,
-            "status": "Planned"
-        }))
+        // 回显完整对象：创建后立即可见埋点 / 备注，不必再 list 一遍
+        fetch_foreshadow_row(&self.pool, id).await
     }
 
     async fn update_foreshadow(
         &self,
         id: Uuid,
-        name: &str,
+        name: Option<&str>,
         description: Option<&str>,
+        status: Option<&str>,
+        hint_note: Option<&str>,
+        introduced_at: Option<&str>,
+        expected_reveal_at: Option<&str>,
+        actual_reveal_at: Option<&str>,
+        planted_node_id: Option<Uuid>,
+        payoff_node_id: Option<Uuid>,
+        parent_foreshadow_id: Option<Uuid>,
+        storyline_id: Option<Option<Uuid>>,
     ) -> Result<Value> {
+        // 状态单独一条语句：只有明确传了才动（与归属同理）
+        if let Some(status) = status {
+            sqlx::query(
+                "UPDATE foreshadowing SET status=$1, updated_at=NOW() WHERE id=$2",
+            )
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to update foreshadow status")?;
+        }
+        // 归属单独一条语句：只有调用方明确要求时才动，
+        // 免得「改个名字」顺手把伏笔从暗线上摘下来。
+        if let Some(target) = storyline_id {
+            sqlx::query("UPDATE foreshadowing SET storyline_id=$1, updated_at=NOW() WHERE id=$2")
+                .bind(target)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .context("Failed to update foreshadow storyline")?;
+        }
+        // name / description 走 COALESCE：None（不传）保持原值，
+        // 不会「只想改归属却把名字和描述一起清空」。
+        // 全部走 COALESCE：None（不传）保持原值。备注与三个时间锚同理。
         sqlx::query(
-            "UPDATE foreshadowing SET name=$1, description=$2, updated_at=NOW() WHERE id=$3 AND project_id = (SELECT project_id FROM foreshadowing WHERE id = $4)",
+            "UPDATE foreshadowing SET name=COALESCE($1, name), \
+             description=COALESCE($2, description), \
+             hint_note=COALESCE($3, hint_note), \
+             introduced_at=COALESCE($4, introduced_at), \
+             expected_reveal_at=COALESCE($5, expected_reveal_at), \
+             actual_reveal_at=COALESCE($6, actual_reveal_at), \
+             planted_node_id=COALESCE($7, planted_node_id), \
+             payoff_node_id=COALESCE($8, payoff_node_id), \
+             parent_foreshadow_id=COALESCE($9, parent_foreshadow_id), \
+             updated_at=NOW() WHERE id=$10",
         )
         .bind(name)
         .bind(description)
-        .bind(id)
+        .bind(hint_note)
+        .bind(introduced_at)
+        .bind(expected_reveal_at)
+        .bind(actual_reveal_at)
+        .bind(planted_node_id)
+        .bind(payoff_node_id)
+        .bind(parent_foreshadow_id)
         .bind(id)
         .execute(&self.pool)
         .await
         .context("Failed to update foreshadow")?;
-        Ok(serde_json::json!({ "id": id.to_string(), "updated": true }))
+        // 回显修改后的完整对象（原先只回 {"updated":true}，调用方只能再 list 全文）
+        fetch_foreshadow_row(&self.pool, id).await
     }
 
     async fn delete_foreshadow(&self, id: Uuid) -> Result<()> {
@@ -1529,12 +1817,57 @@ impl DbHistoryRepositoryPort {
     }
 }
 
+/// 按 id 读回一条事件：`update_event` 用它回显修改后的完整对象。
+///
+/// 原先只回 `{"updated":true}`，调用方（AI）改完看不到写进去的是什么。
+async fn fetch_event_row(pool: &sqlx::PgPool, id: Uuid) -> Result<Value> {
+    let row: (
+        String, String, String, Option<String>, Option<String>,
+        Option<String>, Option<String>, Value, String, Option<i32>,
+    ) = sqlx::query_as(
+        "SELECT id::text, name, description, event_type, timestamp, \
+                event_time, duration, attributes, created_at::text, era_order \
+         FROM event WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to read back event")?;
+    let (id, name, desc, etype, ts, event_time, duration, attrs, created, era_order) = row;
+    Ok(serde_json::json!({
+        "id": id, "name": name, "description": desc,
+        "event_type": etype, "timestamp": ts,
+        "event_time": event_time, "duration": duration, "attributes": attrs,
+        "era_order": era_order,
+        "created_at": created
+    }))
+}
+
 #[async_trait]
 impl HistoryRepositoryPort for DbHistoryRepositoryPort {
-    async fn list_events(&self, project_id: Uuid, limit: i64) -> Result<Vec<Value>> {
-        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, String)>(
-            "SELECT id::text, name, description, event_type, timestamp, created_at::text FROM event WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2",
-        )
+    async fn list_events(&self, project_id: Uuid, limit: i64, order_by: &str) -> Result<Vec<Value>> {
+        // 排序显式可选：中文 when 没法比大小，所以「历史轴顺序」要靠 era_order 这个数值锚；
+        // `(era_order IS NULL)` 让未标定的事件排在最后（PG / SQLite 都支持这种写法）。
+        let order_clause = match order_by {
+            "recent" => "ORDER BY created_at DESC",
+            "era" => "ORDER BY (era_order IS NULL), era_order ASC, created_at ASC",
+            other => anyhow::bail!(
+                "list_events 的 order_by 只支持 \"recent\" / \"era\"，收到：{}",
+                other
+            ),
+        };
+        let sql = format!(
+            "SELECT id::text, name, description, event_type, timestamp, \
+                    event_time, duration, attributes, created_at::text, era_order \
+             FROM event WHERE project_id = $1 AND status != 'Deleted' {order_clause} LIMIT $2"
+        );
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String, String, String, Option<String>, Option<String>,
+                Option<String>, Option<String>, Value, String, Option<i32>,
+            ),
+        >(&sql)
         .bind(project_id)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -1543,10 +1876,14 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, desc, etype, ts, created)| {
+            .map(|(id, name, desc, etype, ts, event_time, duration, attrs, created, era_order)| {
                 serde_json::json!({
                     "id": id, "name": name, "description": desc,
-                    "event_type": etype, "timestamp": ts, "created_at": created
+                    "event_type": etype, "timestamp": ts,
+                    // when / where / participants / consequences / reveal_at 都在 attributes 里
+                    "event_time": event_time, "duration": duration, "attributes": attrs,
+                    "era_order": era_order,
+                    "created_at": created
                 })
             })
             .collect())
@@ -1557,26 +1894,125 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
         project_id: Uuid,
         name: &str,
         description: &str,
+        event_type: Option<&str>,
+        event_time: Option<&str>,
+        duration: Option<&str>,
+        attributes: &Value,
+        era_order: Option<i64>,
     ) -> Result<Value> {
         let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO event (id, project_id, name, description) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO event (id, project_id, name, description, event_type, event_time, duration, attributes, era_order) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         )
         .bind(&id)
         .bind(project_id)
         .bind(name)
         .bind(description)
+        .bind(event_type)
+        .bind(event_time)
+        .bind(duration)
+        .bind(attributes)
+        .bind(era_order)
         .execute(&self.pool)
         .await
         .context("Failed to create event")?;
-        Ok(serde_json::json!({
-            "id": id.to_string(), "name": name, "description": description
-        }))
+        // 回显完整对象（含刚写入的 era_order），与 update 的回显一致
+        fetch_event_row(&self.pool, id).await
+    }
+
+    async fn update_event(
+        &self,
+        id: Uuid,
+        name: Option<&str>,
+        description: Option<&str>,
+        event_type: Option<&str>,
+        event_time: Option<&str>,
+        duration: Option<&str>,
+        attributes: Option<&Value>,
+        era_order: Option<i64>,
+    ) -> Result<Value> {
+        // 未传的字段保持原值：拼接时只带上明确给出的列
+        let mut sql = String::from("UPDATE event SET updated_at = NOW()");
+        let mut next_index = 1;
+        let mut bind_name = false;
+        let mut bind_description = false;
+        let mut bind_event_type = false;
+        let mut bind_event_time = false;
+        let mut bind_duration = false;
+        let mut bind_attributes = false;
+        let mut bind_era_order = false;
+        if name.is_some() {
+            sql.push_str(&format!(", name=${}", next_index));
+            next_index += 1;
+            bind_name = true;
+        }
+        if description.is_some() {
+            sql.push_str(&format!(", description=${}", next_index));
+            next_index += 1;
+            bind_description = true;
+        }
+        if event_type.is_some() {
+            sql.push_str(&format!(", event_type=${}", next_index));
+            next_index += 1;
+            bind_event_type = true;
+        }
+        if event_time.is_some() {
+            sql.push_str(&format!(", event_time=${}", next_index));
+            next_index += 1;
+            bind_event_time = true;
+        }
+        if duration.is_some() {
+            sql.push_str(&format!(", duration=${}", next_index));
+            next_index += 1;
+            bind_duration = true;
+        }
+        if attributes.is_some() {
+            sql.push_str(&format!(", attributes=${}", next_index));
+            next_index += 1;
+            bind_attributes = true;
+        }
+        if era_order.is_some() {
+            sql.push_str(&format!(", era_order=${}", next_index));
+            next_index += 1;
+            bind_era_order = true;
+        }
+        sql.push_str(&format!(" WHERE id=${}", next_index));
+
+        let mut q = sqlx::query(&sql);
+        if bind_name { q = q.bind(name); }
+        if bind_description { q = q.bind(description); }
+        if bind_event_type { q = q.bind(event_type); }
+        if bind_event_time { q = q.bind(event_time); }
+        if bind_duration { q = q.bind(duration); }
+        if bind_attributes { q = q.bind(attributes); }
+        if bind_era_order { q = q.bind(era_order); }
+        q = q.bind(id);
+        q.execute(&self.pool)
+            .await
+            .context("Failed to update event")?;
+        // 回显修改后的完整对象（原先只回 {"updated":true}）
+        fetch_event_row(&self.pool, id).await
+    }
+
+    async fn delete_event(&self, id: Uuid) -> Result<()> {
+        // 语义化结束而非物理删除：与 entity / narrative_node 一致
+        let result = sqlx::query(
+            "UPDATE event SET status = 'Deleted', updated_at = NOW() WHERE id = $1 AND status != 'Deleted'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to retire event")?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("事件不存在或已结束: {}", id);
+        }
+        Ok(())
     }
 
     async fn list_facts(&self, project_id: Uuid) -> Result<Vec<Value>> {
-        let rows = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
-            "SELECT id::text, content, category, certainty, created_at::text FROM fact WHERE project_id = $1 ORDER BY created_at DESC",
+        let rows = sqlx::query_as::<_, (String, String, Option<String>, String, String, String)>(
+            "SELECT id::text, content, category, certainty, created_at::text, status \
+             FROM fact WHERE project_id = $1 AND status != 'Retired' ORDER BY created_at DESC",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -1585,11 +2021,12 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
 
         Ok(rows
             .into_iter()
-            .map(|(id, content, cat, cert, created)| {
+            .map(|(id, content, cat, cert, created, status)| {
                 serde_json::json!({
                     "id": id,
                     "project_id": project_id.to_string(),
                     "content": content,
+                    "status": status,
                     "category": cat,
                     "certainty": cert,
                     "created_at": created,
@@ -1597,6 +2034,21 @@ impl HistoryRepositoryPort for DbHistoryRepositoryPort {
                 })
             })
             .collect())
+    }
+
+    async fn delete_fact(&self, id: Uuid) -> Result<()> {
+        // 语义化结束：fact 表本就有 status 列（默认 Active），此前没有任何写入路径
+        let result = sqlx::query(
+            "UPDATE fact SET status = 'Retired', updated_at = NOW() WHERE id = $1 AND status != 'Retired'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to retire fact")?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("事实不存在或已结束: {}", id);
+        }
+        Ok(())
     }
 
     async fn create_fact(
@@ -2784,9 +3236,11 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             Option<String>, Option<String>, Option<String>, Option<String>,
             Option<String>, Option<String>, Option<String>,
             Option<String>, Option<String>, Option<String>, Option<String>, Option<String>,
+            Value, Option<String>,
         )> = sqlx::query_as(
             "SELECT lp.geography, lp.appearance, lp.population, lp.economy, lp.rules, lp.history, lp.narrative_usage, \
-             li.location_type, li.size, li.climate, li.era, li.accessibility \
+             li.location_type, li.size, li.climate, li.era, li.accessibility, \
+             lp.aliases, lp.secrets \
              FROM location_profile lp FULL OUTER JOIN location_identity li ON li.entity_id = lp.entity_id \
              WHERE COALESCE(lp.entity_id, li.entity_id) = $1",
         )
@@ -2809,6 +3263,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             "geography": r.0, "appearance": r.1, "population": r.2, "economy": r.3,
             "rules": r.4, "history": r.5, "narrative_usage": r.6,
             "location_type": r.7, "size": r.8, "climate": r.9, "era": r.10, "accessibility": r.11,
+            "aliases": r.12, "secrets": r.13,
             "arc_stages": arc_stages
         })))
     }
@@ -2827,6 +3282,9 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         let climate = s("climate");
         let era = s("era");
         let accessibility = s("accessibility");
+        // 别名：整块替换语义（与角色档案一致：传了才动，没传保持原值）
+        let aliases = profile.get("aliases").filter(|v| !v.is_null()).cloned();
+        let secrets = s("secrets");
 
         // 取出 uuid 本身（**不要** `id::text`）：若拿字符串回填到 `WHERE id = $n`，
         // Postgres 会因 text 与 uuid 类型不符而报错，表现为更新已有档案时 500。
@@ -2842,23 +3300,32 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<Value>,
+            Option<String>,
         )> = sqlx::query_as(
             "SELECT id, geography, appearance, population, economy, rules, history, \
-             narrative_usage FROM location_profile WHERE entity_id = $1",
+             narrative_usage, aliases, secrets FROM location_profile WHERE entity_id = $1",
         )
         .bind(id).fetch_optional(&self.pool).await.context("chk loc profile")?;
         match lp {
-            Some((pid, g0, a0, p0, e0, r0, h0, n0)) => {
+            Some((pid, g0, a0, p0, e0, r0, h0, n0, al0, sec0)) => {
                 let kept = |new: Option<String>, old: Option<String>| new.or(old);
-                sqlx::query("UPDATE location_profile SET geography=$1, appearance=$2, population=$3, economy=$4, rules=$5, history=$6, narrative_usage=$7, updated_at=NOW() WHERE id=$8")
+                // aliases 是 JSONB 列：未传时保留旧值（与其它字段一致），不能落 NULL
+                let aliases = match aliases.clone() {
+                    Some(v) => v,
+                    None => al0.unwrap_or_else(|| Value::Array(vec![])),
+                };
+                sqlx::query("UPDATE location_profile SET geography=$1, appearance=$2, population=$3, economy=$4, rules=$5, history=$6, narrative_usage=$7, aliases=$8, secrets=$9, updated_at=NOW() WHERE id=$10")
                     .bind(kept(geography, g0)).bind(kept(appearance, a0)).bind(kept(population, p0))
                     .bind(kept(economy, e0)).bind(kept(rules, r0)).bind(kept(history, h0))
-                    .bind(kept(narrative_usage, n0)).bind(pid)
+                    .bind(kept(narrative_usage, n0)).bind(&aliases).bind(kept(secrets, sec0))
+                    .bind(pid)
                     .execute(&self.pool).await.context("upd loc profile")?;
             }
             None => {
-                sqlx::query("INSERT INTO location_profile (id, entity_id, geography, appearance, population, economy, rules, history, narrative_usage) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8)")
+                sqlx::query("INSERT INTO location_profile (id, entity_id, geography, appearance, population, economy, rules, history, narrative_usage, aliases, secrets) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
                     .bind(id).bind(&geography).bind(&appearance).bind(&population).bind(&economy).bind(&rules).bind(&history).bind(&narrative_usage)
+                    .bind(aliases.clone().unwrap_or_else(|| Value::Array(vec![]))).bind(&secrets)
                     .execute(&self.pool).await.context("ins loc profile")?;
             }
         }
@@ -2901,9 +3368,9 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         let row: Option<(
             Option<String>, Option<String>, Option<String>, Option<String>,
             Option<String>, Option<String>, Option<String>, Option<String>,
-            Option<String>, Option<String>, Option<String>,
+            Option<String>, Option<String>, Option<String>, Value,
         )> = sqlx::query_as(
-            "SELECT goals, leader, \"values\", resources, territory, members, enemies, allies, internal_conflicts, secrets, modus_operandi FROM faction_profile WHERE entity_id = $1",
+            "SELECT goals, leader, \"values\", resources, territory, members, enemies, allies, internal_conflicts, secrets, modus_operandi, aliases FROM faction_profile WHERE entity_id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -2924,6 +3391,7 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
             "goals": r.0, "leader": r.1, "values": r.2, "resources": r.3,
             "territory": r.4, "members": r.5, "enemies": r.6, "allies": r.7,
             "internal_conflicts": r.8, "secrets": r.9, "modus_operandi": r.10,
+            "aliases": r.11,
             "arc_stages": arc_stages
         })))
     }
@@ -2941,30 +3409,36 @@ impl EntityRepositoryPort for DbEntityRepositoryPort {
         let internal_conflicts = s("internal_conflicts");
         let secrets = s("secrets");
         let modus_operandi = s("modus_operandi");
+        // 别名：整块替换语义（传了才动，没传保持原值）
+        let aliases = profile.get("aliases").filter(|v| !v.is_null()).cloned();
         // 未传的字段保持原值（agent 工具契约，见 update_faction_profile 的描述）
         let existing: Option<(
             Uuid, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>,
             Option<String>, Option<String>, Option<String>, Option<String>, Option<String>,
-            Option<String>,
+            Option<String>, Option<Value>,
         )> = sqlx::query_as(
             "SELECT id, goals, leader, \"values\", resources, territory, members, enemies, \
-             allies, internal_conflicts, secrets, modus_operandi \
+             allies, internal_conflicts, secrets, modus_operandi, aliases \
              FROM faction_profile WHERE entity_id = $1",
         )
         .bind(id).fetch_optional(&self.pool).await.context("chk faction profile")?;
         match existing {
-            Some((pid, g0, l0, v0, r0, t0, m0, e0, a0, ic0, s0, mo0)) => {
+            Some((pid, g0, l0, v0, r0, t0, m0, e0, a0, ic0, s0, mo0, al0)) => {
                 let kept = |new: Option<String>, old: Option<String>| new.or(old);
-                sqlx::query("UPDATE faction_profile SET goals=$1, leader=$2, \"values\"=$3, resources=$4, territory=$5, members=$6, enemies=$7, allies=$8, internal_conflicts=$9, secrets=$10, modus_operandi=$11, updated_at=NOW() WHERE id=$12")
+                let aliases = match aliases.clone() {
+                    Some(v) => v,
+                    None => al0.unwrap_or_else(|| Value::Array(vec![])),
+                };
+                sqlx::query("UPDATE faction_profile SET goals=$1, leader=$2, \"values\"=$3, resources=$4, territory=$5, members=$6, enemies=$7, allies=$8, internal_conflicts=$9, secrets=$10, modus_operandi=$11, aliases=$12, updated_at=NOW() WHERE id=$13")
                     .bind(kept(goals, g0)).bind(kept(leader, l0)).bind(kept(values, v0))
                     .bind(kept(resources, r0)).bind(kept(territory, t0)).bind(kept(members, m0))
                     .bind(kept(enemies, e0)).bind(kept(allies, a0)).bind(kept(internal_conflicts, ic0))
-                    .bind(kept(secrets, s0)).bind(kept(modus_operandi, mo0)).bind(pid)
+                    .bind(kept(secrets, s0)).bind(kept(modus_operandi, mo0)).bind(&aliases).bind(pid)
                     .execute(&self.pool).await.context("upd faction profile")?;
             }
             None => {
-                sqlx::query("INSERT INTO faction_profile (id, entity_id, goals, leader, \"values\", resources, territory, members, enemies, allies, internal_conflicts, secrets, modus_operandi) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
-                    .bind(id).bind(&goals).bind(&leader).bind(&values).bind(&resources).bind(&territory).bind(&members).bind(&enemies).bind(&allies).bind(&internal_conflicts).bind(&secrets).bind(&modus_operandi)
+                sqlx::query("INSERT INTO faction_profile (id, entity_id, goals, leader, \"values\", resources, territory, members, enemies, allies, internal_conflicts, secrets, modus_operandi, aliases) VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
+                    .bind(id).bind(&goals).bind(&leader).bind(&values).bind(&resources).bind(&territory).bind(&members).bind(&enemies).bind(&allies).bind(&internal_conflicts).bind(&secrets).bind(&modus_operandi).bind(aliases.clone().unwrap_or_else(|| Value::Array(vec![])))
                     .execute(&self.pool).await.context("ins faction profile")?;
             }
         }

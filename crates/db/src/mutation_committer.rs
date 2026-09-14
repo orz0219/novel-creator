@@ -374,6 +374,41 @@ async fn apply(
             .await?;
             result.affected_entity_ids.push(cmd.target);
         }
+        MutationPayload::ReviseRelation {
+            relation_type,
+            description,
+        } => {
+            // 只改属性，不重建行、不动两端（关系 id 保持不变）
+            let ok = crate::repos::entity_repo::RelationRepo::revise_relation_tx(
+                &mut **tx,
+                project_id,
+                cmd.target,
+                relation_type.clone(),
+                description.clone(),
+            )
+            .await?;
+            if !ok {
+                return Err(MutationError::NotFound(format!(
+                    "active relation {} not found",
+                    cmd.target
+                )));
+            }
+            record_event(
+                &mut **tx,
+                project_id,
+                None,
+                DomainEventType::Custom("RelationRevised".to_string()),
+                source,
+                serde_json::json!({
+                    "relation_id": cmd.target,
+                    "relation_type": relation_type,
+                    "description": description
+                }),
+                &mut result,
+            )
+            .await?;
+            result.affected_entity_ids.push(cmd.target);
+        }
         MutationPayload::CreateEvent {
             name,
             description,

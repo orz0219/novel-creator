@@ -22,6 +22,24 @@ impl RuleService {
         self.repo.list_rules(world_id).await
     }
 
+    /// 有界列表（目录页）：返回本页 + 总数。（世界规则）
+    ///
+    /// 过渡实现：repository 还没下推 LIMIT/OFFSET，先取回再切片——
+    /// 目的是**把返回给模型的体积有界化**（实测无界列表一次能到 42 万字符）；
+    /// 等下推实现后就替换成真正的分页查询。
+    pub async fn list_rules_page(
+        &self,
+        world_id: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<serde_json::Value>, usize)> {
+        let all = self.list_rules(world_id).await?;
+        let total = all.len();
+        let items = all.into_iter().skip(offset).take(limit).collect();
+        Ok((items, total))
+    }
+
+
     pub async fn create_rule(
         &self,
         world_id: Uuid,

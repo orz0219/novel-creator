@@ -74,6 +74,12 @@ pub enum MutationPayload {
     EndRelation {
         valid_until: Option<String>,
     },
+    /// 修改一段关系的属性（关系类型 / 描述）。两端实体不变、行不重建，
+    /// 只改属性——避免"描述写错就得结束旧边 + 重建新边"（id 会变、时间线断成两段）。
+    ReviseRelation {
+        relation_type: Option<String>,
+        description: Option<String>,
+    },
     CreateFact {
         content: String,
         category: Option<String>,
@@ -408,6 +414,26 @@ impl MutationCommand {
             None,
             MutationSource::User,
             MutationPayload::EndRelation { valid_until },
+        )
+    }
+
+    /// 修改关系（关系类型 / 描述）。`None` 表示"这一项不改"，仍走 MutationCommand 留痕。
+    pub fn revise_relation(
+        project_id: Uuid,
+        relation_id: Uuid,
+        relation_type: Option<&str>,
+        description: Option<&str>,
+    ) -> Self {
+        MutationCommand::new(
+            project_id,
+            relation_id,
+            MutationTargetType::Relation,
+            None,
+            MutationSource::User,
+            MutationPayload::ReviseRelation {
+                relation_type: relation_type.map(|s| s.to_string()),
+                description: description.map(|s| s.to_string()),
+            },
         )
     }
 

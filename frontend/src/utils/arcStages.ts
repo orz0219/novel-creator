@@ -15,7 +15,9 @@ export const ARC_STAGES_FIELD: ProfileField = {
   badgeKey: 'screen_weight',
   badgeLabels: { Light: '轻', Medium: '中', Heavy: '重' },
   subFields: [
-    { key: 'role', label: '身份' },
+    // 人物 / 势力 / 地点共用：用「阶段定位」而不是「身份」——
+    // 势力的「身份」读起来别扭，而这一列在三处的含义都是"这一阶段它是谁 / 是什么位置"
+    { key: 'role', label: '阶段定位' },
     { key: 'goal', label: '目标' },
     { key: 'function', label: '功能' },
     { key: 'entry_trigger', label: '进入' },

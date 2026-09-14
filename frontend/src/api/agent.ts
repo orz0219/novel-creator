@@ -142,6 +142,40 @@ export async function confirmGuideStep(
   return resp.json()
 }
 
+/** 引导步骤的就绪情况（`GET /projects/{id}/guide/status`，后端真源）。 */
+export interface GuideStepStatus {
+  key: string
+  title: string
+  group: 'skeleton' | 'flesh'
+  /** current = 当前所处阶段；complete = 产物已就绪；pending = 还缺产物 */
+  status: 'current' | 'complete' | 'pending'
+  /** 本步产物是否已满足——步骤条的对勾只看它 */
+  ready: boolean
+  next: string | null
+  missing: Array<{ kind: string; detail: string }>
+}
+
+export interface GuideStatus {
+  current_step: string
+  current_title: string | null
+  /** 当前阶段是否已达到推进条件 */
+  current_ready: boolean
+  steps: GuideStepStatus[]
+}
+
+/** 读取项目引导进度。
+ *
+ *  步骤条的对勾、每步的分组与标题、推进按钮的"还差什么"全部取自这里：
+ *  与 `confirm_step` 的推进校验用的是后端同一套快照与同一个 `validate_step`。
+ *  **不要在前端另行数数量判断完成度**——那会多出第二份判定标准，
+ *  "副线"就曾因此永远不打勾（前端漏了这一步，且没有任何报错）。
+ */
+export async function getGuideStatus(projectId: string): Promise<GuideStatus> {
+  const resp = await fetch(`/api/v1/projects/${projectId}/guide/status`)
+  if (!resp.ok) throw new Error(await errorText(resp))
+  return resp.json()
+}
+
 /** 读取当前生效提示词视图（含内置默认与是否自定义）。 */
 export async function getPrompt(scope = 'global'): Promise<PromptView> {
   const resp = await fetch(`${BASE}/prompt?scope=${encodeURIComponent(scope)}`)
@@ -224,8 +258,48 @@ export async function truncateSession(
   return resp.json()
 }
 
-function parseSSEBlock(block: string): { event?: string; data?: string } {
-  let event: string | undefined
+/** 滚动摘要内容（固定字段，与后端 `domain::session_summary::SessionSummary` 对齐）。 */
+export interface SessionSummary {
+  story_state: string
+  confirmed: string[]
+  open_threads: string[]
+  next_step: string
+}
+
+/** 带元信息的滚动摘要（项目级恒定一份）。 */
+export interface StoredSessionSummary {
+  content: SessionSummary
+  updated_at: string
+}
+
+/**
+ * 读取当前会话所属项目的滚动摘要；从未收尾过时返回 `null`（不是错误）。
+ */
+export async function getSessionSummary(
+  sessionId: string,
+): Promise<StoredSessionSummary | null> {
+  const resp = await fetch(`${BASE}/session/${sessionId}/summary`)
+  if (!resp.ok) throw new Error(await errorText(resp))
+  return resp.json()
+}
+
+/**
+ * 会话收尾：让模型把这轮会话归纳成结构化摘要并**覆盖**项目那一份。
+ *
+ * 会连同「旧摘要」一起作为基线喂给模型，因此重复收尾不会丢掉前几轮的结论；
+ * 生成后写进项目记忆，新建会话会自动读到。
+ */
+export async function summarizeSession(
+  sessionId: string,
+): Promise<StoredSessionSummary> {
+  const resp = await fetch(`${BASE}/session/${sessionId}/summary`, {
+    method: 'POST',
+  })
+  if (!resp.ok) throw new Error(await errorText(resp))
+  return resp.json()
+}
+
+function parseSSEBlock(block: string): { event?: string; data?: string } {  let event: string | undefined
   let data = ''
   for (const line of block.split('\n')) {
     if (line.startsWith('event:')) event = line.slice(6).trim()

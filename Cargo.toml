@@ -9,10 +9,10 @@ members = [
     "crates/ai",
     "crates/agent",
     "crates/narrative-engine",
-    "crates/sqlite-db",
-    "crates/sqlite-engine",
     "crates/testkit",
 ]
+# 手机单机版（mobile/ 与 crates/sqlite-*、crates/db/migrations_sqlite）已剪切为
+# 独立项目 ../novel-mobile：它 path 依赖本仓库的共享 crate，本仓库不再包含手机端代码。
 
 [workspace.package]
 version = "0.1.0"
@@ -59,4 +59,3 @@ runtime = { path = "crates/runtime" }
 infrastructure = { path = "crates/infrastructure" }
 ai = { path = "crates/ai" }
 agent = { path = "crates/agent" }
-sqlite-db = { path = "crates/sqlite-db" }

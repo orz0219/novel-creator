@@ -75,4 +75,16 @@ pub struct MemoryItem {
 pub trait AgentMemory: Send + Sync {
     async fn save(&self, project_id: Uuid, memory_type: &str, content: &str) -> Result<()>;
     async fn list(&self, project_id: Uuid) -> Result<Vec<MemoryItem>>;
+
+    /// 用新内容**替换**该项目下某一类记忆的全部旧条目（先删后插）。
+    ///
+    /// 用于「滚动摘要」这类**恒定只有一条**的记忆：项目全部记忆都会被注入系统提示词
+    /// （见 `agent::prompt::build_system_prompt`），若用 `save` 追加，重复收尾会在提示词里
+    /// 堆出多份互相矛盾的摘要，让模型无所适从。
+    async fn replace_by_type(
+        &self,
+        project_id: Uuid,
+        memory_type: &str,
+        content: &str,
+    ) -> Result<()>;
 }

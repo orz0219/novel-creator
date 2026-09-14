@@ -13,6 +13,7 @@
 //! status='Deleted'、Relation 为语义化结束 valid_until、Narrative 为软删除），
 //! 历史 Event / Fact 仅提供创建与读取，不提供修改 / 删除（不可篡改）。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use agent::{AgentTool, ToolRegistry};
@@ -36,6 +37,7 @@ use db::application_ports::{
 use db::mutation_committer::DbMutationCommitter;
 use db::project_resolver::DbProjectResolverPort;
 use domain::world::World;
+use domain::{foreshadowing as fs_domain, storyline as sl_domain};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -55,22 +57,112 @@ fn opt_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
 }
 
+/// 取可选字符串入参，返回 owned 值：缺失 / null / 空串 → `None`（表示不改）。
+///
+/// 与 [`opt_str`] 的差别只在生命周期：`revise_*` 需要把值传进
+/// 「`Option<&str>` 表示保持原值」的服务方法，借用无法跨多个字段同时存活，
+/// 因此这里返回 `String`。
+fn opt_str_owned(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn opt_uuid(v: &Value, key: &str) -> Option<Uuid> {
     v.get(key)
         .and_then(|x| x.as_str())
         .and_then(|s| Uuid::parse_str(s).ok())
 }
 
-fn opt_i64(v: &Value, key: &str) -> Option<i64> {
-    v.get(key).and_then(|x| x.as_i64())
+/// 解析**枚举型字符串入参**：把中西文写法归一到 DB 存的英文值。
+///
+/// 存在的意义是「脏数据在这里就拦住」。此前工具层把 `importance` / `hint_level`
+/// 之类的字符串直接写库，既不校验取值、默认值还给过非法值（伏笔的 `"low"`
+/// 就不在合法集合里），结果是前端展示、按状态筛选全部失准。
+///
+/// `parse` 由 domain 的枚举提供（含中文别名），`allowed` 是同一枚举的取值清单——
+/// 两者都来自 domain 常量，因此错误提示里列出的合法值不可能与校验逻辑漂移。
+fn parse_enum_arg(
+    raw: &str,
+    allowed: &[&str],
+    parse: impl Fn(&str) -> Option<&'static str>,
+    field: &str,
+) -> Result<&'static str> {
+    parse(raw).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} 无法识别：{}（合法取值：{}）",
+            field,
+            raw,
+            allowed.join(" / ")
+        )
+    })
 }
 
-/// 框架在工具执行前会注入的字段（见 `agent::runtime::tool_execute`：
-/// 用会话的 project_id 覆盖模型传入值以实现物理隔离）。
+/// 取可选枚举入参：缺失 / null / 空串 → `None`（表示不改），非法值直接报错。
+/// 取可选整数（era_order 这类排序锚）：非整数直接报错，不静默忽略。
+fn opt_i64_strict(v: &Value, key: &str) -> Result<Option<i64>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("{} 应为整数，收到：{}", key, n)),
+        Some(other) => anyhow::bail!("{} 应为整数，收到：{}", key, other),
+    }
+}
+
+fn opt_enum_arg(
+    v: &Value,
+    key: &str,
+    parse: impl Fn(&str) -> Option<&'static str>,
+    allowed: &[&str],
+) -> Result<Option<&'static str>> {
+    let Some(raw) = v.get(key) else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let s = raw
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("{} 应为字符串，收到：{}", key, raw))?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    parse_enum_arg(trimmed, allowed, parse, key).map(Some)
+}
+
+/// 取可选 UUID，但**不吞掉非法值**。
+///
+/// 与 [`opt_uuid`] 的差异在「把伏笔挂到某条剧情线」这种语义下是必要的：那个版本把
+/// 「写了但不是 UUID」和「压根没写」都变成 `None`，模型传个错 id 就会**静默地什么都不挂**，
+/// 却以为挂上了。这里：缺字段 / 空串返回 `None`，写了非法值直接报错。
+fn opt_uuid_strict(v: &Value, key: &str) -> Result<Option<Uuid>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            Uuid::parse_str(trimmed)
+                .map(Some)
+                .map_err(|_| anyhow::anyhow!("{} 不是合法 UUID：{}", key, s))
+        }
+        Some(other) => anyhow::bail!("{} 应为 UUID 字符串，收到：{}", key, other),
+    }
+}
+
+/// 框架在工具执行前会注入的字段（见 `agent::inject_project_id`：用会话的
+/// project_id 覆盖模型传入值以实现物理隔离）。
 ///
 /// 它们不属于任何工具的入参契约，因此对入参做严格校验的工具必须放行它们，
-/// 否则会被误判成"未知字段"。
-const FRAMEWORK_INJECTED_FIELDS: [&str; 2] = ["project_id", "world_id"];
+/// 否则会被误判成"未知字段"。`project_id` 的字段名只有一处真相（`agent` crate），
+/// 这里引用常量而不是再写一遍字面量。
+const FRAMEWORK_INJECTED_FIELDS: [&str; 2] = [agent::PROJECT_ID_FIELD, "world_id"];
 
 /// 把 `get_*` 读到的档案拆成「可写字段」与「只读字段」两部分。
 ///
@@ -107,8 +199,14 @@ pub enum EntityAction {
     RetireEntity,
     CreateRelation,
     EndRelation,
+    /// 改关系属性：没有它，描述写错只能结束旧边 + 重建（id 会变）
+    ReviseRelation,
+    /// 读取关系边：没有它就无法回答「谁和谁有关系」，也拿不到 end_relation 需要的 id
+    ListRelations,
     GetEntity,
     ListEntities,
+    /// 实体类型清单：类型名只存在于 Rust 的 match 分支里，不暴露就只能靠猜
+    ListEntityTypes,
 }
 
 pub struct EntityTool {
@@ -134,8 +232,11 @@ pub fn register_entity_tools(registry: &ToolRegistry, service: Arc<EntityService
         EntityAction::RetireEntity,
         EntityAction::CreateRelation,
         EntityAction::EndRelation,
+        EntityAction::ReviseRelation,
+        EntityAction::ListRelations,
         EntityAction::GetEntity,
         EntityAction::ListEntities,
+        EntityAction::ListEntityTypes,
     ];
     for a in actions {
         registry.register(Arc::new(EntityTool::new(a, service.clone())));
@@ -153,8 +254,11 @@ fn entity_name(a: EntityAction) -> &'static str {
         EntityAction::RetireEntity => "retire_entity",
         EntityAction::CreateRelation => "create_relation",
         EntityAction::EndRelation => "end_relation",
+        EntityAction::ReviseRelation => "revise_relation",
+        EntityAction::ListRelations => "list_relations",
         EntityAction::GetEntity => "get_entity",
         EntityAction::ListEntities => "list_entities",
+        EntityAction::ListEntityTypes => "list_entity_types",
     }
 }
 
@@ -181,10 +285,42 @@ fn entity_description(a: EntityAction) -> String {
                 .into()
         }
         EntityAction::EndRelation => {
-            "语义化结束（end relation）一条关系，保留历史边但不生效。删除前请先确认关系 id。".into()
+            "语义化结束一条关系（**等同 retire_relation**，同一操作的不同叫法），\
+             保留历史边但不生效，不是物理删除。\
+             必须先从 list_relations 取到该关系的 id——本工具只接受 id。"
+                .into()
         }
-        EntityAction::GetEntity => "读取单一实体的当前状态（含版本号），修改 / 删除前应先调用以确认目标。".into(),
-        EntityAction::ListEntities => "列出某世界下的实体（可按类型过滤），用于检索上下文。".into(),
+        EntityAction::ReviseRelation => {
+            "修改已有关系的关系类型 / 描述（只传要改的字段，其余保持原值；两端实体不变）。\
+             关系描述写错时用它改，**不要**结束旧边再重建——那样 id 会变、时间线会断成两段。\
+             必须先用 list_relations 取到该关系的 id。"
+                .into()
+        }
+        EntityAction::ListRelations => {
+            "读取关系边（谁和谁有关系）。传 world_id 列出该世界全部关系；\
+             传 entity_id 只列出与该实体相关的关系（两端都算）。\
+             返回值含 id / source_name / target_name / relation_type / description，\
+             其中 id 是 end_relation 与查重所需的键。创建关系前应先查一次，避免重复建边。"
+                .into()
+        }
+        EntityAction::GetEntity => {
+            "读取单一实体的当前状态（含版本号），修改 / 删除前应先调用以确认目标。\
+             注意：实体详情**不含关系边**，要查某个实体与谁有关请用 list_relations。"
+                .into()
+        }
+        EntityAction::ListEntities => {
+            "列出某世界下的实体（**目录页**：只含 id / 名称 / 类型 id / 一句话摘要，不含正文）。\
+             **entity_type 可省略**：省略即返回该世界全部类型的实体（跨类型检索用，例如\
+             「找出所有和破庙相关的实体」）；传入则只返回该类型，可用类型见 list_entity_types。\
+             默认返回 20 条并给出 total；用 limit / offset 翻页，**不要**指望一次拿全量。\
+             需要某个实体的正文 / 档案，用 get_entity 或 get_character_profile 等按需读取。"
+                .into()
+        }
+        EntityAction::ListEntityTypes => {
+            "列出系统支持的全部实体类型（含可用的中文别名）。\
+             在传 entity_type / create_entity 之前先用它确认合法取值，不要凭印象猜类型名。"
+                .into()
+        }
     }
 }
 
@@ -209,7 +345,7 @@ fn entity_schema(a: EntityAction) -> Value {
                 "world_id": { "type": "string", "description": "目标世界 UUID（先调 get_main_world 取得）" },
                 "entity_type": {
                     "type": "string",
-                    "description": "实体类型。可传中文「人物」「地点」「势力」「物品」「组织」「生物」「事件」「金手指」，或英文 Character / Location / Faction / Item / Organization / Creature / Event / golden_finger"
+                    "description": "实体类型。可传中文「人物」「地点」「势力」「物品」「组织」「生物」「事件」「神明」「金手指」，或英文 Character / Location / Faction / Item / Organization / Creature / Event / Deity / golden_finger"
                 },
                 "name": { "type": "string" },
                 "summary": { "type": "string" },
@@ -224,13 +360,26 @@ fn entity_schema(a: EntityAction) -> Value {
                 "name": { "type": "string" },
                 "summary": { "type": "string" },
                 "description": { "type": "string" },
-                "attributes": { "type": "object", "description": "实体自定义属性（JSON 对象）" }
+                "attributes": { "type": "object", "description": "实体自定义属性（JSON 对象）" },
+                "append": {
+                    "type": "boolean",
+                    "description": "为 true 时把本次的 summary / description **追加**到原值后面（默认 false = 覆盖）。长描述分次写时用它，不必每次重发整段。"
+                }
             },
             "required": ["id"]
         }),
         EntityAction::RetireEntity | EntityAction::EndRelation | EntityAction::GetEntity => json!({
             "type": "object",
             "properties": { "id": { "type": "string", "description": "目标 UUID" } },
+            "required": ["id"]
+        }),
+        EntityAction::ReviseRelation => json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "关系边 UUID（用 list_relations 查）" },
+                "relation_type": { "type": "string", "description": "新的关系类型；不传则不改" },
+                "description": { "type": "string", "description": "新的关系描述；不传则不改" }
+            },
             "required": ["id"]
         }),
         EntityAction::CreateRelation => json!({
@@ -247,9 +396,24 @@ fn entity_schema(a: EntityAction) -> Value {
             "type": "object",
             "properties": {
                 "world_id": { "type": "string", "description": "世界 UUID" },
-                "entity_type": { "type": "string", "description": "可选：中文「人物」「地点」「势力」「物品」「金手指」，或英文 Character / Location / Faction / Item …" }
+                "entity_type": { "type": "string", "description": "**可选**：不传则返回该世界全部类型的实体。可传中文「人物」「地点」「势力」「物品」「金手指」，或英文 Character / Location / Faction / Item …（完整清单见 list_entity_types）" },
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）。列表只给目录字段（id / 名称 / 类型 id / 摘要），正文用 get_entity 或 get_*_profile 取", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）。返回里的 next_offset 就是下一页该传的值" }
             },
             "required": ["world_id"]
+        }),
+        EntityAction::ListRelations => json!({
+            "type": "object",
+            "properties": {
+                "world_id": { "type": "string", "description": "世界 UUID：列出该世界全部关系（二选一）" },
+                "entity_id": { "type": "string", "description": "实体 UUID：只列出与该实体相关的关系（二选一，两端都算）" }
+            },
+            "required": []
+        }),
+        EntityAction::ListEntityTypes => json!({
+            "type": "object",
+            "properties": {},
+            "required": []
         }),
     }
 }
@@ -333,9 +497,37 @@ impl AgentTool for EntityTool {
             }
             EntityAction::ReviseEntity => {
                 let id = parse_uuid(&input, "id")?;
+                // append=true：summary / description 追加到原值后面，而不是覆盖。
+                // 长文本常被单次输出上限截断，分次写作时不必把整段重发一遍。
+                let append = input
+                    .get("append")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let mut summary: Option<String> = opt_str(&input, "summary").map(str::to_string);
+                let mut description: Option<String> =
+                    opt_str(&input, "description").map(str::to_string);
+                if append {
+                    let existing = self
+                        .service
+                        .get_entity(id)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("实体不存在: {}", id))?;
+                    let old_summary = existing
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let old_description = existing
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    summary = summary
+                        .map(|s| agent::append_or_replace(old_summary.as_deref(), &s, true));
+                    description = description
+                        .map(|s| agent::append_or_replace(old_description.as_deref(), &s, true));
+                }
                 let e = self
                     .service
-                    .update_entity(id, opt_str(&input, "name"), opt_str(&input, "summary"), opt_str(&input, "description"), input.get("attributes"))
+                    .update_entity(id, opt_str(&input, "name"), summary.as_deref(), description.as_deref(), input.get("attributes"))
                     .await?;
                 Ok(json!({ "ok": true, "action": "revise_entity", "data": e }))
             }
@@ -356,6 +548,90 @@ impl AgentTool for EntityTool {
                 self.service.delete_relation(id).await?;
                 Ok(json!({ "ok": true, "action": "end_relation", "id": id.to_string() }))
             }
+            EntityAction::ReviseRelation => {
+                let id = parse_uuid(&input, "id")?;
+                let relation_type = opt_str(&input, "relation_type");
+                let description = opt_str(&input, "description");
+                self.service
+                    .revise_relation(id, relation_type.as_deref(), description.as_deref())
+                    .await?;
+                Ok(json!({
+                    "ok": true,
+                    "action": "revise_relation",
+                    "id": id.to_string(),
+                    "revised": {
+                        "relation_type": relation_type,
+                        "description": description
+                    }
+                }))
+            }
+            EntityAction::ListRelations => {
+                // 两种入参二选一：world_id 列全部，entity_id 只列与该实体相关的
+                let entity_id = opt_str(&input, "entity_id");
+                let world_id = match (opt_str(&input, "world_id"), entity_id.as_deref()) {
+                    (Some(_), _) => parse_uuid(&input, "world_id")?,
+                    // 只给了 entity_id：由它反查所属世界
+                    (None, Some(e)) => {
+                        let eid = Uuid::parse_str(e)
+                            .map_err(|_| anyhow::anyhow!("entity_id 不是合法 UUID：{}", e))?;
+                        let entity = self
+                            .service
+                            .get_entity(eid)
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("实体不存在: {}", e))?;
+                        parse_uuid(&entity, "world_id")?
+                    }
+                    // 两个都没给：无法确定范围，直接报错而不是悄悄返回空列表
+                    (None, None) => {
+                        anyhow::bail!("list_relations 需要 world_id 或 entity_id 之一");
+                    }
+                };
+
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let all = self.service.list_relations(world_id).await?;
+                let list: Vec<Value> = match &entity_id {
+                    Some(e) => {
+                        let target = Uuid::parse_str(e)
+                            .map_err(|_| anyhow::anyhow!("entity_id 不是合法 UUID：{}", e))?;
+                        let target = target.to_string();
+                        all.into_iter()
+                            .filter(|r| {
+                                r.get("source_entity_id").and_then(|v| v.as_str()) == Some(&target)
+                                    || r.get("target_entity_id").and_then(|v| v.as_str())
+                                        == Some(&target)
+                            })
+                            .collect()
+                    }
+                    None => all,
+                };
+                // 先按 entity_id 过滤，再分页：total 是过滤后的真实数量
+                let total = list.len();
+                let data: Vec<Value> = list
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|r| {
+                        agent::pick_fields(
+                            r,
+                            &["id", "source_name", "target_name", "relation_type", "description"],
+                        )
+                    })
+                    .collect();
+                Ok(agent::list_envelope(
+                    "list_relations",
+                    data,
+                    total,
+                    limit,
+                    offset,
+                    "关系",
+                    vec![],
+                ))
+            }
+            EntityAction::ListEntityTypes => Ok(json!({
+                "ok": true,
+                "action": "list_entity_types",
+                "data": entity_types_catalog(),
+            })),
             EntityAction::GetEntity => {
                 let id = parse_uuid(&input, "id")?;
                 let e = self.service.get_entity(id).await?.ok_or_else(|| anyhow::anyhow!("实体不存在: {}", id))?;
@@ -367,8 +643,26 @@ impl AgentTool for EntityTool {
                     Some(t) if !t.trim().is_empty() => Some(parse_entity_type(t)?),
                     _ => None,
                 };
-                let list = self.service.list_entities(world_id, type_filter).await?;
-                Ok(json!({ "ok": true, "action": "list_entities", "data": list }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let (items, total) = self
+                    .service
+                    .list_entities_page(world_id, type_filter, limit, offset)
+                    .await?;
+                // 目录页投影：只回 id / 名称 / 类型 id / 一句话摘要。
+                // 实测不投影时 33 个实体 = 36,555 字符（description 占 51%，另有审计列）。
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|e| agent::pick_fields(e, &["id", "name", "entity_type_id", "summary"]))
+                    .collect();
+                Ok(agent::list_envelope(
+                    "list_entities",
+                    data,
+                    total,
+                    limit,
+                    offset,
+                    "实体",
+                    vec![],
+                ))
             }
         }
     }
@@ -414,7 +708,7 @@ fn narrative_name(a: NarrativeAction) -> &'static str {
     match a {
         NarrativeAction::CreateNode => "create_node",
         NarrativeAction::ReviseNode => "revise_node",
-        NarrativeAction::RemoveNode => "remove_node",
+        NarrativeAction::RemoveNode => "retire_node",
         NarrativeAction::GetNode => "get_node",
         NarrativeAction::ListNodes => "list_nodes",
     }
@@ -439,7 +733,8 @@ fn narrative_schema(a: NarrativeAction) -> Value {
                 "parent_id": { "type": "string", "description": "可选：父节点 UUID" },
                 "title": { "type": "string" },
                 "description": { "type": "string" },
-                "attributes": { "type": "object" }
+                "attributes": { "type": "object" },
+                "content": { "type": "string", "description": "章节 / 节点正文（可选）。长正文被输出上限截断时，可先建节点再用 revise_node + append:true 分次续写。" }
             },
             "required": ["node_type", "title"]
         }),
@@ -450,7 +745,11 @@ fn narrative_schema(a: NarrativeAction) -> Value {
                 "title": { "type": "string" },
                 "description": { "type": "string" },
                 "content": { "type": "string" },
-                "status": { "type": "string" }
+                "status": { "type": "string" },
+                "append": {
+                    "type": "boolean",
+                    "description": "为 true 时把本次的 description / content **追加**到原值后面（默认 false = 覆盖）。长章节分次写时用它。"
+                }
             },
             "required": ["id"]
         }),
@@ -461,7 +760,10 @@ fn narrative_schema(a: NarrativeAction) -> Value {
         }),
         NarrativeAction::ListNodes => json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
+            },
             "required": []
         }),
     }
@@ -490,20 +792,69 @@ impl AgentTool for NarrativeTool {
                     .service
                     .create_node(project_id, node_type, opt_uuid(&input, "parent_id"), title, opt_str(&input, "description"), attributes)
                     .await?;
+                // 正文（content）：create_node 只落结构字段，直接传 content 会被静默丢掉。
+                // 这里显式补写一次——创建章节时顺手写正文是最自然的用法。
+                let content = opt_str(&input, "content");
+                if let Some(c) = content {
+                    let c = c.to_string();
+                    if !c.trim().is_empty() {
+                        let node_id = parse_uuid(&node, "id")?;
+                        let updated = self
+                            .service
+                            .update_node(node_id, None, None, Some(c.as_str()), None)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "节点已创建（id={}），但写入正文失败：{}",
+                                    node_id,
+                                    e
+                                )
+                            })?;
+                        return Ok(json!({ "ok": true, "action": "create_node", "data": updated }));
+                    }
+                }
                 Ok(json!({ "ok": true, "action": "create_node", "data": node }))
             }
             NarrativeAction::ReviseNode => {
                 let id = parse_uuid(&input, "id")?;
+                // append=true：description / content 追加写入。
+                // 章节正文是系统里最长的文本，被输出上限截断时靠它分次续写。
+                let append = input
+                    .get("append")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let mut description: Option<String> =
+                    opt_str(&input, "description").map(str::to_string);
+                let mut content: Option<String> = opt_str(&input, "content").map(str::to_string);
+                if append {
+                    let existing = self
+                        .service
+                        .get_node(id)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("叙事节点不存在: {}", id))?;
+                    let old_description = existing
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let old_content = existing
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    description = description
+                        .map(|s| agent::append_or_replace(old_description.as_deref(), &s, true));
+                    content = content
+                        .map(|s| agent::append_or_replace(old_content.as_deref(), &s, true));
+                }
                 let node = self
                     .service
-                    .update_node(id, opt_str(&input, "title"), opt_str(&input, "description"), opt_str(&input, "content"), opt_str(&input, "status"))
+                    .update_node(id, opt_str(&input, "title"), description.as_deref(), content.as_deref(), opt_str(&input, "status"))
                     .await?;
                 Ok(json!({ "ok": true, "action": "revise_node", "data": node }))
             }
             NarrativeAction::RemoveNode => {
                 let id = parse_uuid(&input, "id")?;
                 self.service.delete_node(id).await?;
-                Ok(json!({ "ok": true, "action": "remove_node", "id": id.to_string() }))
+                Ok(json!({ "ok": true, "action": "retire_node", "id": id.to_string() }))
             }
             NarrativeAction::GetNode => {
                 let id = parse_uuid(&input, "id")?;
@@ -512,8 +863,14 @@ impl AgentTool for NarrativeTool {
             }
             NarrativeAction::ListNodes => {
                 let project_id = parse_uuid(&input, "project_id")?;
-                let list = self.service.list_nodes(project_id).await?;
-                Ok(json!({ "ok": true, "action": "list_nodes", "data": list }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let (items, total) = self.service.list_nodes_page(project_id, limit, offset).await?;
+                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|x| agent::pick_fields(x, &["id", "title", "node_type", "status", "parent_id"]))
+                    .collect();
+                Ok(agent::list_envelope("list_nodes", data, total, limit, offset, "叙事节点", vec![]))
             }
         }
     }
@@ -528,7 +885,15 @@ pub enum StorylineAction {
     CreateStoryline,
     ReviseStoryline,
     RetireStoryline,
+    /// 按 id 读单条：比 list_storylines 省上下文（列表会返回所有线的全文）
+    GetStoryline,
     ListStorylines,
+    /// 建一条带类型的剧情线关系（驱动 / 依赖 / 交汇 / 对冲 / 包含）
+    RelateStorylines,
+    /// 删除一条剧情线关系
+    UnrelateStorylines,
+    /// 列出剧情线之间的关系边（含类型与两端名字）
+    ListStorylineRelations,
 }
 
 pub struct StorylineTool {
@@ -547,7 +912,11 @@ pub fn register_storyline_tools(registry: &ToolRegistry, service: Arc<StorylineS
         StorylineAction::CreateStoryline,
         StorylineAction::ReviseStoryline,
         StorylineAction::RetireStoryline,
+        StorylineAction::GetStoryline,
         StorylineAction::ListStorylines,
+        StorylineAction::RelateStorylines,
+        StorylineAction::UnrelateStorylines,
+        StorylineAction::ListStorylineRelations,
     ] {
         registry.register(Arc::new(StorylineTool::new(a, service.clone())));
     }
@@ -558,6 +927,10 @@ fn storyline_name(a: StorylineAction) -> &'static str {
         StorylineAction::CreateStoryline => "create_storyline",
         StorylineAction::ReviseStoryline => "revise_storyline",
         StorylineAction::RetireStoryline => "retire_storyline",
+        StorylineAction::GetStoryline => "get_storyline",
+        StorylineAction::RelateStorylines => "relate_storylines",
+        StorylineAction::UnrelateStorylines => "unrelate_storylines",
+        StorylineAction::ListStorylineRelations => "list_storyline_relations",
         StorylineAction::ListStorylines => "list_storylines",
     }
 }
@@ -571,42 +944,110 @@ fn storyline_description(a: StorylineAction) -> String {
             visibility='hidden' 一般配合 tone='dark' 用；\n\
             parent_id=挂到某条 storyline 下，副线必须挂到主线或其他副线。".into(),
         StorylineAction::ReviseStoryline => "修改剧情线名称 / 描述。这会修改已有产物。".into(),
-        StorylineAction::RetireStoryline => "删除一条剧情线。删除前请先用 list_storylines 确认目标 id。".into(),
+        StorylineAction::RetireStoryline => "语义化结束一条剧情线（**即 delete_storyline**，逻辑删除）。删除前请先用 list_storylines 确认目标 id。".into(),
+        StorylineAction::GetStoryline => {
+            "按 id 读取**单条**剧情线（含 arc_stages 阶段弧线）。\
+             已经知道 id 时用它，不要用 list_storylines 拉全部——列表会把每条线的全文都返回，\
+             白占上下文（本项目 storyline 全文近万字）。"
+                .into()
+        }
+        StorylineAction::RelateStorylines => {
+            "给两条剧情线建一条**带类型的关系边**（同向已存在则更新类型，幂等）。\
+             类型：Contains 包含 / Drives 驱动 / DependsOn 依赖 / Intersects 交汇 / Counters 对冲\
+             （也可写中文）。用它表达「A 推进得越多，B 压力越大」这类横向咬合——\
+             只靠 create_storyline 的 parent_id 只能挂成一棵树，画不出线咬合图。"
+                .into()
+        }
+        StorylineAction::UnrelateStorylines => {
+            "删除一条剧情线关系边（按关系 id，用 list_storyline_relations 查）。\
+             只删边，不动任何剧情线本身。"
+                .into()
+        }
+        StorylineAction::ListStorylineRelations => {
+            "列出剧情线之间的**关系边**（含类型 relation_type 与两端名字 from_name / to_name）。\
+             回答「这几条线怎么咬合 / 谁在驱动谁」时用它，不要逐条读剧情线正文。"
+                .into()
+        }
         StorylineAction::ListStorylines => "列出某项目的全部剧情线，用于检索上下文。".into(),
     }
 }
 
 fn storyline_schema(a: StorylineAction) -> Value {
     match a {
-        StorylineAction::CreateStoryline => json!({
-            "type": "object",
-            "properties": {
+        StorylineAction::CreateStoryline => {
+            let mut props = json!({
                 "name": { "type": "string" },
                 "description": { "type": "string" },
+                "status": {
+                    "type": "string",
+                    "description": format!("可选，默认 Planned。取值：{}（也可写中文：计划中 / 进行中 / 已解决 / 已放弃）", sl_domain::STORYLINE_STATUSES.join(" / "))
+                },
                 "importance": { "type": "string", "description": "可选：Main(主线) / Important / Normal / Minor" },
                 "tone": { "type": "string", "description": "明/暗线：light(明) / dark(暗)" },
                 "visibility": { "type": "string", "description": "可见性：visible / hidden（暗线一般 hidden）" },
                 "parent_id": { "type": "string", "description": "挂载到哪条 storyline 下（None 表示独立）" }
-            },
-            "required": ["name"]
-        }),
-        StorylineAction::ReviseStoryline => json!({
-            "type": "object",
-            "properties": {
+            });
+            // 阶段弧线：与人物 / 势力 / 地点**同构**（同一套字段与归一化）
+            splice_arc_stage_props(&mut props);
+            json!({ "type": "object", "properties": props, "required": ["name"] })
+        },
+        StorylineAction::ReviseStoryline => {
+            let mut props = json!({
                 "id": { "type": "string" },
                 "name": { "type": "string" },
-                "description": { "type": "string" }
-            },
-            "required": ["id"]
-        }),
+                "description": { "type": "string" },
+                "status": {
+                    "type": "string",
+                    "description": format!("推进剧情线状态（不传则保持原值）。取值：{}", sl_domain::STORYLINE_STATUSES.join(" / "))
+                },
+                "tone": { "type": "string", "description": "明/暗线：light(明) / dark(暗)（不传则保持原值）" },
+                "visibility": { "type": "string", "description": "可见性：visible / hidden（不传则保持原值）" }
+            });
+            // 阶段弧线：与人物 / 势力 / 地点同构（含 arc_stages_mode / remove_arc_stages）
+            splice_arc_stage_props(&mut props);
+            json!({ "type": "object", "properties": props, "required": ["id"] })
+        },
         StorylineAction::RetireStoryline => json!({
             "type": "object",
             "properties": { "id": { "type": "string" } },
             "required": ["id"]
         }),
+        StorylineAction::RelateStorylines => json!({
+            "type": "object",
+            "properties": {
+                "from_storyline_id": { "type": "string", "description": "起点剧情线 UUID（用 list_storylines 取得）" },
+                "to_storyline_id": { "type": "string", "description": "终点剧情线 UUID（方向有意义：驱动 / 依赖都是单向的）" },
+                "relation_type": {
+                    "type": "string",
+                    "description": format!("可选，默认 Contains。取值：{}（也可写中文：包含 / 驱动 / 依赖 / 交汇 / 对冲）", sl_domain::STORYLINE_RELATION_TYPES.join(" / "))
+                }
+            },
+            "required": ["from_storyline_id", "to_storyline_id"]
+        }),
+        StorylineAction::UnrelateStorylines => json!({
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "关系 id（用 list_storyline_relations 查）" } },
+            "required": ["id"]
+        }),
+        StorylineAction::ListStorylineRelations => json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）" }
+            },
+            "required": []
+        }),
+        StorylineAction::GetStoryline => json!({
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "剧情线 UUID（用 list_storylines 取得）" } },
+            "required": ["id"]
+        }),
         StorylineAction::ListStorylines => json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
+            },
             "required": []
         }),
     }
@@ -633,30 +1074,147 @@ impl AgentTool for StorylineTool {
                     Some(s) if !s.is_empty() => Some(Uuid::parse_str(s).map_err(|e| anyhow::anyhow!("parent_id 非法: {}", e))?),
                     _ => None,
                 };
+                // 枚举入参一律经 domain 枚举校验：非法值在这里报错，
+                // 不再把脏字符串写进库（写进去后前端按状态筛选就全失准了）。
+                let status = match opt_enum_arg(
+                    &input,
+                    "status",
+                    |s| sl_domain::StorylineStatus::parse(s).map(|v| v.as_str()),
+                    sl_domain::STORYLINE_STATUSES,
+                )? {
+                    Some(v) => v,
+                    None => "Planned",
+                };
+                let importance = match opt_enum_arg(
+                    &input,
+                    "importance",
+                    |s| sl_domain::StorylineImportance::parse(s).map(|v| v.as_str()),
+                    sl_domain::STORYLINE_IMPORTANCES,
+                )? {
+                    Some(v) => v,
+                    None => "Normal",
+                };
+                let tone = match opt_enum_arg(
+                    &input,
+                    "tone",
+                    |s| sl_domain::StorylineTone::parse(s).map(|v| v.as_str()),
+                    &["light", "dark"],
+                )? {
+                    Some(v) => v,
+                    None => "light",
+                };
+                let visibility = match opt_enum_arg(
+                    &input,
+                    "visibility",
+                    |s| sl_domain::StorylineVisibility::parse(s).map(|v| v.as_str()),
+                    &["visible", "hidden"],
+                )? {
+                    Some(v) => v,
+                    None => "visible",
+                };
+
+                // 阶段弧线（可选）：与人物 / 势力 / 地点同一套归一化
+                // （字符串简写 → {stage}、screen_weight 中文规范化、role/stage_role 等价键）
+                let arc_stages = match input.get("arc_stages") {
+                    Some(v) if !v.is_null() => {
+                        let arr = v
+                            .as_array()
+                            .ok_or_else(|| anyhow::anyhow!("arc_stages 应为数组"))?;
+                        let normalized: Vec<Value> = arr
+                            .iter()
+                            .map(normalize_arc_stage_item)
+                            .collect::<Result<Vec<_>>>()?;
+                        Some(Value::Array(normalized))
+                    }
+                    _ => None,
+                };
                 let s = self
                     .service
                     .create_storyline(
                         project_id,
                         name,
                         opt_str(&input, "description"),
-                        opt_str(&input, "importance").unwrap_or("Normal"),
-                        opt_str(&input, "tone").unwrap_or("light"),
-                        opt_str(&input, "visibility").unwrap_or("visible"),
+                        status,
+                        importance,
+                        tone,
+                        visibility,
                         parent_uuid,
+                        arc_stages.as_ref(),
                     )
                     .await?;
                 Ok(json!({ "ok": true, "action": "create_storyline", "data": s }))
             }
             StorylineAction::ReviseStoryline => {
                 let id = parse_uuid(&input, "id")?;
+                let status = opt_enum_arg(
+                    &input,
+                    "status",
+                    |s| sl_domain::StorylineStatus::parse(s).map(|v| v.as_str()),
+                    sl_domain::STORYLINE_STATUSES,
+                )?;
+                let name = opt_str(&input, "name");
+                let description = opt_str(&input, "description");
+                let tone = opt_str(&input, "tone");
+                let visibility = opt_str(&input, "visibility");
+
+                // 阶段弧线：与人物 / 势力 / 地点**同一套 merge 语义**
+                // （默认整块替换；arc_stages_mode=merge 时按 stage 名合并、未提及的保留；
+                //  只传 remove_arc_stages 时按阶段名删）。合并要先拿旧值，所以读一次。
+                let remove_arc_stages = string_array(input.get("remove_arc_stages"));
+                let obj = input
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("入参应为 JSON 对象"))?;
+                let arc_stages = match input.get("arc_stages") {
+                    Some(v) if !v.is_null() => {
+                        let existing = self
+                            .service
+                            .get_storyline(id)
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("剧情线不存在: {}", id))?;
+                        let mode = arc_stages_mode_of(obj, &remove_arc_stages);
+                        Some(apply_arc_stages(
+                            existing.get("arc_stages"),
+                            v,
+                            &mode,
+                            &remove_arc_stages,
+                        )?)
+                    }
+                    _ if !remove_arc_stages.is_empty() => {
+                        let existing = self
+                            .service
+                            .get_storyline(id)
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("剧情线不存在: {}", id))?;
+                        Some(remove_arc_stages_only(
+                            existing.get("arc_stages"),
+                            &remove_arc_stages,
+                        ))
+                    }
+                    _ => None,
+                };
+
+                // 一个要改的字段都没给：报错，而不是"成功但什么都没变"
+                if name.is_none()
+                    && description.is_none()
+                    && status.is_none()
+                    && tone.is_none()
+                    && visibility.is_none()
+                    && arc_stages.is_none()
+                {
+                    anyhow::bail!(
+                        "revise_storyline 至少要给一个要改的字段：name / description / status / tone / visibility / arc_stages"
+                    );
+                }
                 let s = self
                     .service
                     .update_storyline(
                         id,
-                        opt_str(&input, "name").ok_or_else(|| anyhow::anyhow!("name 缺失"))?,
-                        opt_str(&input, "description"),
-                        opt_str(&input, "tone"),
-                        opt_str(&input, "visibility"),
+                        name.as_deref(),
+                        description.as_deref(),
+                        status,
+                        tone.as_deref(),
+                        visibility.as_deref(),
+                        arc_stages.as_ref(),
                     )
                     .await?;
                 Ok(json!({ "ok": true, "action": "revise_storyline", "data": s }))
@@ -666,10 +1224,92 @@ impl AgentTool for StorylineTool {
                 self.service.delete_storyline(id).await?;
                 Ok(json!({ "ok": true, "action": "retire_storyline", "id": id.to_string() }))
             }
+            StorylineAction::RelateStorylines => {
+                let project_id = parse_uuid(&input, "project_id")?;
+                let from = parse_uuid(&input, "from_storyline_id")?;
+                let to = parse_uuid(&input, "to_storyline_id")?;
+                let relation_type = opt_enum_arg(
+                    &input,
+                    "relation_type",
+                    |s| sl_domain::StorylineRelationType::parse(s).map(|v| v.as_str()),
+                    sl_domain::STORYLINE_RELATION_TYPES,
+                )?
+                .unwrap_or("Contains");
+                let r = self
+                    .service
+                    .relate_storylines(project_id, from, to, relation_type)
+                    .await?;
+                Ok(json!({ "ok": true, "action": "relate_storylines", "data": r }))
+            }
+            StorylineAction::UnrelateStorylines => {
+                let id = parse_uuid(&input, "id")?;
+                self.service.unrelate_storylines(id).await?;
+                Ok(json!({ "ok": true, "action": "unrelate_storylines", "id": id.to_string() }))
+            }
+            StorylineAction::ListStorylineRelations => {
+                let project_id = parse_uuid(&input, "project_id")?;
+                let all = self.service.list_storyline_relations(project_id).await?;
+                // 附上两端名字：只给 uuid 的话调用方还得再查一次才知道是哪两条线
+                let storylines = self.service.list_storylines(project_id).await?;
+                let mut names: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                for s in &storylines {
+                    if let (Some(id), Some(name)) = (
+                        s.get("id").and_then(|v| v.as_str()),
+                        s.get("name").and_then(|v| v.as_str()),
+                    ) {
+                        names.insert(id.to_string(), name.to_string());
+                    }
+                }
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let total = all.len();
+                let data: Vec<Value> = all
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|r| {
+                        let mut item = r.clone();
+                        for (id_key, name_key) in
+                            [("parent_id", "from_name"), ("child_id", "to_name")]
+                        {
+                            if let Some(id) = item.get(id_key).and_then(|v| v.as_str()) {
+                                if let Some(n) = names.get(id) {
+                                    item[name_key] = json!(n);
+                                }
+                            }
+                        }
+                        item
+                    })
+                    .collect();
+                Ok(agent::list_envelope(
+                    "list_storyline_relations",
+                    data,
+                    total,
+                    limit,
+                    offset,
+                    "剧情线关系",
+                    vec![],
+                ))
+            }
+            StorylineAction::GetStoryline => {
+                let id = parse_uuid(&input, "id")?;
+                let s = self
+                    .service
+                    .get_storyline(id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("剧情线不存在: {}", id))?;
+                Ok(json!({ "ok": true, "action": "get_storyline", "data": s }))
+            }
             StorylineAction::ListStorylines => {
                 let project_id = parse_uuid(&input, "project_id")?;
-                let list = self.service.list_storylines(project_id).await?;
-                Ok(json!({ "ok": true, "action": "list_storylines", "data": list }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let (items, total) = self.service.list_storylines_page(project_id, limit, offset).await?;
+                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|x| agent::pick_fields(x, &["id", "name", "description", "importance", "status", "tone", "visibility"]))
+                    .collect();
+                Ok(agent::list_envelope("list_storylines", data, total, limit, offset, "剧情线", vec![]))
             }
         }
     }
@@ -690,22 +1330,89 @@ pub enum ForeshadowAction {
 pub struct ForeshadowTool {
     action: ForeshadowAction,
     service: Arc<ForeshadowService>,
+    /// 用来校验"埋点 / 回收点 / 父伏笔"确实存在（表上没有外键，见 ensure_* 注释）。
+    pool: PgPool,
 }
 
 impl ForeshadowTool {
-    pub fn new(action: ForeshadowAction, service: Arc<ForeshadowService>) -> Self {
-        Self { action, service }
+    pub fn new(action: ForeshadowAction, service: Arc<ForeshadowService>, pool: PgPool) -> Self {
+        Self {
+            action,
+            service,
+            pool,
+        }
+    }
+
+    /// 校验伏笔锚点指向的目标确实存在：**不写悬空 uuid**。
+    ///
+    /// 本表历来没有外键（跨表一致性由应用层保证），所以校验放在写入前：
+    /// 节点 / 父伏笔不存在就直接报错，而不是在库里留一个查不出名字的 id。
+    async fn ensure_node_exists(&self, id: Uuid) -> Result<()> {
+        let exists: Option<(i32,)> =
+            sqlx::query_as("SELECT 1 FROM narrative_node WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("校验叙事节点是否存在失败")?;
+        if exists.is_none() {
+            anyhow::bail!(
+                "叙事节点 {} 不存在：埋点 / 回收点必须指向真实节点（先用 list_nodes 查）",
+                id
+            );
+        }
+        Ok(())
+    }
+
+    async fn ensure_foreshadow_exists(&self, id: Uuid) -> Result<()> {
+        let exists: Option<(i32,)> =
+            sqlx::query_as("SELECT 1 FROM foreshadowing WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("校验父伏笔是否存在失败")?;
+        if exists.is_none() {
+            anyhow::bail!("父伏笔 {} 不存在：parent_foreshadow_id 必须指向真实伏笔", id);
+        }
+        Ok(())
+    }
+
+    /// 解析并校验三个锚点（不存在即报错）。
+    async fn resolve_anchors(
+        &self,
+        input: &Value,
+    ) -> Result<(Option<Uuid>, Option<Uuid>, Option<Uuid>)> {
+        let planted = opt_uuid_strict(input, "planted_node_id")?;
+        let payoff = opt_uuid_strict(input, "payoff_node_id")?;
+        let parent = opt_uuid_strict(input, "parent_foreshadow_id")?;
+        if let Some(n) = planted {
+            self.ensure_node_exists(n).await?;
+        }
+        if let Some(n) = payoff {
+            self.ensure_node_exists(n).await?;
+        }
+        if let Some(f) = parent {
+            self.ensure_foreshadow_exists(f).await?;
+        }
+        Ok((planted, payoff, parent))
     }
 }
 
-pub fn register_foreshadow_tools(registry: &ToolRegistry, service: Arc<ForeshadowService>) {
+pub fn register_foreshadow_tools(
+    registry: &ToolRegistry,
+    service: Arc<ForeshadowService>,
+    pool: PgPool,
+) {
     for a in [
         ForeshadowAction::CreateForeshadow,
         ForeshadowAction::ReviseForeshadow,
         ForeshadowAction::RetireForeshadow,
         ForeshadowAction::ListForeshadows,
     ] {
-        registry.register(Arc::new(ForeshadowTool::new(a, service.clone())));
+        registry.register(Arc::new(ForeshadowTool::new(
+            a,
+            service.clone(),
+            pool.clone(),
+        )));
     }
 }
 
@@ -720,10 +1427,19 @@ fn foreshadow_name(a: ForeshadowAction) -> &'static str {
 
 fn foreshadow_description(a: ForeshadowAction) -> String {
     match a {
-        ForeshadowAction::CreateForeshadow => "创建伏笔（含重要度与提示等级）。".into(),
-        ForeshadowAction::ReviseForeshadow => "修改伏笔名称 / 描述。这会修改已有产物。".into(),
-        ForeshadowAction::RetireForeshadow => "删除一条伏笔。删除前请先用 list_foreshadows 确认目标 id。".into(),
-        ForeshadowAction::ListForeshadows => "列出某项目的全部伏笔，用于检索上下文。".into(),
+        ForeshadowAction::CreateForeshadow => {
+            "创建伏笔（含重要度与提示等级）。**建议同时传 storyline_id** 把它挂到所属剧情线上——             未挂线的伏笔是孤儿：前端无法「点开一条暗线看它埋了哪些钩子」，             长篇连载里这是最有用的视图之一。先用 list_storylines 取剧情线 id。"
+                .into()
+        }
+        ForeshadowAction::ReviseForeshadow => {
+            "修改伏笔名称 / 描述 / 状态，并可改挂或解除剧情线归属（storyline_id / clear_storyline）。             **只传要改的字段，其余保持原值**——只想挂线时不必把名字再抄一遍。这会修改已有产物。"
+                .into()
+        }
+        ForeshadowAction::RetireForeshadow => "语义化结束一条伏笔（**即 delete_foreshadow**，逻辑删除）。删除前请先用 list_foreshadows 确认目标 id。".into(),
+        ForeshadowAction::ListForeshadows => {
+            "列出某项目的全部伏笔（含所属剧情线 storyline_id / storyline_name；             二者为 null 即「孤儿伏笔」，需要决定挂到哪条线上），用于检索上下文。"
+                .into()
+        }
     }
 }
 
@@ -734,8 +1450,25 @@ fn foreshadow_schema(a: ForeshadowAction) -> Value {
             "properties": {
                 "name": { "type": "string" },
                 "description": { "type": "string" },
-                "importance": { "type": "string", "description": "可选：Normal / High / Critical" },
-                "hint_level": { "type": "string", "description": "可选：提示等级" }
+                "status": {
+                    "type": "string",
+                    "description": format!("可选，默认 Planned。取值：{}（也可写中文：计划中 / 已引入 / 进行中 / 已揭示 / 已放弃）", fs_domain::FORESHADOWING_STATUSES.join(" / "))
+                },
+                "importance": {
+                    "type": "string",
+                    "description": format!("可选，默认 Normal。取值：{}（也可写中文：核心 / 重要 / 普通 / 次要）", fs_domain::FORESHADOWING_IMPORTANCES.join(" / "))
+                },
+                "hint_level": {
+                    "type": "string",
+                    "description": format!("可选，默认 Subtle。取值：{}（也可写中文：明示 / 直接 / 隐晦 / 隐藏）", fs_domain::HINT_LEVELS.join(" / "))
+                },
+                "hint_note": { "type": "string", "description": "可选：等级之外的**备注**（如「前期只透风，不揭示」）。等级是枚举、说明是自由文本，两者分开写——原先混在 hint_level 里，前端没法按等级筛选" },
+                "introduced_at": { "type": "string", "description": "可选：**埋点时机**（自由文本，如「前期」「第三卷」「第 12 章」）" },
+                "expected_reveal_at": { "type": "string", "description": "可选：**预期回收时机**（自由文本）。连载里「这条钩子埋在哪、打算哪章收」是刚需" },
+                "planted_node_id": { "type": "string", "description": "可选：**埋点所在节点**（哪一章埋的，用 list_nodes 取 id）。必须指向真实节点" },
+                "payoff_node_id": { "type": "string", "description": "可选：**计划回收所在节点**（打算哪一章收）" },
+                "parent_foreshadow_id": { "type": "string", "description": "可选：父伏笔 id —— 一条大伏笔挂几个小钩子（伏笔树）" },
+                "storyline_id": { "type": "string", "description": "所属剧情线 UUID（建议填：不填就是孤儿伏笔）。用 list_storylines 取得" }
             },
             "required": ["name"]
         }),
@@ -744,7 +1477,20 @@ fn foreshadow_schema(a: ForeshadowAction) -> Value {
             "properties": {
                 "id": { "type": "string" },
                 "name": { "type": "string" },
-                "description": { "type": "string" }
+                "description": { "type": "string" },
+                "status": {
+                    "type": "string",
+                    "description": format!("推进伏笔状态（不传则保持原值）。取值：{}", fs_domain::FORESHADOWING_STATUSES.join(" / "))
+                },
+                "hint_note": { "type": "string", "description": "等级之外的备注（不传则保持原值）" },
+                "introduced_at": { "type": "string", "description": "埋点时机（不传则保持原值）" },
+                "expected_reveal_at": { "type": "string", "description": "预期回收时机（不传则保持原值）" },
+                "actual_reveal_at": { "type": "string", "description": "**实际回收时机**：真收线时填上（不传则保持原值）。与 expected 对照就能看出哪些钩子拖了" },
+                "planted_node_id": { "type": "string", "description": "埋点所在节点（不传则保持原值）" },
+                "payoff_node_id": { "type": "string", "description": "计划回收所在节点（不传则保持原值）" },
+                "parent_foreshadow_id": { "type": "string", "description": "父伏笔 id（不传则保持原值）" },
+                "storyline_id": { "type": "string", "description": "改挂到该剧情线（不传则保持原归属）" },
+                "clear_storyline": { "type": "boolean", "description": "设为 true 解除剧情线归属（变回孤儿伏笔）" }
             },
             "required": ["id"]
         }),
@@ -755,7 +1501,10 @@ fn foreshadow_schema(a: ForeshadowAction) -> Value {
         }),
         ForeshadowAction::ListForeshadows => json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
+            },
             "required": []
         }),
     }
@@ -778,15 +1527,123 @@ impl AgentTool for ForeshadowTool {
             ForeshadowAction::CreateForeshadow => {
                 let project_id = parse_uuid(&input, "project_id")?;
                 let name = opt_str(&input, "name").ok_or_else(|| anyhow::anyhow!("name 缺失"))?;
+                let storyline_id = opt_uuid_strict(&input, "storyline_id")?;
+
+                // 默认值必须是**合法枚举值**：此前 hint_level 默认 "low"，
+                // 而合法集合里没有 low，于是新伏笔的暗示级别一直是脏数据。
+                let status = match opt_enum_arg(
+                    &input,
+                    "status",
+                    |s| fs_domain::ForeshadowingStatus::parse(s).map(|v| v.as_str()),
+                    fs_domain::FORESHADOWING_STATUSES,
+                )? {
+                    Some(v) => v,
+                    None => "Planned",
+                };
+                let importance = match opt_enum_arg(
+                    &input,
+                    "importance",
+                    |s| fs_domain::ForeshadowingImportance::parse(s).map(|v| v.as_str()),
+                    fs_domain::FORESHADOWING_IMPORTANCES,
+                )? {
+                    Some(v) => v,
+                    None => "Normal",
+                };
+                let hint_level = match opt_enum_arg(
+                    &input,
+                    "hint_level",
+                    |s| fs_domain::HintLevel::parse(s).map(|v| v.as_str()),
+                    fs_domain::HINT_LEVELS,
+                )? {
+                    Some(v) => v,
+                    None => "Subtle",
+                };
+
+                // 节点锚与伏笔树：先校验目标存在（表上无外键，避免写悬空 uuid）
+                let (planted_node_id, payoff_node_id, parent_foreshadow_id) =
+                    self.resolve_anchors(&input).await?;
                 let f = self
                     .service
-                    .create_foreshadow(project_id, name, opt_str(&input, "description"), opt_str(&input, "importance").unwrap_or("Normal"), opt_str(&input, "hint_level").unwrap_or("low"))
+                    .create_foreshadow(
+                        project_id,
+                        name,
+                        opt_str(&input, "description"),
+                        status,
+                        importance,
+                        hint_level,
+                        opt_str(&input, "hint_note"),
+                        opt_str(&input, "introduced_at"),
+                        opt_str(&input, "expected_reveal_at"),
+                        planted_node_id,
+                        payoff_node_id,
+                        parent_foreshadow_id,
+                        storyline_id,
+                    )
                     .await?;
                 Ok(json!({ "ok": true, "action": "create_foreshadow", "data": f }))
             }
             ForeshadowAction::ReviseForeshadow => {
                 let id = parse_uuid(&input, "id")?;
-                let f = self.service.update_foreshadow(id, opt_str(&input, "name").ok_or_else(|| anyhow::anyhow!("name 缺失"))?, opt_str(&input, "description")).await?;
+                // 归属三态：clear_storyline=true 解除；给了 storyline_id 改挂；都没给则不动
+                let clear = input
+                    .get("clear_storyline")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let storyline_id = if clear {
+                    Some(None)
+                } else {
+                    opt_uuid_strict(&input, "storyline_id")?.map(Some)
+                };
+                let status = opt_enum_arg(
+                    &input,
+                    "status",
+                    |s| fs_domain::ForeshadowingStatus::parse(s).map(|v| v.as_str()),
+                    fs_domain::FORESHADOWING_STATUSES,
+                )?;
+                let name = opt_str(&input, "name");
+                let description = opt_str(&input, "description");
+                let hint_note = opt_str(&input, "hint_note");
+                let introduced_at = opt_str(&input, "introduced_at");
+                let expected_reveal_at = opt_str(&input, "expected_reveal_at");
+                let actual_reveal_at = opt_str(&input, "actual_reveal_at");
+                // 节点锚与伏笔树（先校验存在）
+                let (planted_node_id, payoff_node_id, parent_foreshadow_id) =
+                    self.resolve_anchors(&input).await?;
+                // 一个要改的字段都没给：直接报错，而不是"成功但什么都没变"
+                if name.is_none()
+                    && description.is_none()
+                    && status.is_none()
+                    && storyline_id.is_none()
+                    && hint_note.is_none()
+                    && introduced_at.is_none()
+                    && expected_reveal_at.is_none()
+                    && actual_reveal_at.is_none()
+                    && planted_node_id.is_none()
+                    && payoff_node_id.is_none()
+                    && parent_foreshadow_id.is_none()
+                {
+                    anyhow::bail!(
+                        "revise_foreshadow 至少要给一个要改的字段：name / description / status / hint_note / \
+                         introduced_at / expected_reveal_at / actual_reveal_at / storyline_id"
+                    );
+                }
+                let f = self
+                    .service
+                    .update_foreshadow(
+                        id,
+                        name.as_deref(),
+                        description.as_deref(),
+                        status,
+                        hint_note.as_deref(),
+                        introduced_at.as_deref(),
+                        expected_reveal_at.as_deref(),
+                        actual_reveal_at.as_deref(),
+                        planted_node_id,
+                        payoff_node_id,
+                        parent_foreshadow_id,
+                        storyline_id,
+                    )
+                    .await?;
                 Ok(json!({ "ok": true, "action": "revise_foreshadow", "data": f }))
             }
             ForeshadowAction::RetireForeshadow => {
@@ -796,8 +1653,14 @@ impl AgentTool for ForeshadowTool {
             }
             ForeshadowAction::ListForeshadows => {
                 let project_id = parse_uuid(&input, "project_id")?;
-                let list = self.service.list_foreshadows(project_id).await?;
-                Ok(json!({ "ok": true, "action": "list_foreshadows", "data": list }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let (items, total) = self.service.list_foreshadows_page(project_id, limit, offset).await?;
+                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|x| agent::pick_fields(x, &["id", "name", "description", "status", "importance", "hint_level", "storyline_id", "storyline_name", "planted_node_id", "payoff_node_id", "parent_foreshadow_id"]))
+                    .collect();
+                Ok(agent::list_envelope("list_foreshadows", data, total, limit, offset, "伏笔", vec![]))
             }
         }
     }
@@ -853,7 +1716,7 @@ fn rule_description(a: RuleAction) -> String {
     match a {
         RuleAction::CreateRule => "创建世界规则（canon_rule），可指定规则级别 / 作用域 / 执行强度。".into(),
         RuleAction::ReviseRule => "修改世界规则的内容 / 级别。这会修改已有产物。".into(),
-        RuleAction::RetireRule => "删除一条世界规则。删除前请先用 get_rule / list_rules 确认目标 id。".into(),
+        RuleAction::RetireRule => "语义化结束一条世界规则（**即 delete_rule**，逻辑删除）。删除前请先用 get_rule / list_rules 确认目标 id。".into(),
         RuleAction::GetRule => "读取单一世界规则。".into(),
         RuleAction::ListRules => "列出某世界的全部规则，用于检索上下文。".into(),
     }
@@ -888,7 +1751,11 @@ fn rule_schema(a: RuleAction) -> Value {
         }),
         RuleAction::ListRules => json!({
             "type": "object",
-            "properties": { "world_id": { "type": "string", "description": "世界 UUID" } },
+            "properties": {
+                "world_id": { "type": "string", "description": "世界 UUID" },
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
+            },
             "required": ["world_id"]
         }),
     }
@@ -934,8 +1801,14 @@ impl AgentTool for RuleTool {
             }
             RuleAction::ListRules => {
                 let world_id = parse_uuid(&input, "world_id")?;
-                let list = self.service.list_rules(world_id).await?;
-                Ok(json!({ "ok": true, "action": "list_rules", "data": list }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let (items, total) = self.service.list_rules_page(world_id, limit, offset).await?;
+                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|x| agent::pick_fields(x, &["id", "rule_content", "rule_level", "enforcement", "affected_scope"]))
+                    .collect();
+                Ok(agent::list_envelope("list_rules", data, total, limit, offset, "世界规则", vec![]))
             }
         }
     }
@@ -984,7 +1857,11 @@ fn snapshot_name(a: SnapshotAction) -> &'static str {
 fn snapshot_description(a: SnapshotAction) -> String {
     match a {
         SnapshotAction::CreateSnapshot => "创建世界状态快照（故事时间 / 世界概要等可选）。".into(),
-        SnapshotAction::DeleteSnapshot => "删除一个快照。删除前请先用 list_snapshots 确认目标 id。".into(),
+        SnapshotAction::DeleteSnapshot => {
+            "**物理删除**一个快照（与 retire_* 的逻辑删除不同：快照是存档数据，删掉不留痕迹）。\
+             删除前请先用 list_snapshots 确认目标 id。"
+                .into()
+        }
         SnapshotAction::ListSnapshots => "列出某项目的全部快照，用于检索上下文。".into(),
     }
 }
@@ -1007,7 +1884,10 @@ fn snapshot_schema(a: SnapshotAction) -> Value {
         }),
         SnapshotAction::ListSnapshots => json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
+            },
             "required": []
         }),
     }
@@ -1042,8 +1922,14 @@ impl AgentTool for SnapshotTool {
             }
             SnapshotAction::ListSnapshots => {
                 let project_id = parse_uuid(&input, "project_id")?;
-                let list = self.service.list_snapshots(project_id).await?;
-                Ok(json!({ "ok": true, "action": "list_snapshots", "data": list }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let (items, total) = self.service.list_snapshots_page(project_id, limit, offset).await?;
+                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|x| agent::pick_fields(x, &["id", "name", "story_time", "progress", "known_characters_count", "known_locations_count", "unresolved_foreshadows_count", "active_threads_count"]))
+                    .collect();
+                Ok(agent::list_envelope("list_snapshots", data, total, limit, offset, "快照", vec![]))
             }
         }
     }
@@ -1201,7 +2087,11 @@ fn project_description(a: ProjectAction) -> String {
             角色、叙事生成的最强 prompt 约束。注意：premise 应在用户明确同意后才写入，\
             Agent 不要主动覆盖用户已确认的脑洞。"
             .into(),
-        ProjectAction::ListProjects => "列出所有项目（含 premise）。".into(),
+        ProjectAction::ListProjects => {
+            "列出项目（**目录页**：id / 名称 / 状态 / 更新时间，不含 premise / config 全文）。\
+             默认返回 20 条并给出 total；用 limit / offset 翻页。需要某个项目的完整设定用 get_project。"
+                .into()
+        }
     }
 }
 
@@ -1225,7 +2115,10 @@ fn project_schema(a: ProjectAction) -> Value {
         }),
         ProjectAction::ListProjects => json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）。列表只给目录字段（id / 名称 / 状态 / 更新时间）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
+            },
             "required": []
         }),
     }
@@ -1269,8 +2162,22 @@ impl AgentTool for ProjectTool {
                 Ok(json!({ "ok": true, "action": "update_project", "data": p }))
             }
             ProjectAction::ListProjects => {
-                let ps = self.service.list_projects().await?;
-                Ok(json!({ "ok": true, "action": "list_projects", "data": ps }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let (items, total) = self.service.list_projects_page(limit, offset).await?;
+                // 目录页投影：实测不投影时 1172 个项目 = 425,018 字符（每个都带 config 全文）。
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|p| agent::pick_fields(p, &["id", "name", "status", "updated_at"]))
+                    .collect();
+                Ok(agent::list_envelope(
+                    "list_projects",
+                    data,
+                    total,
+                    limit,
+                    offset,
+                    "项目",
+                    vec![],
+                ))
             }
         }
     }
@@ -1283,7 +2190,13 @@ impl AgentTool for ProjectTool {
 #[derive(Clone, Copy)]
 pub enum HistoryAction {
     CreateEvent,
+    /// 修改事件：此前事件只能建、不能改，结构化字段更是写不进去
+    ReviseEvent,
+    /// 语义化结束事件（逻辑删除）：此前事件连删除路径都没有
+    RetireEvent,
     CreateFact,
+    /// 语义化结束事实（逻辑删除）
+    RetireFact,
     ListEvents,
     ListFacts,
 }
@@ -1302,7 +2215,10 @@ impl HistoryTool {
 pub fn register_history_tools(registry: &ToolRegistry, service: Arc<HistoryService>) {
     for a in [
         HistoryAction::CreateEvent,
+        HistoryAction::ReviseEvent,
+        HistoryAction::RetireEvent,
         HistoryAction::CreateFact,
+        HistoryAction::RetireFact,
         HistoryAction::ListEvents,
         HistoryAction::ListFacts,
     ] {
@@ -1313,7 +2229,10 @@ pub fn register_history_tools(registry: &ToolRegistry, service: Arc<HistoryServi
 fn history_name(a: HistoryAction) -> &'static str {
     match a {
         HistoryAction::CreateEvent => "create_event",
+        HistoryAction::ReviseEvent => "revise_event",
+        HistoryAction::RetireEvent => "retire_event",
         HistoryAction::CreateFact => "create_fact",
+        HistoryAction::RetireFact => "retire_fact",
         HistoryAction::ListEvents => "list_events",
         HistoryAction::ListFacts => "list_facts",
     }
@@ -1321,9 +2240,27 @@ fn history_name(a: HistoryAction) -> &'static str {
 
 fn history_description(a: HistoryAction) -> String {
     match a {
-        HistoryAction::CreateEvent => "创建一条历史事件（Canon 历史记录）。".into(),
+        HistoryAction::CreateEvent => {
+            "创建一条历史事件（Canon 历史记录）。**建议填结构化字段**而不是把什么都塞进              description：发生时间 when、地点 where、参与方 participants（实体 id 数组）、             直接后果 consequences、揭示时机 reveal_at——填了之后才能按地点/暗线检索事件。"
+                .into()
+        }
+        HistoryAction::ReviseEvent => {
+            "修改已有事件（含结构化字段）。不传的字段保持原值；             attributes 内的键（where / participants / consequences / reveal_at）按传入的键逐个更新，             未传的键保持原值。"
+                .into()
+        }
+        HistoryAction::RetireEvent => {
+            "语义化结束一条事件（逻辑删除，`status` 置为 Deleted，数据保留可追溯）。             用于「建错了要撤回」。结束前先用 list_events 确认 id；不要期望它被物理删除。"
+                .into()
+        }
+        HistoryAction::RetireFact => {
+            "语义化结束一条事实（`status` 置为 Retired，数据保留）。             用于撤回写错的事实。结束后 list_facts 不再返回它。"
+                .into()
+        }
         HistoryAction::CreateFact => "创建一条事实（Fact，含确定性等级）。".into(),
-        HistoryAction::ListEvents => "列出某项目的历史事件（可按 limit 限制条数）。".into(),
+        HistoryAction::ListEvents => {
+            "列出某项目的历史事件（可按 limit 限制条数），返回含结构化字段             （event_type / event_time / attributes.where / participants / consequences / reveal_at）。"
+                .into()
+        }
         HistoryAction::ListFacts => "列出某项目的全部事实，用于检索上下文。".into(),
     }
 }
@@ -1334,9 +2271,72 @@ fn history_schema(a: HistoryAction) -> Value {
             "type": "object",
             "properties": {
                 "name": { "type": "string" },
-                "description": { "type": "string" }
+                "description": { "type": "string", "description": "事件说明（叙述性内容）" },
+                "event_type": { "type": "string", "description": "可选：事件类型，如 灾难 / 战争 / 失踪 / 崛起 / 转折" },
+                "when": { "type": "string", "description": "发生时间（如「千年之前」「第二卷·中年」）。请填这里而不是塞进 description" },
+                "era_order": { "type": "number", "description": "可选：**历史轴排序锚**（越小越早）。when 给人看、这个给排序用——中文时间没法比大小，没它历史轴排不对" },
+                "duration": { "type": "string", "description": "可选：持续时间" },
+                "where": { "type": "string", "description": "发生地点（叙述，如「全世界」「阴面·轮回渡」）" },
+                "participants": {
+                    "type": "array",
+                    "description": "参与方（相关实体）。填了才能从事件反查实体",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "entity_id": { "type": "string", "description": "实体 UUID（先用 list_entities 取得）" },
+                            "name": { "type": "string", "description": "该实体在事件中的称谓（可省）" },
+                            "role": { "type": "string", "description": "在事件中的角色（如 失踪者 / 主导者 / 受害者）" }
+                        },
+                        "required": ["entity_id"]
+                    }
+                },
+                "consequences": { "type": "string", "description": "直接后果（可多条，用换行分隔）" },
+                "reveal_at": { "type": "string", "description": "揭示时机（如「暗线，前期不透」「第三卷揭露」）" }
             },
             "required": ["name", "description"]
+        }),
+        HistoryAction::ReviseEvent => json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "事件 UUID（先用 list_events 取得）" },
+                "era_order": { "type": "number", "description": "历史轴排序锚（越小越早；不传则保持原值）" },
+                "name": { "type": "string" },
+                "description": { "type": "string" },
+                "event_type": { "type": "string" },
+                "when": { "type": "string", "description": "发生时间" },
+                "duration": { "type": "string" },
+                "where": { "type": "string" },
+                "participants": {
+                    "type": "array",
+                    "description": "参与方（按传入整体替换）",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "entity_id": { "type": "string" },
+                            "name": { "type": "string" },
+                            "role": { "type": "string" }
+                        },
+                        "required": ["entity_id"]
+                    }
+                },
+                "consequences": { "type": "string" },
+                "reveal_at": { "type": "string" }
+            },
+            "required": ["id"]
+        }),
+        HistoryAction::RetireEvent => json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "事件 UUID（先用 list_events 取得）" }
+            },
+            "required": ["id"]
+        }),
+        HistoryAction::RetireFact => json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "事实 UUID（先用 list_facts 取得）" }
+            },
+            "required": ["id"]
         }),
         HistoryAction::CreateFact => json!({
             "type": "object",
@@ -1350,13 +2350,18 @@ fn history_schema(a: HistoryAction) -> Value {
         HistoryAction::ListEvents => json!({
             "type": "object",
             "properties": {
-                "limit": { "type": "number", "description": "可选，默认 50" }
+                "order_by": { "type": "string", "enum": ["recent", "era"], "description": "可选，默认 recent（最近优先）；传 era 按**历史轴**排序（依赖 era_order，未标定的排最后）" },
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
             },
             "required": []
         }),
         HistoryAction::ListFacts => json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "limit": { "type": "number", "description": format!("**可选**：本页条数，默认 {}，上限 {}（超过报错）", agent::LIST_DEFAULT_LIMIT, agent::LIST_MAX_LIMIT) },
+                "offset": { "type": "number", "description": "**可选**：从第几条开始（默认 0）；返回里的 next_offset 就是下一页该传的值" }
+            },
             "required": []
         }),
     }
@@ -1380,8 +2385,60 @@ impl AgentTool for HistoryTool {
                 let project_id = parse_uuid(&input, "project_id")?;
                 let name = opt_str(&input, "name").ok_or_else(|| anyhow::anyhow!("name 缺失"))?;
                 let desc = opt_str(&input, "description").ok_or_else(|| anyhow::anyhow!("description 缺失"))?;
-                let e = self.service.create_event(project_id, name, desc).await?;
+                let attributes = application::history_service::collect_event_attributes(&input)?;
+                let e = self
+                    .service
+                    .create_event(
+                        project_id,
+                        name,
+                        desc,
+                        opt_str(&input, "event_type"),
+                        opt_str(&input, "when"),
+                        opt_str(&input, "duration"),
+                        &attributes,
+                        opt_i64_strict(&input, "era_order")?,
+                    )
+                    .await?;
                 Ok(json!({ "ok": true, "action": "create_event", "data": e }))
+            }
+            HistoryAction::ReviseEvent => {
+                let id = parse_uuid(&input, "id")?;
+                // attributes 只在「本次确实传了相关键」时才提交，
+                // 否则会把库里已有的 where / participants 清空
+                let attributes = application::history_service::collect_event_attributes(&input)?;
+                let attributes = if attributes
+                    .as_object()
+                    .map(|o| o.is_empty())
+                    .unwrap_or(true)
+                {
+                    None
+                } else {
+                    Some(attributes)
+                };
+                let e = self
+                    .service
+                    .update_event(
+                        id,
+                        opt_str_owned(&input, "name").as_deref(),
+                        opt_str_owned(&input, "description").as_deref(),
+                        opt_str_owned(&input, "event_type").as_deref(),
+                        opt_str_owned(&input, "when").as_deref(),
+                        opt_str_owned(&input, "duration").as_deref(),
+                        attributes.as_ref(),
+                        opt_i64_strict(&input, "era_order")?,
+                    )
+                    .await?;
+                Ok(json!({ "ok": true, "action": "revise_event", "data": e }))
+            }
+            HistoryAction::RetireEvent => {
+                let id = parse_uuid(&input, "id")?;
+                self.service.delete_event(id).await?;
+                Ok(json!({ "ok": true, "action": "retire_event", "id": id.to_string() }))
+            }
+            HistoryAction::RetireFact => {
+                let id = parse_uuid(&input, "id")?;
+                self.service.delete_fact(id).await?;
+                Ok(json!({ "ok": true, "action": "retire_fact", "id": id.to_string() }))
             }
             HistoryAction::CreateFact => {
                 let project_id = parse_uuid(&input, "project_id")?;
@@ -1392,14 +2449,31 @@ impl AgentTool for HistoryTool {
             }
             HistoryAction::ListEvents => {
                 let project_id = parse_uuid(&input, "project_id")?;
-                let limit = opt_i64(&input, "limit").unwrap_or(50);
-                let list = self.service.list_events(project_id, limit).await?;
-                Ok(json!({ "ok": true, "action": "list_events", "data": list }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                // 排序锚：`when` 是给人看的中文自由文本（「远昔」「缓变」），没法比大小，
+                // 所以「按历史轴看」要显式传 order_by="era"（依赖 era_order 数值锚）。
+                let order_by = opt_str(&input, "order_by").unwrap_or("recent");
+                let (items, total) = self
+                    .service
+                    .list_events_page_ordered(project_id, limit, offset, order_by.trim())
+                    .await?;
+                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|x| agent::pick_fields(x, &["id", "name", "event_type", "event_time", "duration", "description"]))
+                    .collect();
+                Ok(agent::list_envelope("list_events", data, total, limit, offset, "历史事件", vec![]))
             }
             HistoryAction::ListFacts => {
                 let project_id = parse_uuid(&input, "project_id")?;
-                let list = self.service.list_facts(project_id).await?;
-                Ok(json!({ "ok": true, "action": "list_facts", "data": list }))
+                let (limit, offset) = agent::parse_page_args(&input)?;
+                let (items, total) = self.service.list_facts_page(project_id, limit, offset).await?;
+                // 目录页投影：只给列表需要的字段（实测不投影时这些列表可到上万字符）
+                let data: Vec<Value> = items
+                    .iter()
+                    .map(|x| agent::pick_fields(x, &["id", "content", "category", "certainty", "status"]))
+                    .collect();
+                Ok(agent::list_envelope("list_facts", data, total, limit, offset, "事实", vec![]))
             }
         }
     }
@@ -1430,20 +2504,20 @@ pub fn register_all_domain_tools(registry: &ToolRegistry, pool: &PgPool) {
     register_faction_profile_tools(registry, entity.clone());
     register_character_tools(registry, entity.clone());
     registry.register(Arc::new(BulkLocationProfileTool::new(entity.clone())));
-    registry.register(Arc::new(BulkCharacterProfileTool::new(entity)));
+    registry.register(Arc::new(BulkCharacterProfileTool::new(entity.clone())));
 
     let narrative = Arc::new(NarrativeService::new(
         Arc::new(DbNarrativeRepositoryPort::new(pool.clone())),
         committer.clone(),
         resolver.clone(),
     ));
-    register_narrative_tools(registry, narrative);
+    register_narrative_tools(registry, narrative.clone());
 
     let storyline = Arc::new(StorylineService::new(Arc::new(DbStorylineRepositoryPort::new(pool.clone()))));
-    register_storyline_tools(registry, storyline);
+    register_storyline_tools(registry, storyline.clone());
 
     let foreshadow = Arc::new(ForeshadowService::new(Arc::new(DbForeshadowRepositoryPort::new(pool.clone()))));
-    register_foreshadow_tools(registry, foreshadow);
+    register_foreshadow_tools(registry, foreshadow.clone(), pool.clone());
 
     let rule = Arc::new(RuleService::new(Arc::new(DbRuleRepositoryPort::new(pool.clone()))));
     register_rule_tools(registry, rule);
@@ -1459,12 +2533,18 @@ pub fn register_all_domain_tools(registry: &ToolRegistry, pool: &PgPool) {
 
     let project = Arc::new(ProjectService::new(
         Arc::new(DbProjectRepositoryPort::new(pool.clone())),
-        world,
+        world.clone(),
     ));
-    register_project_tools(registry, project);
+    register_project_tools(registry, project.clone());
 
     let history = Arc::new(HistoryService::new(Arc::new(DbHistoryRepositoryPort::new(pool.clone()))));
-    register_history_tools(registry, history);
+    register_history_tools(registry, history.clone());
+
+    // 轻量全景索引：把「项目进行到什么情况」压成一次 ≤3K 字符的调用。
+    // 原先这个问题靠 batch_call 批量拉全量，实测一次产生 78,616 字符的工具结果。
+    registry.register(Arc::new(ProjectIndexTool::new(
+        project, entity, world, narrative, storyline, foreshadow, history,
+    )));
 
     // 引导推进工具（confirm_step）：纯 pool + agent::guide::validate_step，
     // 不依赖任何 service（避免把"推进阶段"耦合到任何具体业务层）。
@@ -1474,6 +2554,127 @@ pub fn register_all_domain_tools(registry: &ToolRegistry, pool: &PgPool) {
 // ============================================================
 // Guide（引导推进）工具
 // ============================================================
+
+/// 组装「引导阶段校验」所需的项目快照。
+///
+/// `confirm_step` 与 `get_project_status` 共用：两者要判断的正是同一组产物
+/// （premise / 世界观规则 / 各类实体数 / 剧情线挂载），各写一份必然会漂移。
+///
+/// **所有 SQL 失败都向上报错**：查不到数据只意味着"校验函数看不到"，
+/// 若静默当成 0，用户点「确认推进」会看到"还差 3 个地点"——而他其实有 5 个。
+/// 这种假阴性比直接报错难查得多。
+async fn project_status_snapshot(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<(MinCompleteSnapshot, Value)> {
+    let project_row: Option<(Option<String>, Value)> = sqlx::query_as(
+        "SELECT premise, COALESCE(config, '{}'::jsonb) FROM project WHERE id = $1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .context("读取项目前提 / config 失败")?;
+    let (premise, config) =
+        project_row.ok_or_else(|| anyhow::anyhow!("项目不存在: {}", project_id))?;
+
+    let mut snapshot = MinCompleteSnapshot::default();
+    snapshot.project_premise = premise;
+
+    let world_row: Option<(Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT id, description FROM world WHERE project_id = $1 AND is_main = true LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .context("读取主世界失败")?;
+
+    if let Some((world_id, world_desc)) = world_row {
+        snapshot.world_description = world_desc;
+        let (rule_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM canon_rule WHERE world_id = $1")
+                .bind(world_id)
+                .fetch_one(pool)
+                .await
+                .context("统计世界规则数失败")?;
+        snapshot.world_rule_entity_count = rule_count;
+    }
+
+    // 各类实体数量（按 entity_type.name 筛，排除逻辑删除）
+    for (kind_name, counter) in &[
+        ("Location", "location_entity_count"),
+        ("Faction", "faction_entity_count"),
+        ("Item", "item_entity_count"),
+        ("Character", "character_entity_count"),
+        ("golden_finger", "golden_finger_entity_count"),
+    ] {
+        let (n,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM entity e \
+             JOIN entity_type et ON et.id = e.entity_type_id \
+             WHERE e.project_id = $1 AND et.name = $2 AND e.status != 'Deleted'",
+        )
+        .bind(project_id)
+        .bind(*kind_name)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("统计 {} 实体数失败", kind_name))?;
+        match *counter {
+            "location_entity_count" => snapshot.location_entity_count = n,
+            "faction_entity_count" => snapshot.faction_entity_count = n,
+            "item_entity_count" => snapshot.item_entity_count = n,
+            "character_entity_count" => snapshot.character_entity_count = n,
+            "golden_finger_entity_count" => snapshot.golden_finger_entity_count = n,
+            other => anyhow::bail!("未知的实体计数目标：{}", other),
+        }
+    }
+
+    // 金手指是否已与角色建立关系（拥有 → 主角）
+    let (has_rel,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM relation r \
+         JOIN entity src ON src.id = r.source_entity_id \
+         JOIN entity_type src_et ON src_et.id = src.entity_type_id \
+         JOIN entity dst ON dst.id = r.target_entity_id \
+         JOIN entity_type dst_et ON dst_et.id = dst.entity_type_id \
+         WHERE r.project_id = $1 AND r.valid_until IS NULL \
+         AND ((src_et.name = 'golden_finger' AND dst_et.name = 'Character') \
+           OR (src_et.name = 'Character' AND dst_et.name = 'golden_finger'))",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .context("统计金手指关系失败")?;
+    snapshot.golden_finger_has_relation_to_protagonist = has_rel > 0;
+
+    // 剧情线：主线按 importance = 'Main' 判定（非 Main 即副线）
+    let storyline_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id::text, COALESCE(importance, 'Normal') FROM storyline WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .context("统计剧情线失败")?;
+    snapshot.storyline_total_count = storyline_rows.len() as i64;
+    let main_count = storyline_rows
+        .iter()
+        .filter(|(_, importance)| importance == "Main")
+        .count() as i64;
+    snapshot.main_storyline_count = main_count;
+    snapshot.sub_storyline_count = (snapshot.storyline_total_count - main_count).max(0);
+
+    // 副线挂载数：子节点非主线且父节点存在
+    let (attached_count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM storyline_relation r \
+         WHERE r.project_id = $1 \
+         AND EXISTS (SELECT 1 FROM storyline c WHERE c.id = r.child_id AND c.importance != 'Main')",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .context("统计副线挂载数失败")?;
+    snapshot.attached_storyline_count = attached_count;
+
+    Ok((snapshot, config))
+}
+
 //
 // 单一动作 confirm_step：用户在前端点"确认推进"按钮触发（不是 agent 调用）。
 // 工具内部从 DB 查 MinCompleteSnapshot → 调 agent::guide::validate_step
@@ -1495,7 +2696,110 @@ impl GuideTool {
 }
 
 pub fn register_guide_tools(registry: &ToolRegistry, pool: PgPool) {
-    registry.register(Arc::new(GuideTool::new(pool)));
+    registry.register(Arc::new(GuideTool::new(pool.clone())));
+    // 只读的进度查询：与 confirm_step 共用同一套快照与校验，
+    // 但**绝不推进**任何东西（问进度不该有副作用）。
+    registry.register(Arc::new(ProjectStatusTool::new(pool)));
+}
+
+/// 项目引导进度查询（只读）。
+///
+/// 存在的理由：以前只有「注入到 prompt 的当前阶段文本」这一条线索，
+/// 被问「我们现在到哪一步了」时只能含糊作答。这个工具把「当前阶段 + 每一步
+/// 到底缺什么」摆出来，答案与 confirm_step 的判定完全一致（共用快照与 validate_step），
+/// 不会出现「这里说就绪、点按钮却报缺东西」。
+pub struct ProjectStatusTool {
+    pool: PgPool,
+}
+
+impl ProjectStatusTool {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl AgentTool for ProjectStatusTool {
+    fn name(&self) -> String {
+        "get_project_status".to_string()
+    }
+
+    fn description(&self) -> String {
+        "查询本项目当前的引导进度：当前阶段、每个阶段的就绪情况、以及未就绪阶段**还缺什么**。         只读，不会推进阶段（推进要由前端用户点按钮）。         被问「我们现在到哪一步了 / 还差什么」时用它作答，不要凭印象猜。"
+            .to_string()
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": { "type": "string", "description": "项目 UUID（框架会自动注入当前会话的项目）" }
+            },
+            "required": ["project_id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let project_id = parse_uuid(&input, "project_id")?;
+        let mut report = guide_status(&self.pool, project_id).await?;
+        report["ok"] = json!(true);
+        report["action"] = json!("get_project_status");
+        Ok(report)
+    }
+}
+
+/// 组装「引导进度」只读报告：当前阶段 + 每一步的就绪情况 + 未就绪步骤还缺什么。
+///
+/// **三个消费方共用这一份实现**：`get_project_status` 工具（AI 回答"还差什么"）、
+/// `GET /projects/{id}/guide/status` 接口（前端步骤条打对勾，它调的就是这个工具）、
+/// 以及 `confirm_step` 的推进校验（同一个快照 + 同一个 `validate_step`）。
+/// 三处若各写一套判定，就会出现「界面打了勾、点推进却报缺东西」这种无人能查的分叉。
+async fn guide_status(pool: &PgPool, project_id: Uuid) -> Result<Value> {
+    let (snapshot, config) = project_status_snapshot(pool, project_id).await?;
+
+    let current_step = config
+        .get("current_step")
+        .and_then(|v| v.as_str())
+        .unwrap_or(agent::guide::INITIAL_STEP)
+        .to_string();
+
+    let mut steps = Vec::new();
+    for step in agent::guide::STEPS {
+        let report = validate_step(step.key, &snapshot);
+        let status = match step.key {
+            k if k == current_step => "current",
+            _ if report.passed => "complete",
+            _ => "pending",
+        };
+        steps.push(json!({
+            "key": step.key,
+            "title": step.title,
+            "group": step.group,
+            "status": status,
+            "ready": report.passed,
+            "next": if step.next.is_empty() { Value::Null } else { json!(step.next) },
+            "missing": report.missing,
+        }));
+    }
+
+    let current = steps
+        .iter()
+        .find(|s| s.get("key").and_then(|v| v.as_str()) == Some(current_step.as_str()))
+        .cloned();
+
+    Ok(json!({
+        "current_step": current_step,
+        "current_title": current
+            .as_ref()
+            .and_then(|c| c.get("title").cloned())
+            .unwrap_or(Value::Null),
+        // 当前阶段是否已满足推进条件：true 时应当提示用户可以点「确认推进」
+        "current_ready": current
+            .as_ref()
+            .and_then(|c| c.get("ready").cloned())
+            .unwrap_or(json!(false)),
+        "steps": steps,
+    }))
 }
 
 #[async_trait]
@@ -1525,128 +2829,7 @@ impl AgentTool for GuideTool {
     async fn execute(&self, input: Value) -> Result<Value> {
         let project_id = parse_uuid(&input, "project_id")?;
 
-        // 1. 取 project（含 premise、config.current_step）
-        let project_row: Option<(String, Option<String>, Value)> = sqlx::query_as(
-            "SELECT id::text, premise, COALESCE(config, '{}'::jsonb) FROM project WHERE id = $1",
-        )
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("Failed to load project")?;
-        let (pid, premise, config) = project_row.ok_or_else(|| {
-            anyhow::anyhow!("项目不存在: {}", project_id)
-        })?;
-        let _ = pid;
-
-        // 2. 拿主 world
-        let world_row: Option<(Uuid, Option<String>)> = sqlx::query_as(
-            "SELECT id, description FROM world WHERE project_id = $1 AND is_main = true LIMIT 1",
-        )
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("Failed to load main world")?;
-
-        // 3. 组装 snapshot
-        let mut snapshot = MinCompleteSnapshot::default();
-        snapshot.project_premise = premise;
-
-        if let Some((world_id, world_desc)) = world_row {
-            snapshot.world_description = world_desc;
-            // 查 canon_rule 条数（canon_rule 表无 status 列，按物理存在计数）
-            let (rule_count,): (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM canon_rule WHERE world_id = $1",
-            )
-            .bind(world_id)
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or((0,));
-            snapshot.world_rule_entity_count = rule_count;
-        }
-
-        // 4. 查 entity 数量（按 entity_type.name 筛）
-        //    5 步工作流需要 5 类：Location / Faction / Item / Character / golden_finger
-        for (kind_name, counter) in &[
-            ("Location", "location_entity_count"),
-            ("Faction", "faction_entity_count"),
-            ("Item", "item_entity_count"),
-            ("Character", "character_entity_count"),
-            ("golden_finger", "golden_finger_entity_count"),
-        ] {
-            let (n,): (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM entity e \
-                 JOIN entity_type et ON et.id = e.entity_type_id \
-                 WHERE e.project_id = $1 AND et.name = $2 \
-                 AND e.status != 'Deleted'",
-            )
-            .bind(project_id)
-            .bind(*kind_name)
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or((0,));
-            match *counter {
-                "location_entity_count" => snapshot.location_entity_count = n,
-                "faction_entity_count" => snapshot.faction_entity_count = n,
-                "item_entity_count" => snapshot.item_entity_count = n,
-                "character_entity_count" => snapshot.character_entity_count = n,
-                "golden_finger_entity_count" => snapshot.golden_finger_entity_count = n,
-                _ => {}
-            }
-        }
-
-        // 5. 查 golden_finger 是否有 relation 到主角（possesses 关系）
-        //    简化：只要存在 任意 relation 连接 golden_finger entity 和 character entity 即认为"已连"
-        let (has_rel,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM relation r \
-             JOIN entity src ON src.id = r.source_entity_id \
-             JOIN entity_type src_et ON src_et.id = src.entity_type_id \
-             JOIN entity dst ON dst.id = r.target_entity_id \
-             JOIN entity_type dst_et ON dst_et.id = dst.entity_type_id \
-             WHERE r.project_id = $1 \
-             AND ((src_et.name = 'golden_finger' AND dst_et.name = 'Character') \
-               OR (src_et.name = 'Character' AND dst_et.name = 'golden_finger'))",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or((0,));
-        snapshot.golden_finger_has_relation_to_protagonist = has_rel > 0;
-
-        // 6. character_entity_count 已在步骤 4 填好（与 Location/Faction/Item 一起按 entity_type 查）
-        //    这里不需要再查。注意：'character_entity_count' 包含主角 + 所有配角。
-
-        // 7. 查 storylines（storyline 用 importance='Main' 区分主线；
-        //    状态不过滤——新创建的 storyline 默认 Planned，物理存在即视为有产物）
-        let storyline_rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
-            "SELECT id::text, name, COALESCE(importance, 'Normal') FROM storyline \
-             WHERE project_id = $1",
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-        snapshot.storyline_total_count = storyline_rows.len() as i64;
-        // 主线判定：importance = 'Main'（业务约定；非 Main 即副线）
-        let main_count = storyline_rows
-            .iter()
-            .filter(|(_, _, importance)| importance == "Main")
-            .count() as i64;
-        snapshot.main_storyline_count = main_count;
-        // 副线数 = 总数 - 主线数
-        snapshot.sub_storyline_count = (snapshot.storyline_total_count - main_count).max(0);
-
-        // 8. 查挂载数（副线中 parent_id 非空 + 父节点存在 = "已挂载"）
-        let attached_count: i64 = sqlx::query_as(
-            "SELECT COUNT(*) FROM storyline_relation r \
-             WHERE r.project_id = $1 \
-             AND EXISTS (SELECT 1 FROM storyline c WHERE c.id = r.child_id AND c.importance != 'Main')",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .map(|(n,): (i64,)| n)
-        .unwrap_or(0);
-        snapshot.attached_storyline_count = attached_count;
+        let (snapshot, config) = project_status_snapshot(&self.pool, project_id).await?;
 
         // 8. 决定 current_step（优先 config.current_step，否则 premise 状态决定）
         let stored_step = config
@@ -1761,7 +2944,8 @@ fn location_profile_schema(a: LocationProfileAction) -> Value {
         LocationProfileAction::Get => json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "地点实体 UUID" }
+                "id": { "type": "string", "description": "地点实体 UUID" },
+                "include_schema": { "type": "boolean", "description": "**可选**：为 true 时额外返回每个可写字段的完整结构（type / enum / items / properties）。默认只返回字段名清单——完整结构约 6000 字符/次，不需要就别要" }
             },
             "required": ["id"]
         }),
@@ -1779,7 +2963,27 @@ fn location_profile_schema(a: LocationProfileAction) -> Value {
                 "economy": { "type": "string", "description": "经济" },
                 "rules": { "type": "string", "description": "该地特有的规则" },
                 "history": { "type": "string", "description": "历史" },
-                "narrative_usage": { "type": "string", "description": "叙事用途（在故事里承担什么作用）" }
+                "narrative_usage": { "type": "string", "description": "叙事用途（在故事里承担什么作用）" },
+                "aliases": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "别名 / 别称（整块替换）。用于「盘脊」这类俗称、旧称、异名——不要再把别名塞进 name 的括号里：那样系统里它们会是两个不同的串，按别名检索与去重都做不到。只增删个别别名请用 aliases_add / aliases_remove。"
+                },
+                "aliases_add": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "只追加这些别名（保留已有别名，重复的自动跳过）"
+                },
+                "aliases_remove": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "只移除这些别名"
+                },
+                "secrets": { "type": "string", "description": "地点隐藏的秘密（不为外人所知的事，如「那尊无名神像原本属于谁」）。暗线靠它被按揭示状态管理，不要塞进 description。" }
+            });
+            props["append"] = json!({
+                "type": "boolean",
+                "description": "为 true 时把本次传入的文本字段**追加**到原值后面（默认 false = 覆盖）。长文本分次写时用它。"
             });
             // 地点阶段只描述"叙事角色"的变化（主角藏身处→教团总部→主战场）；
             // 被烧毁 / 易主这类物理变化属于事件，不要塞进阶段。
@@ -1812,7 +3016,8 @@ impl AgentTool for LocationProfileTool {
                     "ok": true,
                     "action": "get_location_profile",
                     "data": profile.unwrap_or(json!({})),
-                    "writable_fields": writable_fields_meta(
+                    "writable_fields": writable_fields_for(
+                        &input,
                         &location_profile_schema(LocationProfileAction::Update)
                     )
                 }))
@@ -1828,12 +3033,33 @@ impl AgentTool for LocationProfileTool {
 
                 let mut merged = existing.as_object().cloned().unwrap_or_default();
                 if let Some(obj) = input.as_object() {
+                    // 字段名写错必须报错：地点档案原先不校验字段名，错名字会写进陌生键、
+                    // 落库时被 serde 丢掉，而工具仍回 ok: true（静默丢数据）。
+                    agent::ensure_known_fields(
+                        &input,
+                        &location_profile_schema(LocationProfileAction::Update),
+                        &["arc_stages_mode", "remove_arc_stages"],
+                    )?;
                     let remove_arc_stages = string_array(obj.get("remove_arc_stages"));
                     let arc_stages_mode = arc_stages_mode_of(obj, &remove_arc_stages);
+                    // append=true：文本字段追加写入（长文本分次写，不必重发整段）
+                    let append = obj
+                        .get("append")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     for (k, v) in obj {
-                        if k == "id" || k == "arc_stages_mode" || k == "remove_arc_stages" {
+                        if k == "id"
+                            || k == "append"
+                            || k == "arc_stages_mode"
+                            || k == "remove_arc_stages"
+                        {
                             continue;
                         }
+                        agent::ensure_known_subfields(
+                            k,
+                            v,
+                            &location_profile_schema(LocationProfileAction::Update),
+                        )?;
                         // 阶段弧线：人物 / 势力 / 地点同构（归一化 + 按 stage 名称 merge）
                         if k == "arc_stages" {
                             if !v.is_null() {
@@ -1847,10 +3073,38 @@ impl AgentTool for LocationProfileTool {
                             }
                             continue;
                         }
+                        // 别名：与角色档案同构的合并语义（整块替换 / 增 / 删）
+                        if k == "aliases" || k == "aliases_add" || k == "aliases_remove" {
+                            let add = string_array(obj.get("aliases_add"));
+                            let remove = string_array(obj.get("aliases_remove"));
+                            let existing_aliases = merged
+                                .get("aliases")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let list = match obj.get("aliases") {
+                                // 传了 aliases：整块替换为它，再叠加 add / remove
+                                Some(v) if !v.is_null() => {
+                                    let provided: Vec<Value> = v
+                                        .as_array()
+                                        .cloned()
+                                        .ok_or_else(|| anyhow::anyhow!("aliases 应为字符串数组"))?;
+                                    merge_aliases(&provided, &add, &remove)
+                                }
+                                _ => merge_aliases(&existing_aliases, &add, &remove),
+                            };
+                            merged.insert("aliases".into(), json!(list));
+                            continue;
+                        }
                         // 其余只接受字符串字段；None / 空串视为"未提供"，保持原值
                         if let Some(s) = v.as_str() {
                             if !s.trim().is_empty() {
-                                merged.insert(k.clone(), json!(s));
+                                let value = agent::append_or_replace(
+                                    merged.get(k).and_then(|v| v.as_str()),
+                                    s,
+                                    append,
+                                );
+                                merged.insert(k.clone(), json!(value));
                             }
                         }
                     }
@@ -1888,6 +3142,47 @@ impl AgentTool for LocationProfileTool {
 ///
 /// 单个地点出错**不会中断整批**：返回值里逐个列出失败项与原因，
 /// 模型可以据此只重试失败的那几个。
+/// 批量地点工具里单个 item 的字段契约。
+///
+/// 与单条 `update_location_profile` 的字段保持一致（含 `aliases` / `secrets` 与
+/// 阶段弧线）——批量补档案时能写的字段，不该比单条少。
+fn bulk_location_item_schema() -> Value {
+    let mut item_props = json!({
+        "id": { "type": "string", "description": "地点实体 UUID（必填）" },
+        "location_type": { "type": "string" },
+        "size": { "type": "string" },
+        "climate": { "type": "string" },
+        "era": { "type": "string" },
+        "accessibility": { "type": "string" },
+        "population": { "type": "string" },
+        "geography": { "type": "string" },
+        "appearance": { "type": "string" },
+        "economy": { "type": "string" },
+        "rules": { "type": "string" },
+        "history": { "type": "string" },
+        "narrative_usage": { "type": "string" },
+        "aliases": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "别名 / 别称（整块替换）。只增删个别别名请用 aliases_add / aliases_remove"
+        },
+        "aliases_add": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "只追加这些别名（保留已有别名，重复的自动跳过）"
+        },
+        "aliases_remove": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "只移除这些别名"
+        },
+        "secrets": { "type": "string", "description": "地点隐藏的秘密（不为外人所知的事）。暗线靠它被按揭示状态管理，不要塞进 description。" }
+    });
+    // 阶段弧线（与单条 update_location_profile 一致）
+    splice_arc_stage_props(&mut item_props);
+    json!({ "type": "object", "properties": item_props, "required": ["id"] })
+}
+
 pub struct BulkLocationProfileTool {
     service: Arc<EntityService>,
 }
@@ -1910,10 +3205,40 @@ impl BulkLocationProfileTool {
             .unwrap_or_else(|| json!({}));
         let mut merged = existing.as_object().cloned().unwrap_or_default();
         if let Some(obj) = item.as_object() {
+            // 字段名 / 子字段名与单条 update_location_profile 一样严格：
+            // 写错的名字会被 serde 静默丢掉，工具却回 ok: true。
+            agent::ensure_known_fields(
+                item,
+                &bulk_location_item_schema(),
+                &["arc_stages_mode", "remove_arc_stages"],
+            )?;
             let remove_arc_stages = string_array(obj.get("remove_arc_stages"));
             let arc_stages_mode = arc_stages_mode_of(obj, &remove_arc_stages);
             for (k, v) in obj {
                 if k == "id" || k == "arc_stages_mode" || k == "remove_arc_stages" {
+                    continue;
+                }
+                agent::ensure_known_subfields(k, v, &bulk_location_item_schema())?;
+                // 别名：与单条 update_location_profile 同构（整块替换 / 增 / 删）
+                if k == "aliases" || k == "aliases_add" || k == "aliases_remove" {
+                    let add = string_array(obj.get("aliases_add"));
+                    let remove = string_array(obj.get("aliases_remove"));
+                    let existing_aliases = merged
+                        .get("aliases")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let list = match obj.get("aliases") {
+                        Some(v) if !v.is_null() => {
+                            let provided: Vec<Value> = v
+                                .as_array()
+                                .cloned()
+                                .ok_or_else(|| anyhow::anyhow!("aliases 应为字符串数组"))?;
+                            merge_aliases(&provided, &add, &remove)
+                        }
+                        _ => merge_aliases(&existing_aliases, &add, &remove),
+                    };
+                    merged.insert("aliases".into(), json!(list));
                     continue;
                 }
                 // 阶段弧线：与单条 update_location_profile 同构
@@ -1960,34 +3285,13 @@ impl AgentTool for BulkLocationProfileTool {
     }
 
     fn input_schema(&self) -> Value {
-        let mut item_props = json!({
-            "id": { "type": "string", "description": "地点实体 UUID（必填）" },
-            "location_type": { "type": "string" },
-            "size": { "type": "string" },
-            "climate": { "type": "string" },
-            "era": { "type": "string" },
-            "accessibility": { "type": "string" },
-            "population": { "type": "string" },
-            "geography": { "type": "string" },
-            "appearance": { "type": "string" },
-            "economy": { "type": "string" },
-            "rules": { "type": "string" },
-            "history": { "type": "string" },
-            "narrative_usage": { "type": "string" }
-        });
-        // 批量地点同样支持阶段弧线（与单条 update_location_profile 一致）
-        splice_arc_stage_props(&mut item_props);
         json!({
             "type": "object",
             "properties": {
                 "profiles": {
                     "type": "array",
                     "description": "要更新的地点档案数组，建议每次 3~5 条",
-                    "items": {
-                        "type": "object",
-                        "properties": item_props,
-                        "required": ["id"]
-                    }
+                    "items": bulk_location_item_schema()
                 }
             },
             "required": ["profiles"]
@@ -2096,7 +3400,8 @@ fn golden_finger_schema(action: GoldenFingerAction) -> Value {
         GoldenFingerAction::Get => json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "金手指实体 UUID" }
+                "id": { "type": "string", "description": "金手指实体 UUID" },
+                "include_schema": { "type": "boolean", "description": "**可选**：为 true 时额外返回每个可写字段的完整结构（type / enum / items / properties）。默认只返回字段名清单——完整结构约 6000 字符/次，不需要就别要" }
             },
             "required": ["id"]
         }),
@@ -2240,7 +3545,8 @@ impl AgentTool for GoldenFingerProfileTool {
                 "action": "get_golden_finger",
                 "name": name,
                 "data": entity.get("attributes").cloned().unwrap_or(json!({})),
-                "writable_fields": writable_fields_meta(
+                "writable_fields": writable_fields_for(
+                    &input,
                     &golden_finger_schema(GoldenFingerAction::Update)
                 )
             })),
@@ -2374,30 +3680,82 @@ const FACTION_READONLY_FIELDS: [&str; 3] = ["entity_id", "created_at", "updated_
 /// 这样既不会因为"写法和库里不一样"就拒绝合理输入，也不会瞎猜一个类型存进去。
 fn normalize_entity_type(raw: &str) -> Option<&'static str> {
     let t = raw.trim();
-    match t.to_ascii_lowercase().as_str() {
-        "character" => Some("Character"),
-        "人物" | "角色" => Some("Character"),
-        "creature" => Some("Creature"),
-        "生物" | "怪物" | "魔兽" => Some("Creature"),
-        "event" => Some("Event"),
-        "事件" => Some("Event"),
-        "faction" => Some("Faction"),
-        "势力" | "门派" | "宗门" => Some("Faction"),
-        "item" => Some("Item"),
-        "物品" | "道具" | "装备" | "法宝" | "灵器" => Some("Item"),
-        "location" => Some("Location"),
-        "地点" | "场景" | "地图" => Some("Location"),
-        "organization" => Some("Organization"),
-        "组织" | "团体" => Some("Organization"),
-        "golden_finger" => Some("golden_finger"),
-        "金手指" => Some("golden_finger"),
-        _ => None,
+    let lower = t.to_ascii_lowercase();
+    // **从 [`ENTITY_TYPES`] 派生**，不再手写第二张 match 表：
+    // 以前这里是两份真相，新增类型时漏改一处就会出现「能创建但查不到」或
+    // 「列得出但创建不了」的割裂（加 Deity 时就踩到了）。
+    for (canonical, aliases) in ENTITY_TYPES {
+        if canonical.to_ascii_lowercase() == lower {
+            return Some(*canonical);
+        }
+        if aliases
+            .iter()
+            .any(|a| *a == t || a.to_ascii_lowercase() == lower)
+        {
+            return Some(*canonical);
+        }
+    }
+    None
+}
+
+/// 合法的实体类型清单：`(规范类型名, 可接受的别名)`。
+///
+/// 与 [`normalize_entity_type`] 的分工是明确的：那张映射表负责「解析用户写法」，
+/// 这张表负责「告诉调用方有哪些类型可写」。两者必须一起改——新增类型时两边都要加，
+/// 否则会出现「能创建但查不到」或「列得出但创建不了」的割裂。
+const ENTITY_TYPES: &[(&str, &[&str])] = &[
+    ("Character", &["人物", "角色"]),
+    // 神明 / 神祇：故事的核心存在也需要能建实体、挂关系、进图谱。
+    // 此前只有 Character / Creature 等，「神明 vs 对头」只能停在事件描述里当散文。
+    ("Deity", &["神明", "神祇", "神灵", "神"]),
+    ("Location", &["地点", "场景", "地图"]),
+    ("Faction", &["势力", "门派", "宗门"]),
+    ("Item", &["物品", "道具", "装备", "法宝", "灵器"]),
+    ("golden_finger", &["金手指"]),
+    ("Event", &["事件"]),
+    ("Creature", &["生物", "怪物", "魔兽"]),
+    ("Organization", &["组织", "团体"]),
+];
+
+/// 每种类型的一句话说明，让调用方不必靠类型名猜用途。
+fn entity_type_note(entity_type: &str) -> &'static str {
+    match entity_type {
+        "Character" => "人物角色",
+        "Deity" => "神明 / 神祇（超越性存在）",
+        "Location" => "地点 / 场景",
+        "Faction" => "势力 / 门派 / 宗门",
+        "Item" => "物品 / 道具 / 装备 / 法宝",
+        "golden_finger" => "金手指（主角独有能力体系）",
+        "Event" => "历史或剧情事件",
+        "Creature" => "生物 / 怪物 / 魔兽",
+        "Organization" => "组织 / 团体（非门派类）",
+        _ => "",
     }
 }
 
+/// 唯一的实体类型来源：`list_entity_types` 的返回值。
+///
+/// 存在的理由：类型名原先只硬编码在 Rust 的 `match` 分支里，模型看不到，
+/// 只能靠从返回数据里反推（「Character / Location 是推出来的，Faction / Item
+/// 是猜的」）。暴露出来之后，检索与创建都不必再猜。
+pub fn entity_types_catalog() -> Value {
+    Value::Array(
+        ENTITY_TYPES
+            .iter()
+            .map(|(canonical, aliases)| {
+                json!({
+                    "entity_type": canonical,
+                    "aliases": aliases,
+                    "note": entity_type_note(canonical),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// 实体类型无法识别时的统一提示。
-const ENTITY_TYPE_HINT: &str = "可传 Character / Location / Faction / Item / Organization / Creature / Event / golden_finger，\
-                                 或直接写中文「人物」「地点」「势力」「物品」「组织」「生物」「事件」「金手指」";
+const ENTITY_TYPE_HINT: &str = "可传 Character / Location / Faction / Item / Organization / Creature / Event / Deity / golden_finger，\
+                                 或直接写中文「人物」「地点」「势力」「物品」「组织」「生物」「事件」「神明」「金手指」";
 
 fn parse_entity_type(raw: &str) -> Result<&'static str> {
     normalize_entity_type(raw)
@@ -2442,6 +3800,25 @@ fn faction_profile_field_spec() -> Value {
 fn faction_profile_update_schema() -> Value {
     let mut props = faction_profile_field_spec();
     props["id"] = json!({ "type": "string", "description": "势力实体 UUID" });
+    props["append"] = json!({
+        "type": "boolean",
+        "description": "为 true 时把本次传入的文本字段**追加**到原值后面（默认 false = 覆盖）。长文本分次写时用它。"
+    });
+    props["aliases"] = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "别名 / 旧称 / 俗称（整块替换）。用于「炼器神宗」的旧号、简称等——不要塞进 name 的括号里，那样系统里会是两个不同的串。只增删个别别名请用 aliases_add / aliases_remove。"
+    });
+    props["aliases_add"] = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "只追加这些别名（保留已有别名，重复的自动跳过）"
+    });
+    props["aliases_remove"] = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "只移除这些别名"
+    });
     // 势力最需要阶段：崛起→扩张→鼎盛→分裂；status 用来记录"这一卷多强"
     splice_arc_stage_props(&mut props);
     json!({ "type": "object", "properties": props, "required": ["id"] })
@@ -2480,7 +3857,8 @@ impl AgentTool for FactionProfileTool {
             FactionProfileAction::Get => json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "势力实体 UUID" }
+                    "id": { "type": "string", "description": "势力实体 UUID" },
+                "include_schema": { "type": "boolean", "description": "**可选**：为 true 时额外返回每个可写字段的完整结构（type / enum / items / properties）。默认只返回字段名清单——完整结构约 6000 字符/次，不需要就别要" }
                 },
                 "required": ["id"]
             }),
@@ -2497,7 +3875,7 @@ impl AgentTool for FactionProfileTool {
                     "ok": true,
                     "action": "get_faction_profile",
                     "data": profile.unwrap_or(json!({})),
-                    "writable_fields": writable_fields_meta(&faction_profile_update_schema())
+                    "writable_fields": writable_fields_for(&input, &faction_profile_update_schema())
                 }))
             }
             FactionProfileAction::Update => {
@@ -2516,8 +3894,14 @@ impl AgentTool for FactionProfileTool {
                 if let Some(obj) = input.as_object() {
                     let remove_arc_stages = string_array(obj.get("remove_arc_stages"));
                     let arc_stages_mode = arc_stages_mode_of(obj, &remove_arc_stages);
+                    // append=true：文本字段追加写入（长文本分次写，不必重发整段）
+                    let append = obj
+                        .get("append")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     for (k, v) in obj {
                         if k == "id"
+                            || k == "append"
                             || FRAMEWORK_INJECTED_FIELDS.contains(&k.as_str())
                             || FACTION_READONLY_FIELDS.contains(&k.as_str())
                             || k == "arc_stages_mode"
@@ -2525,6 +3909,11 @@ impl AgentTool for FactionProfileTool {
                         {
                             continue;
                         }
+                        agent::ensure_known_subfields(
+                            k,
+                            v,
+                            &faction_profile_update_schema(),
+                        )?;
                         // 阶段弧线：人物 / 势力 / 地点同构（归一化 + 按 stage 名称 merge）
                         if k == "arc_stages" {
                             if !v.is_null() {
@@ -2538,6 +3927,28 @@ impl AgentTool for FactionProfileTool {
                             }
                             continue;
                         }
+                        // 别名：与角色 / 地点档案同构的合并语义（整块替换 / 增 / 删）
+                        if k == "aliases" || k == "aliases_add" || k == "aliases_remove" {
+                            let add = string_array(obj.get("aliases_add"));
+                            let remove = string_array(obj.get("aliases_remove"));
+                            let existing_aliases = merged
+                                .get("aliases")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let list = match obj.get("aliases") {
+                                Some(v) if !v.is_null() => {
+                                    let provided: Vec<Value> = v
+                                        .as_array()
+                                        .cloned()
+                                        .ok_or_else(|| anyhow::anyhow!("aliases 应为字符串数组"))?;
+                                    merge_aliases(&provided, &add, &remove)
+                                }
+                                _ => merge_aliases(&existing_aliases, &add, &remove),
+                            };
+                            merged.insert("aliases".into(), json!(list));
+                            continue;
+                        }
                         if !FACTION_PROFILE_FIELDS.contains(&k.as_str()) {
                             anyhow::bail!(
                                 "未知的势力档案字段：{}。可写字段只有：{} / arc_stages",
@@ -2548,7 +3959,12 @@ impl AgentTool for FactionProfileTool {
                         // 只接受非空字符串；空串视为"未提供"，保持原值
                         if let Some(s) = v.as_str() {
                             if !s.trim().is_empty() {
-                                merged.insert(k.clone(), json!(s));
+                                let value = agent::append_or_replace(
+                                    merged.get(k).and_then(|v| v.as_str()),
+                                    s,
+                                    append,
+                                );
+                                merged.insert(k.clone(), json!(value));
                             }
                         }
                     }
@@ -2905,7 +4321,8 @@ fn arc_stage_props() -> serde_json::Map<String, Value> {
                 "properties": {
                     "stage": { "type": "string", "description": "阶段名：前期 / 中期 / 后期，或卷1 / 卷2，或按地点命名" },
                     "order": { "type": "integer", "description": "排序用整数，越小越早。不填按数组顺序" },
-                    "role": { "type": "string", "description": "此阶段的身份 / 功能位（人物：第一个合伙人；势力：主角靠山；地点：主角据点）" },
+                    "role": { "type": "string", "description": "此阶段的**定位**（人物 / 势力 / 地点三个语境通用）：人物=这一阶段他是谁（第一个合伙人 / 弃子）；势力=这一阶段它在主角眼里的分量（靠山 / 主要对手 / 背景板）；地点=这一阶段的叙事位置（藏身处 / 据点 / 主战场）。等价写法 stage_role，只传一个即可" },
+                    "stage_role": { "type": "string", "description": "role 的等价写法（更中性的叫法，写势力 / 地点时读起来更顺）。与 role 同时给出且不一致会报错" },
                     "screen_weight": enum_schema(&ScreenWeight::ALL, "戏份：Light 轻 / Medium 中 / Heavy 重。不填表示不确定"),
                     "goal": { "type": "string", "description": "此阶段的目标（势力尤其需要：这一卷它想要什么）" },
                     "function": { "type": "string", "description": "此阶段的叙事功能（它为什么在这个阶段存在）" },
@@ -3283,6 +4700,35 @@ fn normalize_arc_stage_item(raw: &Value) -> Result<Value> {
     };
     obj["stage"] = json!(stage);
 
+    // role 的等价键 stage_role：更中性的叫法，写势力 / 地点语境时更顺。
+    // 两者都传且不一致时报错（不静默挑一个）；归一化后统一落回 role，
+    // 别名键必须删掉——它没有对应列，留着就是一次静默丢弃。
+    let role = obj
+        .get("role")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let stage_role = obj
+        .get("stage_role")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    match (role, stage_role) {
+        (Some(a), Some(b)) if a != b => anyhow::bail!(
+            "arc_stages 元素同时给了 role 与 stage_role，且两者不同：{} / {}（它们是同一个字段，只传一个）",
+            a,
+            b
+        ),
+        (Some(a), _) => obj["role"] = json!(a),
+        (None, Some(b)) => obj["role"] = json!(b),
+        (None, None) => {}
+    }
+    if let Value::Object(map) = &mut obj {
+        map.remove("stage_role");
+    }
+
     if let Some(raw_weight) = obj.get("screen_weight").and_then(|v| v.as_str()) {
         let weight = ScreenWeight::parse(raw_weight).ok_or_else(|| {
             anyhow::anyhow!(
@@ -3320,6 +4766,30 @@ fn compact_schema_value(value: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(compact_schema_value).collect()),
         other => other.clone(),
     }
+}
+
+/// `get_*_profile` 返回的字段契约。
+///
+/// 默认**只给字段名清单**；只有显式 `include_schema: true` 才给完整结构。
+/// 为什么：实测完整结构 **5,944 字符/次**（占单次档案返回的 43%），
+/// 而模型多数时候只需要知道"有哪些字段可以写"；真要结构时再要一次即可。
+fn writable_fields_for(input: &Value, schema: &Value) -> Value {
+    if input
+        .get("include_schema")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return writable_fields_meta(schema);
+    }
+    let names: Vec<String> = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|m| m.keys().filter(|k| k.as_str() != "id").cloned().collect())
+        .unwrap_or_default();
+    json!({
+        "names": names,
+        "note": "以上是全部可写字段名。需要每个字段的结构（type / enum / items）时，再调一次并传 include_schema: true"
+    })
 }
 
 /// 把 update schema 的 properties 转成 `get_*_profile` 返回里的 `writable_fields`：
@@ -3371,6 +4841,10 @@ fn character_state_props() -> Value {
 fn character_profile_update_schema() -> Value {
     let mut props = character_profile_props();
     props["id"] = json!({ "type": "string", "description": "人物实体 UUID" });
+    props["append"] = json!({
+        "type": "boolean",
+        "description": "为 true 时把本次传入的文本字段**追加**到原值后面（默认 false = 覆盖）。长文本被输出上限截断时用它分次写，不必每次重发整段。"
+    });
     json!({ "type": "object", "properties": props, "required": ["id"] })
 }
 
@@ -3428,7 +4902,8 @@ impl AgentTool for CharacterProfileTool {
             CharacterProfileAction::Get => json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "人物实体 UUID" }
+                    "id": { "type": "string", "description": "人物实体 UUID" },
+                "include_schema": { "type": "boolean", "description": "**可选**：为 true 时额外返回每个可写字段的完整结构（type / enum / items / properties）。默认只返回字段名清单——完整结构约 6000 字符/次，不需要就别要" }
                 },
                 "required": ["id"]
             }),
@@ -3455,7 +4930,7 @@ impl AgentTool for CharacterProfileTool {
                     "name": name,
                     "data": data,
                     "readonly": readonly,
-                    "writable_fields": writable_fields_meta(&character_profile_update_schema()),
+                    "writable_fields": writable_fields_for(&input, &character_profile_update_schema()),
                 }))
             }
             CharacterProfileAction::Update => {
@@ -3515,9 +4990,15 @@ impl AgentTool for CharacterProfileTool {
                         });
                     let aliases_add = string_array(obj.get("aliases_add"));
                     let aliases_remove = string_array(obj.get("aliases_remove"));
+                    // append=true：文本字段追加写入（长文本分次写，不必重发整段）
+                    let append = obj
+                        .get("append")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
 
                     for (k, v) in obj {
                         if k == "id"
+                            || k == "append"
                             || CHAR_CONTROL_FIELDS.contains(&k.as_str())
                             || FRAMEWORK_INJECTED_FIELDS.contains(&k.as_str())
                         {
@@ -3527,6 +5008,12 @@ impl AgentTool for CharacterProfileTool {
                             ignored.push(k.clone());
                             continue;
                         }
+                        // 结构字段的子字段名同样要校验：未知子键会被 serde 静默丢掉
+                        agent::ensure_known_subfields(
+                            k,
+                            v,
+                            &character_profile_update_schema(),
+                        )?;
                         // 结构数组字段：默认整块替换；mode=merge 时按 id 局部更新/新增，
                         // 未提及的旧条目保留，remove_*_ids 用来删除指定条目。
                         if k == "conflicts" || k == "secrets" {
@@ -3597,7 +5084,12 @@ impl AgentTool for CharacterProfileTool {
                         if CHAR_TEXT_FIELDS.contains(&k.as_str()) {
                             if let Some(s) = v.as_str() {
                                 if !s.trim().is_empty() {
-                                    merged.insert(k.clone(), json!(s));
+                                    let value = agent::append_or_replace(
+                                        merged.get(k).and_then(|v| v.as_str()),
+                                        s,
+                                        append,
+                                    );
+                                    merged.insert(k.clone(), json!(value));
                                 }
                             }
                             continue;
@@ -3624,7 +5116,12 @@ impl AgentTool for CharacterProfileTool {
                                         } else {
                                             s
                                         };
-                                        merged.insert(k.clone(), json!(normalized));
+                                        let value = agent::append_or_replace(
+                                            merged.get(k).and_then(|v| v.as_str()),
+                                            normalized,
+                                            append,
+                                        );
+                                        merged.insert(k.clone(), json!(value));
                                     }
                                 }
                             }
@@ -4001,5 +5498,244 @@ mod tests {
         assert_eq!(out[0]["name"], "A");
         assert_eq!(out[0]["effect"], "new");
         assert_eq!(out[1]["name"], "C");
+    }
+
+    // ---------- 实体类型清单与严格 UUID 解析 ----------
+
+    #[test]
+    fn entity_types_catalog_matches_normalizer() {
+        // 清单里的每个规范名与别名都必须能被 normalize_entity_type 解析回同一个规范名，
+        // 否则会出现「list_entity_types 列得出来、create_entity 却建不了」的割裂。
+        for (canonical, aliases) in ENTITY_TYPES {
+            assert_eq!(
+                normalize_entity_type(canonical),
+                Some(*canonical),
+                "规范名 {} 无法自解析",
+                canonical
+            );
+            for alias in *aliases {
+                assert_eq!(
+                    normalize_entity_type(alias),
+                    Some(*canonical),
+                    "别名 {} 应解析为 {}",
+                    alias,
+                    canonical
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn entity_types_catalog_is_exposed_with_aliases() {
+        let catalog = entity_types_catalog();
+        let arr = catalog.as_array().expect("清单应为数组");
+        assert_eq!(arr.len(), ENTITY_TYPES.len());
+        let golden = arr
+            .iter()
+            .find(|t| t["entity_type"] == "golden_finger")
+            .expect("应包含金手指");
+        assert!(golden["aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "金手指"));
+    }
+
+    #[test]
+    fn opt_uuid_strict_distinguishes_missing_from_invalid() {
+        use serde_json::json;
+        // 缺失 / null / 空串：视为「没传」
+        assert_eq!(opt_uuid_strict(&json!({}), "storyline_id").unwrap(), None);
+        assert_eq!(
+            opt_uuid_strict(&json!({"storyline_id": null}), "storyline_id").unwrap(),
+            None
+        );
+        assert_eq!(
+            opt_uuid_strict(&json!({"storyline_id": "  "}), "storyline_id").unwrap(),
+            None
+        );
+
+        // 合法值：解析出来
+        let id = Uuid::new_v4();
+        assert_eq!(
+            opt_uuid_strict(&json!({"storyline_id": id.to_string()}), "storyline_id").unwrap(),
+            Some(id)
+        );
+
+        // 非法值：**必须报错**，不能静默当成没传——
+        // 否则「把伏笔挂到某条线」会静默地什么都不挂，调用方却以为挂上了。
+        let err = opt_uuid_strict(&json!({"storyline_id": "abc"}), "storyline_id").unwrap_err();
+        assert!(err.to_string().contains("不是合法 UUID"), "{}", err);
+
+        let err2 = opt_uuid_strict(&json!({"storyline_id": 123}), "storyline_id").unwrap_err();
+        assert!(err2.to_string().contains("UUID 字符串"), "{}", err2);
+    }
+}
+
+
+// ============================================================
+// 项目全景索引（轻量）
+// ============================================================
+
+/// 项目全景索引：一次调用回答「项目进行到什么情况」。
+///
+/// 为什么需要它（实测数据）：AI 原先为回答这个问题，用 3 次 `batch_call` 拉了 12 个子调用、
+/// 共 **78,616 字符**的工具结果（其中 `list_entities` + `list_relations` + `list_rules`
+/// 一次就 56,668 字符）。这些字符**每轮请求都要重发**，最终把模型拖到"思考 116 秒"
+/// 并撞上网关超时（`error decoding response body`）。
+///
+/// 本工具把同一个问题压到 **3K 字符以内**：只给各类产物的**数量与分布**，
+/// 明细一律用 `list_*`（有界分页）或 `get_*`（按需）去取。
+pub struct ProjectIndexTool {
+    project: Arc<ProjectService>,
+    entity: Arc<EntityService>,
+    world: Arc<WorldService>,
+    narrative: Arc<NarrativeService>,
+    storyline: Arc<StorylineService>,
+    foreshadow: Arc<ForeshadowService>,
+    history: Arc<HistoryService>,
+}
+
+impl ProjectIndexTool {
+    pub fn new(
+        project: Arc<ProjectService>,
+        entity: Arc<EntityService>,
+        world: Arc<WorldService>,
+        narrative: Arc<NarrativeService>,
+        storyline: Arc<StorylineService>,
+        foreshadow: Arc<ForeshadowService>,
+        history: Arc<HistoryService>,
+    ) -> Self {
+        Self {
+            project,
+            entity,
+            world,
+            narrative,
+            storyline,
+            foreshadow,
+            history,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentTool for ProjectIndexTool {
+    fn name(&self) -> String {
+        "get_project_index".to_string()
+    }
+
+    fn description(&self) -> String {
+        "一次拿到项目的**全景索引**：实体 / 伏笔 / 剧情线 / 叙事节点 / 最近事件的数量与分布。\
+         被问「项目进行到什么情况」「现在都有什么」时**先用它**——不要用 batch_call 批量拉全量列表：\
+         实测那样做一次会产生 7.8 万字符的工具结果，把上下文撑爆并导致模型思考过久、网关超时。\
+         需要某个对象的正文时再用 list_*（可 limit / offset 翻页）或 get_entity / get_*_profile。"
+            .to_string()
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": { "type": "string", "description": "项目 UUID（框架会自动注入当前会话的项目）" }
+            },
+            "required": ["project_id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let project_id = parse_uuid(&input, "project_id")?;
+
+        let project = self
+            .project
+            .get_project(project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("项目不存在: {}", project_id))?;
+
+        let world = self
+            .world
+            .get_or_create_main_world(project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("项目 {} 还没有主世界", project_id))?;
+        let world_id = world.id;
+
+        // 实体：按类型计数（明细用 list_entities —— 它现在有界且有 total）
+        let mut by_type = serde_json::Map::new();
+        let mut entity_total = 0usize;
+        for t in [
+            "Character",
+            "Location",
+            "Faction",
+            "Item",
+            "golden_finger",
+            "Organization",
+            "Creature",
+            "Event",
+        ] {
+            let n = self.entity.list_entities(world_id, Some(t)).await?.len();
+            if n > 0 {
+                by_type.insert(t.to_string(), json!(n));
+                entity_total += n;
+            }
+        }
+
+        // 伏笔：总数 + 状态分布 + 未挂线（孤儿）数量
+        let foreshadows = self.foreshadow.list_foreshadows(project_id).await?;
+        let mut fs_by_status: BTreeMap<String, usize> = BTreeMap::new();
+        let mut unlinked = 0usize;
+        for f in &foreshadows {
+            let status = f
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            *fs_by_status.entry(status).or_default() += 1;
+            if f.get("storyline_id").map(|v| v.is_null()).unwrap_or(true) {
+                unlinked += 1;
+            }
+        }
+
+        // 剧情线：总数 + 前 20 条骨架（id + 名称）
+        let storylines = self.storyline.list_storylines(project_id).await?;
+        let sl_items: Vec<Value> = storylines
+            .iter()
+            .take(20)
+            .map(|s| agent::pick_fields(s, &["id", "name"]))
+            .collect();
+
+        // 叙事节点：总数 + 类型分布
+        let nodes = self.narrative.list_nodes(project_id).await?;
+        let mut node_by_type: BTreeMap<String, usize> = BTreeMap::new();
+        for n in &nodes {
+            let t = n
+                .get("node_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            *node_by_type.entry(t).or_default() += 1;
+        }
+
+        // 最近事件：只给 5 条骨架
+        let events = self.history.list_events(project_id, 5).await?;
+        let ev_items: Vec<Value> = events
+            .iter()
+            .map(|e| agent::pick_fields(e, &["id", "name", "event_time"]))
+            .collect();
+
+        Ok(json!({
+            "ok": true,
+            "action": "get_project_index",
+            "project": agent::pick_fields(&project, &["id", "name", "status"]),
+            "world_id": world_id.to_string(),
+            "entities": { "total": entity_total, "by_type": by_type },
+            "foreshadows": {
+                "total": foreshadows.len(),
+                "by_status": fs_by_status,
+                "unlinked": unlinked,
+            },
+            "storylines": { "total": storylines.len(), "items": sl_items },
+            "nodes": { "total": nodes.len(), "by_type": node_by_type },
+            "recent_events": ev_items,
+            "hint": "这是全景索引（只有数量与骨架）。明细用 list_entities / list_foreshadows / list_storylines 等（都支持 limit / offset 翻页）；某个对象的正文用 get_entity 或 get_*_profile。"
+        }))
     }
 }

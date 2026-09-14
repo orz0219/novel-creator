@@ -16,8 +16,8 @@ use db::application_ports::{DbEntityRepositoryPort, DbProjectRepositoryPort, DbW
 use db::mutation_committer::DbMutationCommitter;
 use db::project_resolver::DbProjectResolverPort;
 use narrative_engine::agent_tools::{
-    register_character_tools, register_entity_tools, register_faction_profile_tools,
-    register_location_profile_tools, BulkLocationProfileTool,
+    register_all_domain_tools, register_character_tools, register_entity_tools,
+    register_faction_profile_tools, register_location_profile_tools, BulkLocationProfileTool,
 };
 use serde_json::json;
 use sqlx::PgPool;
@@ -120,8 +120,12 @@ async fn arc_stages_readable_for_faction_and_location() -> Result<()> {
         "阶段现状快照必须能读到"
     );
     assert!(
-        got_faction["writable_fields"].get("arc_stages").is_some(),
-        "势力 writable_fields 应含 arc_stages"
+        got_faction["writable_fields"]["names"]
+            .as_array()
+            .map(|a| a.iter().any(|v| v == "arc_stages"))
+            .unwrap_or(false),
+        "势力 writable_fields 的字段名清单应含 arc_stages: {}",
+        got_faction["writable_fields"]
     );
 
     // 势力阶段 merge：只改一段、不动其它
@@ -172,8 +176,12 @@ async fn arc_stages_readable_for_faction_and_location() -> Result<()> {
     assert_eq!(l_stages[0]["role"], "主角藏身处");
     assert_eq!(l_stages[2]["screen_weight"], "Heavy");
     assert!(
-        got_loc["writable_fields"].get("arc_stages").is_some(),
-        "地点 writable_fields 应含 arc_stages"
+        got_loc["writable_fields"]["names"]
+            .as_array()
+            .map(|a| a.iter().any(|v| v == "arc_stages"))
+            .unwrap_or(false),
+        "地点 writable_fields 的字段名清单应含 arc_stages: {}",
+        got_loc["writable_fields"]
     );
 
     // 批量地点路径也要支持阶段弧线（AI 常用 bulk 补齐档案）
@@ -204,6 +212,111 @@ async fn arc_stages_readable_for_faction_and_location() -> Result<()> {
             .fetch_one(&pool)
             .await?;
     assert_eq!((faction_rows, loc_rows), (3, 4));
+
+    Ok(())
+}
+
+/// 剧情线也有阶段弧线（与人物 / 势力 / 地点**同构**）。
+///
+/// 回归自实际反馈：三条副线都写了明确的阶段推进（破庙 → 聚落 → 村落 → 社区化），
+/// 但剧情线没有 arc_stages，只能塞进 description 当散文——面板没有阶段视图，
+/// 也无法按「推进到哪个阶段」筛选。
+#[tokio::test]
+async fn storyline_supports_arc_stages() -> Result<()> {
+    let pool = testkit::test_pool().await?;
+    let project_service = ProjectService::new(
+        Arc::new(DbProjectRepositoryPort::new(pool.clone())),
+        Arc::new(WorldService::new(Arc::new(DbWorldRepositoryPort::new(
+            pool.clone(),
+        )))),
+    );
+    let proj = project_service
+        .create_project("storyline-arc-project", None, None)
+        .await?;
+    let project_id = Uuid::parse_str(proj["id"].as_str().expect("project id")).unwrap();
+    let pid = project_id.to_string();
+
+    let registry = Arc::new(ToolRegistry::new());
+    register_all_domain_tools(&registry, &pool);
+
+    // 创建时就能写阶段：字符串简写 / 中文戏份 / stage_role 等价键都要能用
+    let sl = tool(&registry, "create_storyline")
+        .execute(json!({
+            "project_id": pid,
+            "name": "《破庙居委会》",
+            "arc_stages": [
+                "破庙期",
+                { "stage": "聚落期", "stage_role": "自组织雏形", "screen_weight": "中" },
+                { "stage": "村落期", "goal": "与旧秩序对接", "screen_weight": "Heavy" }
+            ]
+        }))
+        .await?;
+    let stages = sl["data"]["arc_stages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("创建后应能读回阶段弧线：{sl}"));
+    assert_eq!(stages.len(), 3);
+    assert_eq!(stages[0]["stage"], json!("破庙期"), "字符串简写应归一化为对象");
+    assert_eq!(stages[1]["role"], json!("自组织雏形"), "stage_role 应归一化到 role");
+    assert_eq!(stages[1]["screen_weight"], json!("Medium"), "中文戏份应规范化");
+    assert_eq!(stages[2]["screen_weight"], json!("Heavy"));
+
+    let sid = sl["data"]["id"].as_str().expect("storyline id").to_string();
+
+    // merge：只更新一段，未提及的段与子字段都保留
+    let merged = tool(&registry, "revise_storyline")
+        .execute(json!({
+            "id": sid,
+            "arc_stages": [{ "stage": "村落期", "status": "三村联合，议事成形" }],
+            "arc_stages_mode": "merge"
+        }))
+        .await?;
+    let stages = merged["data"]["arc_stages"].as_array().expect("merge 后应有阶段");
+    assert_eq!(stages.len(), 3, "未提及的阶段必须保留：{}", merged);
+    let village = stages
+        .iter()
+        .find(|s| s["stage"] == json!("村落期"))
+        .expect("村落期仍在");
+    assert_eq!(village["status"], json!("三村联合，议事成形"));
+    assert_eq!(
+        village["goal"],
+        json!("与旧秩序对接"),
+        "merge 不该清掉未传的子字段"
+    );
+
+    // 只传 remove_arc_stages：按阶段名删除，其余保留
+    let removed = tool(&registry, "revise_storyline")
+        .execute(json!({
+            "id": sid,
+            "remove_arc_stages": ["破庙期"],
+            "arc_stages_mode": "merge"
+        }))
+        .await?;
+    let stages = removed["data"]["arc_stages"].as_array().expect("删完后读取");
+    assert_eq!(stages.len(), 2, "破庙期应被删除：{}", removed);
+    assert!(stages.iter().all(|s| s["stage"] != json!("破庙期")));
+
+    // 只改名：阶段与描述都不能被清掉
+    let renamed = tool(&registry, "revise_storyline")
+        .execute(json!({ "id": sid, "name": "《破庙居委会》（改名）" }))
+        .await?;
+    assert_eq!(renamed["data"]["name"], json!("《破庙居委会》（改名）"));
+    assert_eq!(
+        renamed["data"]["arc_stages"].as_array().unwrap().len(),
+        2,
+        "只改名不该动阶段弧线"
+    );
+
+    // 按 id 读单条（比 list_storylines 拉全部省上下文），且要带阶段弧线
+    let one = tool(&registry, "get_storyline")
+        .execute(json!({ "id": sid }))
+        .await?;
+    assert_eq!(one["data"]["id"], json!(sid));
+    assert_eq!(
+        one["data"]["arc_stages"].as_array().unwrap().len(),
+        2,
+        "单条读取也要带阶段弧线：{}",
+        one
+    );
 
     Ok(())
 }

@@ -36,6 +36,15 @@
           保存后立即对「创作引导对话 / AI 生成 / 文本抽取」生效，无需重启后端服务。
         </p>
         <div class="setting-item">
+          <span class="setting-label">供应商</span>
+          <select class="setting-select wide" v-model="form.aiProvider">
+            <option v-for="p in AI_PROVIDERS" :key="p.id" :value="p.id">
+              {{ p.label }}
+            </option>
+          </select>
+        </div>
+        <p v-if="currentPreset" class="section-hint">{{ currentPreset.hint }}</p>
+        <div class="setting-item">
           <span class="setting-label">接口地址</span>
           <input
             class="setting-input wide"
@@ -43,18 +52,20 @@
             placeholder="https://opencode.ai/zen/go/v1"
           />
         </div>
+        <p v-if="providerApplied" class="section-hint">{{ providerApplied }}</p>
         <div class="setting-item">
           <span class="setting-label">API Key</span>
           <input
             class="setting-input wide"
             :type="showKey ? 'text' : 'password'"
             v-model="form.aiApiKey"
-            placeholder="sk-…"
+            :placeholder="`${currentPreset?.label ?? '当前供应商'} 的密钥`"
           />
           <button class="ghost-btn" type="button" @click="showKey = !showKey">
             {{ showKey ? '隐藏' : '显示' }}
           </button>
         </div>
+        <p v-if="keyNotice" class="section-hint">{{ keyNotice }}</p>
         <div class="setting-item">
           <span class="setting-label">模型名</span>
           <select
@@ -71,10 +82,13 @@
             :disabled="loadingModels"
             @click="loadModels"
           >
-            {{ loadingModels ? '获取中…' : '刷新列表' }}
+            {{ loadingModels ? '获取中…' : '获取模型' }}
           </button>
         </div>
         <p v-if="modelsError" class="error-hint">模型列表获取失败：{{ modelsError }}</p>
+        <p v-else-if="!form.aiApiKey" class="section-hint">
+          请先填写 {{ currentPreset?.label ?? '当前供应商' }} 的 API Key，再点「获取模型」。
+        </p>
         <p v-else-if="modelOptions.length" class="section-hint">
           已获取 {{ modelOptions.length }} 个可用模型，只可从下拉中选择。
         </p>
@@ -172,6 +186,12 @@ import {
   type TestConnectionResult,
   type ModelCatalog,
 } from '@/api'
+import {
+  AI_PROVIDERS,
+  findProvider,
+  providerIdForBaseUrl,
+  switchProviderKey,
+} from '@/api/aiProviders'
 
 const route = useRoute()
 const router = useRouter()
@@ -191,8 +211,12 @@ const form = reactive<AppSettings>({
   projectName: '',
   language: 'zh-CN',
   defaultModel: 'mimo-v2.5',
+  // 供应商只决定「接口地址」这一项，后端不读该字段
+  aiProvider: 'opencode',
   aiBaseUrl: 'https://opencode.ai/zen/go/v1',
   aiApiKey: '',
+  // 各供应商各自的 key（切换时按 id 存取，两个 key 完全分离）
+  aiApiKeys: {},
   contextLimit: 128000,
   maxOutputTokens: 22000,
   fontSize: 14,
@@ -200,6 +224,74 @@ const form = reactive<AppSettings>({
   writingStyle: '',
   autoValidate: true,
 })
+
+// ---------- 供应商 → 接口地址 / API Key 联动 ----------
+// 选供应商只做两件事：带入它的接口地址、切到它自己的 API Key。
+// 选「自定义」时**不动**接口地址（否则用户手填的地址会被抹掉）。
+
+/** 当前选中供应商的预设；id 不在表中（旧数据）时为 null。 */
+const currentPreset = computed(() => findProvider(form.aiProvider))
+
+/** 最近一次自动带入地址的说明文字；没带入过则为空。 */
+const providerApplied = ref('')
+
+/** 密钥随供应商切换的说明（不显示 key 内容）。 */
+const keyNotice = ref('')
+
+/** 载入设置期间置位：此时由 initializeProvider 自己调 applyProvider，避免重复切换。 */
+const initializing = ref(true)
+
+/**
+ * 切换供应商：先把当前 key 存回「原供应商」名下，再载入「新供应商」自己的 key。
+ *
+ * 这是两个 key 分离的关键——`form.aiApiKey` 是当前生效的那一个（后端只读它），
+ * 所以在切换的瞬间必须先备份再替换，否则新 key 会覆盖掉旧供应商的 key。
+ */
+function applyProvider(nextId: string) {
+  // 先备份旧供应商的 key，再换成新供应商自己的 key（账本运算见 switchProviderKey）
+  const { keys, key } = switchProviderKey(
+    form.aiApiKeys,
+    form.aiProvider,
+    nextId,
+    form.aiApiKey,
+  )
+  form.aiApiKeys = keys
+  form.aiProvider = nextId
+
+  const preset = findProvider(nextId)
+  if (preset && preset.baseUrl !== '') {
+    form.aiBaseUrl = preset.baseUrl
+    providerApplied.value = `已自动带入 ${preset.label} 的接口地址。`
+  } else {
+    providerApplied.value = '自定义供应商：接口地址请自行填写，已保留当前值。'
+  }
+
+  form.aiApiKey = key
+  keyNotice.value = key
+    ? `已载入 ${preset?.label ?? nextId} 自己的 API Key（与其他供应商互不影响）。`
+    : `${preset?.label ?? nextId} 还没有填过 API Key，请填写后保存。`
+}
+
+/** 把当前输入框里的 key 存回指定供应商名下；清空则删掉该条目。 */
+function backupKey(providerId: string) {
+  const keys = form.aiApiKeys ?? {}
+  const current = form.aiApiKey?.trim() ?? ''
+  if (current) {
+    keys[providerId] = current
+  } else {
+    delete keys[providerId]
+  }
+  form.aiApiKeys = keys
+}
+
+watch(
+  () => form.aiProvider,
+  (id) => {
+    // aiProvider 在类型上是可选的；下拉改变时必定有值，为空则无从联动
+    if (!id || initializing.value) return
+    applyProvider(id)
+  },
+)
 
 const saving = ref(false)
 const savedAt = ref('')
@@ -266,11 +358,31 @@ onMounted(async () => {
     catalog.value = c
   } catch (e) {
     loadError.value = (e as Error).message
-    return // 设置都读不到，不必再去拉模型列表
+    // 设置读不出来时表单仍是默认值：此时必须放开供应商联动，
+    // 否则用户切换供应商不会带入接口地址，且页面上看不出原因。
+    initializing.value = false
+    return
   }
+  initializeProvider()
   syncModelLimit()
-  await loadModels()
+  // 没填 API Key 就不拉：否则必然报一个「获取模型列表失败」，属于噪音
+  if (form.aiApiKey) {
+    await loadModels()
+  }
 })
+
+/**
+ * 回显供应商下拉并载入它自己的 key：优先用已保存的 aiProvider；
+ * 没有该字段（老数据）时按已保存的接口地址反查。
+ * 反查不到就落到「自定义」——不猜、不改动用户已填的地址。
+ */
+function initializeProvider() {
+  const saved = findProvider(form.aiProvider)
+  const id = saved ? saved.id : providerIdForBaseUrl(form.aiBaseUrl)
+  // 表单是从库里 Object.assign 来的，这里同步走一遍，顺便把 key 载入表单
+  applyProvider(id)
+  initializing.value = false
+}
 
 async function save() {
   saving.value = true
@@ -287,6 +399,8 @@ async function save() {
         delete limits[model]
       }
     }
+    // 保存前把当前 key 归到它所属的供应商名下，保证两个 key 各存一份
+    backupKey(form.aiProvider ?? 'custom')
     const payload = { ...form, contextLimits: limits }
     await settingsApi.update(payload)
     Object.assign(form, payload)
@@ -298,6 +412,10 @@ async function save() {
 
 /** 拉取网关真实可用的模型列表（OpenAI 兼容 GET /models）。 */
 async function loadModels() {
+  if (!form.aiApiKey) {
+    modelsError.value = '请先填写 API Key，再点「获取模型」。'
+    return
+  }
   loadingModels.value = true
   modelsError.value = ''
   try {
@@ -329,7 +447,7 @@ async function runTest() {
       api_key: form.aiApiKey,
       model: form.defaultModel,
     })
-    // 连通即拉取可用模型列表，省掉用户再去点一次「获取列表」
+    // 连通即拉取可用模型列表，省掉用户再去点一次「获取模型」
     if (testResult.value.ok) {
       await loadModels()
     }

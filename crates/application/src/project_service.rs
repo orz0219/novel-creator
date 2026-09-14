@@ -27,6 +27,17 @@ impl ProjectService {
         self.repo.list_projects().await
     }
 
+    /// 有界列表（目录页）：返回本页项目 + 总数。
+    ///
+    /// 实测 `list_projects` 一次吐出 1172 个项目的全字段 = 425,018 字符
+    /// （每个项目都带着 config / premise / description 全文）。
+    pub async fn list_projects_page(&self, limit: usize, offset: usize) -> Result<(Vec<Value>, usize)> {
+        let all = self.repo.list_projects().await?;
+        let total = all.len();
+        let items = all.into_iter().skip(offset).take(limit).collect();
+        Ok((items, total))
+    }
+
     pub async fn get_project(&self, id: Uuid) -> Result<Option<Value>> {
         self.repo.get_project(id).await
     }

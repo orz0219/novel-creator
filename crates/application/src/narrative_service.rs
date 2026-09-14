@@ -36,6 +36,24 @@ impl NarrativeService {
         self.repo.list_nodes(project_id).await
     }
 
+    /// 有界列表（目录页）：返回本页 + 总数。（叙事节点）
+    ///
+    /// 过渡实现：repository 还没下推 LIMIT/OFFSET，先取回再切片——
+    /// 目的是**把返回给模型的体积有界化**（实测无界列表一次能到 42 万字符）；
+    /// 等下推实现后就替换成真正的分页查询。
+    pub async fn list_nodes_page(
+        &self,
+        project_id: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<serde_json::Value>, usize)> {
+        let all = self.list_nodes(project_id).await?;
+        let total = all.len();
+        let items = all.into_iter().skip(offset).take(limit).collect();
+        Ok((items, total))
+    }
+
+
     pub async fn get_node(&self, id: Uuid) -> Result<Option<Value>> {
         self.repo.get_node(id).await
     }

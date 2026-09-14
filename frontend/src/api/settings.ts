@@ -6,10 +6,24 @@ export interface AppSettings {
   language?: string
   /** 模型名（真源：后端每次 LLM 调用前读取本字段）。 */
   defaultModel?: string
+  /**
+   * 供应商 id（见 aiProviders.ts）。
+   * 后端不读该字段，只用于设置页刷新后回显下拉选中项。
+   */
+  aiProvider?: string
   /** OpenAI 兼容网关前缀，如 https://opencode.ai/zen/go/v1 。 */
   aiBaseUrl?: string
-  /** 网关密钥。 */
+  /** 网关密钥（真源：后端每次 LLM 调用前读取本字段）。 */
   aiApiKey?: string
+  /**
+   * 各供应商各自的密钥：`{ "<供应商id>": "<key>" }`。
+   *
+   * 为什么要单独存：`aiApiKey` 是**当前生效**的那一个（后端只读它），
+   * 直接切供应商会把上一个供应商的 key 带过去。这里按供应商 id 各存一份，
+   * 切换时从对应条目恢复，两个 key 完全分离。
+   * 后端不读该字段。
+   */
+  aiApiKeys?: Record<string, string>
   /** 会话上下文预算（token），聊天页据此显示「已用 / 上限」并预警。 */
   contextLimit?: number
   /** 按模型的上下文上限覆盖：`{ "<模型id>": <token 数> }`（优先于内置目录）。 */

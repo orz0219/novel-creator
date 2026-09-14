@@ -126,20 +126,34 @@ async fn character_arc_stages_roundtrip() -> Result<()> {
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0]["phase"], "中期", "冲突应保留生效阶段");
 
-    // 3.5) writable_fields（AI 实际读到的字段清单）必须包含新增字段，
-    //      并且 conflicts 的元素要能看到 description —— 之前 compact_schema_value
-    //      会把所有叫 description 的键删掉，导致模型以为冲突不用写描述。
-    let wf = &got["writable_fields"];
-    assert!(wf.get("arc_stages").is_some(), "writable_fields 应含 arc_stages: {wf}");
+    // 3.5) writable_fields 默认只给**字段名清单**（完整结构实测 5,944 字符/次，
+    //      改为按需：传 include_schema: true 才给）。新增字段必须出现在清单里。
+    let names = got["writable_fields"]["names"]
+        .as_array()
+        .unwrap_or_else(|| panic!("默认应给字段名清单: {}", got["writable_fields"]));
+    assert!(
+        names.iter().any(|v| v == "arc_stages"),
+        "字段清单应含 arc_stages: {names:?}"
+    );
+    assert!(
+        names.iter().any(|v| v == "social_position"),
+        "字段清单应含 social_position: {names:?}"
+    );
+
+    // 显式要完整结构时，conflicts 的元素字段不能被吞掉 —— 之前 compact_schema_value
+    // 会把所有叫 description 的键删掉，导致模型以为冲突不用写描述。
+    let got_full = tool(&registry, "get_character_profile")
+        .execute(json!({ "id": char_id.to_string(), "include_schema": true }))
+        .await?;
+    let wf = &got_full["writable_fields"];
     assert!(
         wf["conflicts"]["items"]["properties"].get("phase").is_some(),
-        "conflicts[].phase 应出现在 writable_fields"
+        "conflicts[].phase 应出现在完整结构里"
     );
     assert!(
         wf["conflicts"]["items"]["properties"].get("description").is_some(),
-        "conflicts[].description 不能从 writable_fields 里消失"
+        "conflicts[].description 不能从完整结构里消失"
     );
-    assert!(wf.get("social_position").is_some(), "social_position 应可写且可见");
 
     // 3.6) drive 只传 motivation、不传 urgency，应成功（urgency 默认 3，不是必填）
     tool(&registry, "update_character_profile")

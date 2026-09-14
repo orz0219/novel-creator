@@ -503,6 +503,33 @@ impl RelationRepo {
 
         Ok(result.rows_affected() > 0)
     }
+
+    /// 修改一段关系的关系类型 / 描述（不改两端、不重建行）。
+    ///
+    /// `None` 表示"这一项不改"（交给 COALESCE 保留原值）；只影响尚未结束的关系，
+    /// 已结束的边改属性没有意义，按找不到处理（由调用方报错）。
+    pub async fn revise_relation_tx<'c>(
+        executor: impl sqlx::Executor<'c, Database = sqlx::Postgres>,
+        project_id: Uuid,
+        id: Uuid,
+        relation_type: Option<String>,
+        description: Option<String>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE relation SET relation_type = COALESCE($3, relation_type), \
+             description = COALESCE($4, description), updated_at = NOW() \
+             WHERE id = $1 AND project_id = $2 AND valid_until IS NULL",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(relation_type)
+        .bind(description)
+        .execute(executor)
+        .await
+        .context("Failed to revise relation")?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[derive(sqlx::FromRow)]

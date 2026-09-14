@@ -2,8 +2,8 @@
   ConfirmAdvance.vue
   内联推进按钮：放在 composer 工具栏的左下。
   - 朱砂红按钮：产物够就能点
-  - 角标：未补血肉数
-  - hover：可看血肉完成度
+  - 角标：当前阶段还差几项（来自后端 guide/status 的 missing）
+  - hover：可看具体差什么
   - 点击：调 confirm_step → 失败则显示错误条（盖在 composer 顶部）
   - 不再有"驳回"输入框——驳回文本就是 composer 的 textarea 本身
 -->
@@ -11,15 +11,15 @@
   <div class="ca-inline">
     <button
       class="ca-btn"
-      :class="{ 'has-flesh': unfinishedFlesh.length > 0 }"
+      :class="{ 'has-missing': missingItems.length > 0 }"
       :disabled="isDisabled"
       @click="onConfirm"
       :title="hintTitle"
     >
       <ArrowRight :size="14" />
-      <span>{{ busy ? '推进中…' : `推进到「${nextTitle}」` }}</span>
-      <span v-if="unfinishedFlesh.length > 0" class="ca-badge">
-        {{ unfinishedFlesh.length }}
+      <span>{{ busy ? '推进中…' : buttonText }}</span>
+      <span v-if="missingItems.length > 0" class="ca-badge">
+        {{ missingItems.length }}
       </span>
     </button>
 
@@ -35,22 +35,17 @@ import { ref, computed } from 'vue'
 import { ArrowRight, AlertCircle } from 'lucide-vue-next'
 import { confirmGuideStep } from '@/api/agent'
 
-export interface FleshStep {
-  key: string
-  title: string
-  /** true = 已完成，false = 未完成 */
-  done: boolean
-}
-
 const props = defineProps<{
   /** 当前阶段 title（用于按钮文案兜底） */
   currentTitle: string
-  /** 下一个阶段 title（按钮文案） */
+  /** 下一个阶段 title（按钮文案）；为空表示引导已到最后一步 */
   nextTitle: string
   /** 项目 id（调 confirm_step 必备） */
   projectId: string
-  /** 血肉 step 列表（驱动角标 + hint） */
-  fleshSteps?: FleshStep[]
+  /** 当前阶段未就绪时后端给出的缺失项描述（驱动角标 + hover 提示）。
+   *  由后端 `guide/status` 提供——前端不自己判断"缺什么"，
+   *  否则会出现「按钮说齐了、点下去报缺东西」这类分叉。 */
+  missing?: string[]
   /** 外部禁用（例如 AI 正在生成 / 调用工具时，不允许并发推进） */
   disabled?: boolean
 }>()
@@ -63,25 +58,26 @@ const emit = defineEmits<{
 const busy = ref(false)
 const error = ref<string | null>(null)
 
-/** 生成中或自身请求中时都不可点，避免并发推进把会话状态打回 idle。 */
-const isDisabled = computed(() => busy.value || props.disabled === true)
+/** 后端给出的缺失项 */
+const missingItems = computed<string[]>(() => props.missing ?? [])
 
-/** 全部血肉 step 列表 */
-const fleshSteps = computed<FleshStep[]>(() => props.fleshSteps || [])
+/** 已是最后一步：beats 之后没有下一步，按钮无事可做 */
+const isLastStep = computed(() => !props.nextTitle)
 
-/** 未完成血肉 */
-const unfinishedFlesh = computed<FleshStep[]>(() =>
-  fleshSteps.value.filter((f) => !f.done),
+/** 生成中、自身请求中、或已是最后一步时都不可点 */
+const isDisabled = computed(() => busy.value || props.disabled === true || isLastStep.value)
+
+const buttonText = computed(() =>
+  isLastStep.value ? '已是最后一步' : `推进到「${props.nextTitle}」`,
 )
 
 /** hover 提示文案 */
 const hintTitle = computed(() => {
-  if (unfinishedFlesh.value.length === 0) {
+  if (isLastStep.value) return '引导流程已到最后一步，没有下一步可推进'
+  if (missingItems.value.length === 0) {
     return `当前阶段「${props.currentTitle}」产物已足，点此推进到「${props.nextTitle}」`
   }
-  return `还有 ${unfinishedFlesh.value.length} 个血肉未补：${unfinishedFlesh.value
-    .map((f) => f.title)
-    .join('、')}`
+  return `推进还差 ${missingItems.value.length} 项：${missingItems.value.join('；')}`
 })
 
 async function onConfirm() {
@@ -135,14 +131,14 @@ async function onConfirm() {
 }
 
 /* 有未补血肉：按钮变虚线边框 + 灰色（视觉提示产物不够） */
-.ca-btn.has-flesh {
+.ca-btn.has-missing {
   background: var(--bg-panel-secondary);
   color: var(--text-secondary);
   border-style: dashed;
   border-color: var(--border-emphasis);
   box-shadow: none;
 }
-.ca-btn.has-flesh:hover:not(:disabled) {
+.ca-btn.has-missing:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text-primary);
   border-color: var(--color-primary);

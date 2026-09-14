@@ -16,6 +16,7 @@ use infrastructure::llm::{InfraLlmPort, LlmClient, OpenAiCompatibleProvider};
 use db::repos::prompt_repo::PromptRepo;
 use db::repos::session_repo::SessionRepo;
 use db::repos::memory_repo::MemoryRepo;
+use db::repos::session_summary_repo::SessionSummaryRepo;
 use db::ai_settings::DbAiSettingsPort;
 use db::guide_progress::DbGuideProgressPort;
 use domain::ports::{AiSettingsPort, GuideProgressPort, PromptRepositoryPort};
@@ -71,7 +72,19 @@ async fn main() -> Result<()> {
     }
 
     // Seed entity types (idempotent using ON CONFLICT)
-    let entity_types = ["Character", "Location", "Faction", "Item", "Creature", "Organization", "golden_finger"];
+    // 必须与 agent_tools.rs 的 ENTITY_TYPES 清单一致：声明了却没 seed 的类型，
+    // 在新库上要等第一次创建实体时才由 ensure 补出来（清单与种子长期漂移过）。
+    let entity_types = [
+        "Character",
+        "Location",
+        "Faction",
+        "Item",
+        "Creature",
+        "Organization",
+        "Event",
+        "Deity",
+        "golden_finger",
+    ];
     for et in &entity_types {
         let result = sqlx::query(
             "INSERT INTO entity_type (id, name, description) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING"
@@ -111,11 +124,17 @@ async fn main() -> Result<()> {
     // P2 真实领域工具（Entity + Narrative / Storyline / Foreshadow / Rule /
     // Snapshot / Project / World / History 聚合；覆盖 C/U/D+R，D 为逻辑删除）
     narrative_engine::agent_tools::register_all_domain_tools(&agent_tools, &pool);
+    // 批量调用：把「补 7 条关系边 = 7 轮」压成一轮（注册在领域工具之后，
+    // 它按名字转发，不关心具体有哪些工具）
+    agent_tools.register(Arc::new(agent::BatchCallTool::new(agent_tools.clone())));
     let agent_sessions: Arc<dyn domain::agent_store::SessionStore> =
         Arc::new(SessionRepo::new(pool.clone()));
     let agent_memory: Arc<dyn domain::agent_store::AgentMemory> =
         Arc::new(MemoryRepo::new(pool.clone()));
     let prompt_store: Arc<dyn PromptRepositoryPort> = Arc::new(PromptRepo::new(pool.clone()));
+    // 对话滚动摘要（项目级恒定一份）：会话收尾时更新，开新会话时读到
+    let session_summaries: Arc<dyn domain::session_summary::SessionSummaryPort> =
+        Arc::new(SessionSummaryRepo::new(pool.clone()));
     // 引导进度真源：project.config.current_step（项目级，多会话共享）
     let guide_progress: Arc<dyn GuideProgressPort> =
         Arc::new(DbGuideProgressPort::new(pool.clone()));
@@ -128,6 +147,7 @@ async fn main() -> Result<()> {
         agent::DEFAULT_SYSTEM_PROMPT_BASE.to_string(),
         ai_settings.clone(),
         guide_progress,
+        session_summaries,
     ));
 
     // Create application state

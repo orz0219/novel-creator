@@ -55,10 +55,36 @@ pub async fn list_events(State(state): State<AppState>, Path(project_id): Path<S
 
 pub async fn create_event(State(state): State<AppState>, Path(project_id): Path<String>, Json(input): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, AppError> {
     let project_id = Uuid::parse_str(&project_id).map_err(|_| AppError(anyhow::anyhow!("Invalid project ID")))?;
-    let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("");
-    let event = service(&state).create_event(project_id, name, desc).await?;
+    // 缺失的必填字段**直接报错**：原先用 `unwrap_or("")` 兜底，
+    // 于是「没传 name」会静默写出一条空名事件，比报错难查得多。
+    let name = require_str(&input, "name")?;
+    let desc = require_str(&input, "description")?;
+    let attributes = application::history_service::collect_event_attributes(&input)?;
+    let event = service(&state)
+        .create_event(
+            project_id,
+            &name,
+            &desc,
+            input.get("event_type").and_then(|v| v.as_str()),
+            input.get("when").and_then(|v| v.as_str()),
+            input.get("duration").and_then(|v| v.as_str()),
+            &attributes,
+            // era_order：HTTP 侧暂不暴露（结构化字段由 AI 走工具写）
+            None,
+        )
+        .await?;
     Ok(Json(event))
+}
+
+/// 取必填字符串字段；缺失 / null / 空串一律报错。
+fn require_str(input: &serde_json::Value, key: &str) -> Result<String, AppError> {
+    input
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AppError(anyhow::anyhow!("{} 缺失或为空", key)))
 }
 
 pub async fn list_facts(State(state): State<AppState>, Path(project_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {

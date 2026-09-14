@@ -37,4 +37,5 @@ pub mod world_version_repo;
 pub mod prompt_repo;
 pub mod session_repo;
 pub mod memory_repo;
+pub mod session_summary_repo;
 pub mod entity_version_repo;

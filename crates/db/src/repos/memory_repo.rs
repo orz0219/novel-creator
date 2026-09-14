@@ -43,6 +43,40 @@ impl AgentMemory for MemoryRepo {
         .context("Failed to list agent memory")?;
         Ok(rows.into_iter().map(|r| r.into_item()).collect())
     }
+
+    async fn replace_by_type(
+        &self,
+        project_id: Uuid,
+        memory_type: &str,
+        content: &str,
+    ) -> Result<()> {
+        // 必须在一个事务里：先删后插之间失败会丢掉摘要，比留着旧摘要更糟
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("开启记忆替换事务失败")?;
+
+        sqlx::query("DELETE FROM agent_memory WHERE project_id = $1 AND memory_type = $2")
+            .bind(project_id)
+            .bind(memory_type)
+            .execute(&mut *tx)
+            .await
+            .context("删除旧记忆条目失败")?;
+
+        sqlx::query(
+            "INSERT INTO agent_memory (project_id, memory_type, content) VALUES ($1, $2, $3)",
+        )
+        .bind(project_id)
+        .bind(memory_type)
+        .bind(content)
+        .execute(&mut *tx)
+        .await
+        .context("写入新记忆条目失败")?;
+
+        tx.commit().await.context("提交记忆替换事务失败")?;
+        Ok(())
+    }
 }
 
 #[derive(sqlx::FromRow)]

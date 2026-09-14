@@ -131,6 +131,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agent/session/{id}", get(agent::get_session).delete(agent::delete_session).put(agent::rename_session))
         .route("/api/v1/agent/session/{id}/context", get(agent::context_usage))
         .route("/api/v1/agent/session/{id}/truncate", post(agent::truncate_session))
+        // 会话收尾：归纳成滚动摘要（项目级恒定一份），开新会话时自动读到
+        .route("/api/v1/agent/session/{id}/summary", get(agent::get_session_summary).post(agent::summarize_session))
         .route("/api/v1/agent/sessions", get(agent::list_sessions))
         .route("/api/v1/agent/tools", get(agent::list_tools))
         .route("/api/v1/agent/chat", post(agent::chat))
@@ -138,6 +140,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agent/prompt", get(agent::get_prompt).put(agent::save_prompt).delete(agent::delete_prompt))
         // 引导推进（用户点按钮触发，agent 不应主动调）
         .route("/api/v1/agent/guide/confirm", post(agent::confirm_guide_step))
+        // 引导进度只读真源：前端步骤条的对勾一律取自这里
+        .route("/api/v1/projects/{id}/guide/status", get(agent::get_guide_status))
         .with_state(state)
         .layer(cors)
 }

@@ -17,13 +17,17 @@
         </div>
       </header>
 
-      <!-- 10 步进度条（血肉步的完成度按真实产物判断，避免假对号） -->
+      <!-- 10 步进度条：每一步的完成度（对勾）都取自后端 guide/status，
+           与「确认推进」的校验同源——不在这里另行判断，避免假对号与假缺项 -->
       <StepIndicator
         :current="guideStep"
         :steps="guideSteps"
-        :loading="store.status === 'streaming'"
+        :loading="store.status === 'streaming' || !guideStatus"
         :flesh-done="fleshDoneMap"
       />
+      <div v-if="guideError" class="guide-error">
+        <AlertTriangle :size="12" /> 引导进度获取失败：{{ guideError }}
+      </div>
 
       <div class="messages" ref="messagesEl">
         <div class="msg-col">
@@ -108,7 +112,7 @@
               :current-title="currentGuideTitle"
               :next-title="nextGuideTitle"
               :project-id="projectId"
-              :flesh-steps="fleshStatuses"
+              :missing="currentMissing"
               :disabled="store.status === 'streaming'"
               @advanced="onAdvanced"
             />
@@ -162,7 +166,64 @@
           </span>
           <span v-if="contextLevel === 'warn'" class="meter-tip">已用较多</span>
           <span v-else-if="contextLevel === 'danger'" class="meter-tip">接近上限，建议新建会话</span>
+          <!--
+            会话收尾：把这轮谈定的东西归纳成滚动摘要（项目级恒定一份）。
+            摘要会随项目记忆注入新会话，所以「说完结论 → 开新会话」就能接着聊，
+            不必把整段历史一直拖下去（拖久了会撞上下文上限）。
+          -->
+          <span class="meter-sep">·</span>
+          <button
+            class="meter-btn"
+            type="button"
+            :disabled="summarizing || !store.sessionId || store.status === 'streaming'"
+            title="把这轮会话的关键结论归纳成摘要，之后新建会话会自动读到"
+            @click="onSummarize"
+          >
+            {{ summarizing ? '归纳中…' : '收尾并存摘要' }}
+          </button>
+          <button
+            v-if="summary"
+            class="meter-btn"
+            type="button"
+            :title="summaryTitle"
+            @click="summaryOpen = !summaryOpen"
+          >
+            {{ summaryOpen ? '收起摘要' : '查看摘要' }}
+          </button>
         </div>
+        <p v-if="summaryError" class="summary-error">摘要失败：{{ summaryError }}</p>
+        <section v-if="summary && summaryOpen" class="summary-card">
+          <div class="summary-head">
+            <span class="summary-title">当前滚动摘要</span>
+            <span class="summary-meta">更新于 {{ summaryUpdatedText }}</span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-label">故事状态</span>
+            <p class="summary-text">{{ summary.content.story_state || '（未填写）' }}</p>
+          </div>
+          <div class="summary-row">
+            <span class="summary-label">本次谈定</span>
+            <ul v-if="summary.content.confirmed.length" class="summary-list">
+              <li v-for="(item, i) in summary.content.confirmed" :key="i">{{ item }}</li>
+            </ul>
+            <p v-else class="summary-text">（无）</p>
+          </div>
+          <div class="summary-row">
+            <span class="summary-label">未收口</span>
+            <ul v-if="summary.content.open_threads.length" class="summary-list">
+              <li v-for="(item, i) in summary.content.open_threads" :key="i">{{ item }}</li>
+            </ul>
+            <p v-else class="summary-text">（无）</p>
+          </div>
+          <div class="summary-row">
+            <span class="summary-label">下一步</span>
+            <p class="summary-text">{{ summary.content.next_step || '（未填写）' }}</p>
+          </div>
+          <p class="summary-note">
+            摘要只记「谈了什么、还差什么」。人物 / 世界观等世界事实以世界库为准，
+            请在对话里让 Agent 落库。
+          </p>
+        </section>
       </div>
     </section>
 
@@ -213,15 +274,19 @@ import {
 } from 'lucide-vue-next'
 import { useAgentStore } from '@/stores/agent'
 import { useProjectStore } from '@/stores/project'
-import type { AgentSession } from '@/api/agent'
+import {
+  getSessionSummary,
+  summarizeSession,
+  getGuideStatus,
+  type AgentSession,
+  type GuideStatus,
+  type StoredSessionSummary,
+} from '@/api/agent'
 import { settingsApi, type AppSettings } from '@/api'
-import { characterApi } from '@/api/character'
-import { locationApi } from '@/api/location'
-import { worldApi } from '@/api/world'
 import ChatMessage from '@/components/agent/ChatMessage.vue'
 import PromptEditor from '@/components/agent/PromptEditor.vue'
-import StepIndicator from '@/components/agent/StepIndicator.vue'
-import ConfirmAdvance, { type FleshStep } from '@/components/agent/ConfirmAdvance.vue'
+import StepIndicator, { type StepDef } from '@/components/agent/StepIndicator.vue'
+import ConfirmAdvance from '@/components/agent/ConfirmAdvance.vue'
 
 const store = useAgentStore()
 const projectStore = useProjectStore()
@@ -357,116 +422,113 @@ const cacheTitle = computed(() =>
 
 const projectName = computed(() => projectStore.currentProject?.name ?? '')
 const activeSession = computed(() => store.sessions.find((s) => s.id === store.sessionId))
-const currentStep = computed(() => activeSession.value?.current_step ?? '')
 
-// ---------- 10 步引导（5 骨架 + 4 血肉 + 1 占位） ----------
-const guideSteps = [
-  // 骨架
-  { key: 'premise',         title: '脑洞',   group: 'skeleton' as const },
-  { key: 'world',           title: '世界观', group: 'skeleton' as const },
-  // 血肉
-  { key: 'world.map',       title: '地图',   group: 'flesh' as const },
-  { key: 'world.factions',  title: '势力',   group: 'flesh' as const },
-  { key: 'world.items',     title: '道具',   group: 'flesh' as const },
-  // 骨架
-  { key: 'golden_finger',   title: '金手指', group: 'skeleton' as const },
-  { key: 'protagonist',     title: '主角',   group: 'skeleton' as const },
-  // 血肉
-  { key: 'characters.supporting', title: '配角', group: 'flesh' as const },
-  // 骨架
-  { key: 'storylines.main',      title: '故事线', group: 'skeleton' as const },
-  // 血肉
-  { key: 'storylines.branches',   title: '副线',   group: 'flesh' as const },
-  // 骨架
-  { key: 'beats',                title: '细纲',   group: 'skeleton' as const },
-]
-// 当前阶段：优先读 project.config.current_step（项目级，多 session 共享）；
-// 兜底用 session.current_step；都没有则默认 'premise'。
-const guideStep = computed(() => {
-  // 优先：project.config.current_step（项目级，多 session 共享）
-  const fromConfig = (projectStore.currentProject?.config as any)?.current_step as string | undefined
-  if (fromConfig) return fromConfig
-  // 兜底：session.current_step（新会话默认 'premise'）；早期会话存的是中文旧值，
-  // 不在 guideSteps 里，所以只在能匹配时使用。
-  if (currentStep.value && guideSteps.some((s) => s.key === currentStep.value)) {
-    return currentStep.value
-  }
-  return 'premise'
+// ---------- 会话收尾摘要（项目级滚动摘要） ----------
+// 摘要恒定一份：再次收尾是覆盖，不会堆出多份。新会话会读到它（经项目记忆注入）。
+
+/** 当前项目的滚动摘要；从未收尾过为 null。 */
+const summary = ref<StoredSessionSummary | null>(null)
+const summarizing = ref(false)
+const summaryError = ref('')
+/** 摘要详情默认收起，避免常驻占屏。 */
+const summaryOpen = ref(false)
+
+const summaryUpdatedText = computed(() => {
+  if (!summary.value) return ''
+  return new Date(summary.value.updated_at).toLocaleString()
 })
-const guideIndex = computed(() => guideSteps.findIndex((s) => s.key === guideStep.value))
-const currentGuideTitle = computed(
-  () => guideSteps[guideIndex.value]?.title ?? guideStep.value,
-)
-const nextGuideTitle = computed(
-  () => guideSteps[guideIndex.value + 1]?.title ?? '',
-)
 
-// ---------- 血肉 step 完成度（驱动小选择器） ----------
-const fleshStatuses = ref<FleshStep[]>([
-  { key: 'world.map',              title: '地图', done: false },
-  { key: 'world.factions',         title: '势力', done: false },
-  { key: 'world.items',            title: '道具', done: false },
-  { key: 'characters.supporting',  title: '配角', done: false },
-])
-
-/** 血肉步完成度映射，供 StepIndicator 判断（血肉步可跳过，不能按位置推断完成）。 */
-const fleshDoneMap = computed(() =>
-  Object.fromEntries(fleshStatuses.value.map((f) => [f.key, f.done])),
+const summaryTitle = computed(() =>
+  summary.value
+    ? `最近一次收尾：${summaryUpdatedText.value}`
+    : '本项目还没有摘要',
 )
 
-/** 从后端拉 4 类血肉的实际数量，更新 fleshStatuses.done。
- *  注：4 个 API 失败时静默 catch——某些 entity 端点可能临时 500
- *  （如 /entities?type=* 偶发 500 已知），不能因此阻塞小选择器渲染；
- *  失败则保持上次状态（不更新 done）。
- */
-async function refreshFleshStatus() {
-  const pid = projectId.value
-  if (!pid) return
-  // 拿主 world_id
-  let wid: string | null = null
-  try {
-    const world = await worldApi.get(pid)
-    if (world) wid = world.id
-  } catch {
-    return // world 拿不到就不更新
+/** 读取当前会话所属项目的摘要（切项目 / 切会话 / 进页面时调用）。 */
+async function loadSummary() {
+  summaryError.value = ''
+  if (!store.sessionId) {
+    summary.value = null
+    return
   }
-  if (!wid) return
-
-  // 并行 4 个查询——任一失败不阻塞其它
-  const [locations, factions, items, characters] = await Promise.all([
-    locationApi.list(wid).catch(() => null),
-    worldApi.listEntities(wid, 'Faction').catch(() => null),
-    worldApi.listEntities(wid, 'Item').catch(() => null),
-    characterApi.list(wid).catch(() => null),
-  ])
-
-  // 哪个查到了就更新，没查到的保留旧值
-  const cur = fleshStatuses.value
-  fleshStatuses.value = [
-    {
-      key: 'world.map',
-      title: '地图',
-      done: locations != null ? locations.length > 0 : cur[0].done,
-    },
-    {
-      key: 'world.factions',
-      title: '势力',
-      done: factions != null ? factions.length > 0 : cur[1].done,
-    },
-    {
-      key: 'world.items',
-      title: '道具',
-      done: items != null ? items.length > 0 : cur[2].done,
-    },
-    {
-      key: 'characters.supporting',
-      title: '配角',
-      done: characters != null ? Math.max(0, characters.length - 1) > 0 : cur[3].done,
-    },
-  ]
+  try {
+    summary.value = await getSessionSummary(store.sessionId)
+  } catch (e) {
+    summary.value = null
+    summaryError.value = (e as Error).message
+  }
 }
 
-// 触发条件已内联到 ConfirmAdvance 中（按血肉完成度 + store 状态自行判断）
+/** 收尾：让模型把当前会话归纳成摘要并覆盖保存，随后展开详情供核对。 */
+async function onSummarize() {
+  if (!store.sessionId || summarizing.value) return
+  summarizing.value = true
+  summaryError.value = ''
+  try {
+    summary.value = await summarizeSession(store.sessionId)
+    summaryOpen.value = true
+  } catch (e) {
+    summaryError.value = (e as Error).message
+  } finally {
+    summarizing.value = false
+  }
+}
+
+// ---------- 引导进度：唯一真源是后端 ----------
+// 步骤清单、当前阶段、每一步是否就绪（对勾）、推进还差什么，全部来自
+// `GET /projects/{id}/guide/status`（后端 STEPS + validate_step，与 confirm_step 同源）。
+// 前端**不再维护第二份步骤清单、也不再自己数数量判断完成度**：
+// 「副线」曾经因为前端漏了这一步而永远不打勾，而且没有任何报错。
+const guideStatus = ref<GuideStatus | null>(null)
+/** 进度拉取失败原因：显式暴露，不静默保留旧值。 */
+const guideError = ref('')
+
+/** 步骤条定义（顺序 / 标题 / 分组全部取自后端）。 */
+const guideSteps = computed<StepDef[]>(() =>
+  (guideStatus.value?.steps ?? []).map((s) => ({
+    key: s.key,
+    title: s.title,
+    group: s.group,
+  })),
+)
+const guideStep = computed(() => guideStatus.value?.current_step ?? '')
+const guideIndex = computed(() => guideSteps.value.findIndex((s) => s.key === guideStep.value))
+const currentGuideTitle = computed(() => guideStatus.value?.current_title ?? '')
+const nextGuideTitle = computed(() => guideSteps.value[guideIndex.value + 1]?.title ?? '')
+
+/** 当前阶段未就绪时后端给出的缺失项（推进按钮的角标与 hover 提示）。 */
+const currentMissing = computed(
+  () =>
+    (guideStatus.value?.steps ?? [])
+      .find((s) => s.key === guideStep.value)
+      ?.missing.map((m) => m.detail) ?? [],
+)
+
+/** 拉取引导进度。失败必须显式暴露：静默保留旧值会让「产物齐了却没打勾」
+ *  这类问题再次变成无迹可查的谜题。 */
+async function refreshGuideStatus() {
+  const pid = projectId.value
+  if (!pid) return
+  try {
+    guideStatus.value = await getGuideStatus(pid)
+    guideError.value = ''
+  } catch (e) {
+    guideError.value = (e as Error).message
+  }
+}
+
+/** 血肉步完成度映射，供 StepIndicator 判断（血肉步可跳过，不能按位置推断完成）。
+ *  取值来自后端每一步的 ready —— 与「确认推进」的校验同源，因此不会出现
+ *  「界面打了勾、点按钮却报缺东西」，也不会出现「产物齐了却永远不打勾」。 */
+const fleshDoneMap = computed(() =>
+  Object.fromEntries(
+    (guideStatus.value?.steps ?? [])
+      .filter((s) => s.group === 'flesh')
+      .map((s) => [s.key, s.ready]),
+  ),
+)
+
+// 触发条件已内联到 ConfirmAdvance 中（按后端缺失项 + store 状态自行判断）
 
 const statusText = computed(() => {
   if (store.status === 'streaming') return '生成中'
@@ -509,6 +571,8 @@ async function commitRename(id: string) {
 }
 async function onSelectSession(id: string) {
   await store.selectSession(id)
+  // 摘要按会话所属项目取，换会话可能就换了项目
+  await loadSummary()
 }
 
 async function onDeleteSession(id: string) {
@@ -588,7 +652,7 @@ async function onAdvanced() {
   }
   await store.loadSessions(projectId.value)
   // 血肉完成度也要刷新（推进后可能新建了 entity）
-  void refreshFleshStatus()
+  void refreshGuideStatus()
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -624,7 +688,7 @@ async function activateProject(pid: string) {
     }
   }
   // 拉血肉完成度（小选择器驱动）
-  void refreshFleshStatus()
+  void refreshGuideStatus()
   scrollToBottom()
 }
 
@@ -632,13 +696,14 @@ onMounted(async () => {
   await store.loadTools()
   await activateProject(projectId.value)
   await loadModelPicker()
+  await loadSummary()
 })
 
 // 在项目间切换（/project/A/agent → /project/B/agent 复用同一组件实例）
 watch(
   () => projectId.value,
   (pid) => {
-    void activateProject(pid)
+    void activateProject(pid).then(loadSummary)
   },
 )
 </script>
@@ -773,6 +838,16 @@ watch(
   background: var(--color-error-subtle);
   border: 1px solid var(--color-error);
   border-radius: var(--radius-sm);
+  color: var(--color-error);
+  font-size: var(--text-xs);
+}
+
+/* 引导进度拉取失败：进度条下方的显式提示（不静默——否则「不打勾」无从解释） */
+.guide-error {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 4px var(--space-5);
+  background: var(--color-error-subtle);
+  border-bottom: 1px solid var(--color-error);
   color: var(--color-error);
   font-size: var(--text-xs);
 }
@@ -982,4 +1057,46 @@ watch(
 .send-btn.stop:hover { background: var(--color-error-subtle); }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+/* ---------- 会话收尾摘要 ---------- */
+.meter-btn {
+  flex-shrink: 0;
+  padding: 2px var(--space-2);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition-fast);
+}
+.meter-btn:hover:not(:disabled) { color: var(--color-primary-text); border-color: var(--border-primary); }
+.meter-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.summary-error { margin-top: var(--space-2); font-size: var(--text-xs); color: var(--color-error); }
+
+.summary-card {
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-panel-secondary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-md);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.summary-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--space-2); }
+.summary-title { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
+.summary-meta { font-size: var(--text-xs); color: var(--text-tertiary); }
+.summary-row { margin-bottom: var(--space-2); }
+.summary-label {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-bottom: 2px;
+}
+.summary-text { font-size: var(--text-sm); color: var(--text-primary); line-height: 1.6; white-space: pre-wrap; }
+.summary-list { margin: 0; padding-left: 1.2em; }
+.summary-list li { font-size: var(--text-sm); color: var(--text-primary); line-height: 1.6; }
+.summary-note { margin-top: var(--space-2); font-size: var(--text-xs); color: var(--text-tertiary); line-height: 1.5; }
 </style>

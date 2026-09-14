@@ -276,3 +276,53 @@ pub async fn confirm_guide_step(
         .await?;
     Ok(Json(result))
 }
+
+/// `GET /api/v1/projects/{id}/guide/status` —— 引导进度的**只读真源**。
+///
+/// 前端步骤条的每一个对勾都取自这里，与 `confirm_step` 的推进校验共用同一套快照
+/// 与同一个 `validate_step`，因此「界面打勾」与「点按钮能不能过」永远一致。
+///
+/// 存在理由：血肉步（地图 / 势力 / 道具 / 配角 / 副线）原先由前端各自数数量判断，
+/// 一旦漏掉某一步，就会出现「产物明明齐了却永远不打勾」——而且没有任何报错。
+pub async fn get_guide_status(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // 走已注册的 get_project_status 工具，而不是另写一份查询：
+    // 前端打对勾的依据必须与 AI 回答、与 confirm_step 的校验是同一份判定。
+    let input = serde_json::json!({"project_id": project_id.to_string()});
+    let report = state
+        .agent
+        .execute_tool(project_id, "get_project_status", input)
+        .await?;
+    Ok(Json(report))
+}
+
+/// `POST /api/v1/agent/session/{id}/summary` —— 会话收尾：归纳成滚动摘要。
+///
+/// 把整段会话（连同项目已有的旧摘要作为基线）交给模型归纳成结构化 JSON，
+/// **覆盖**项目那一份摘要，并同步一份到 `agent_memory` 供新会话注入。
+/// 重复调用只会刷新那一份，不会堆积多份。
+pub async fn summarize_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<domain::session_summary::StoredSessionSummary>, AppError> {
+    let summary = state.agent.summarize_session(id).await?;
+    Ok(Json(summary))
+}
+
+/// `GET /api/v1/agent/session/{id}/summary` —— 读取该项目当前的滚动摘要。
+///
+/// 从未收尾过时返回 `null`（不是错误）：界面据此显示「还没有摘要」。
+pub async fn get_session_summary(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Option<domain::session_summary::StoredSessionSummary>>, AppError> {
+    let session = state
+        .agent
+        .get_session(id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("session not found: {}", id))?;
+    let summary = state.agent.load_summary(session.project_id).await?;
+    Ok(Json(summary))
+}

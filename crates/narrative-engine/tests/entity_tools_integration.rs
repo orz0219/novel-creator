@@ -137,3 +137,98 @@ async fn entity_tools_create_revise_retire_logical_delete() -> Result<()> {
 
     Ok(())
 }
+
+/// revise_relation：改关系描述是**原地改**，不结束旧边、不重建新边。
+///
+/// 回归自实际卡点：一条关系的描述里写着旧名字（「王九才」），实体早已改名，
+/// 而当时只有 create / end 两条路——只能结束旧边再重建，id 会变、时间线断成两段。
+#[tokio::test]
+async fn revise_relation_updates_in_place() -> Result<()> {
+    let pool = testkit::test_pool().await?;
+
+    let project_service = ProjectService::new(
+        Arc::new(DbProjectRepositoryPort::new(pool.clone())),
+        Arc::new(WorldService::new(Arc::new(DbWorldRepositoryPort::new(
+            pool.clone(),
+        )))),
+    );
+    let project = project_service
+        .create_project("revise-relation-project", None, None)
+        .await?;
+    let project_id = Uuid::parse_str(project["id"].as_str().expect("project id")).unwrap();
+
+    let world_service = WorldService::new(Arc::new(DbWorldRepositoryPort::new(pool.clone())));
+    let world = world_service
+        .get_or_create_main_world(project_id)
+        .await?
+        .expect("主世界应已创建");
+
+    let entity_service = Arc::new(EntityService::new(
+        Arc::new(DbEntityRepositoryPort::new(pool.clone())),
+        Arc::new(MutationCommitter::new(Arc::new(DbMutationCommitter::new(
+            pool.clone(),
+        )))),
+        Arc::new(DbProjectResolverPort::new(pool.clone())),
+        "user",
+    ));
+    let registry = Arc::new(ToolRegistry::new());
+    register_entity_tools(&registry, entity_service);
+
+    let a = tool(&registry, "create_character")
+        .execute(json!({ "world_id": world.id.to_string(), "name": "王久财" }))
+        .await?;
+    let b = tool(&registry, "create_character")
+        .execute(json!({ "world_id": world.id.to_string(), "name": "周浩" }))
+        .await?;
+    let a_id = a["data"]["id"].as_str().expect("a id").to_string();
+    let b_id = b["data"]["id"].as_str().expect("b id").to_string();
+
+    let rel = tool(&registry, "create_relation")
+        .execute(json!({
+            "source_entity_id": a_id,
+            "target_entity_id": b_id,
+            "relation_type": "朋友",
+            "description": "主角王九才意外攫取了对方的机会"
+        }))
+        .await?;
+    let rel_id = rel["data"]["id"].as_str().expect("relation id").to_string();
+
+    // 只改描述，关系类型不动
+    let revised = tool(&registry, "revise_relation")
+        .execute(json!({
+            "id": rel_id,
+            "description": "主角王久财意外攫取了对方的机会"
+        }))
+        .await?;
+    assert!(revised["ok"].as_bool().is_some_and(|b| b), "{}", revised);
+
+    let listed = tool(&registry, "list_relations")
+        .execute(json!({ "world_id": world.id.to_string() }))
+        .await?;
+    let item = listed["data"]
+        .as_array()
+        .expect("relations array")
+        .iter()
+        .find(|r| r["id"] == json!(rel_id))
+        .expect("改过的关系仍应在列表里");
+    assert_eq!(
+        item["description"],
+        json!("主角王久财意外攫取了对方的机会"),
+        "描述应被改掉"
+    );
+    assert_eq!(item["relation_type"], json!("朋友"), "没传的字段不能被动");
+    assert_eq!(item["source_name"], json!("王久财"), "两端实体不变");
+
+    // 什么都不传：直接报错，而不是一次什么都没改的空写
+    let err = tool(&registry, "revise_relation")
+        .execute(json!({ "id": rel_id }))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("至少要给"),
+        "空调用应报错：{}",
+        err
+    );
+
+    Ok(())
+}

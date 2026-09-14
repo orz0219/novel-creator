@@ -428,51 +428,129 @@ pub trait StorylineRepositoryPort: Send + Sync {
     ///
     /// `parent_id` 可选：传 Some(uuid) 表示这条副线挂到哪条 story line 下。
     /// 主线（importance=Main）必须 parent_id=None。
+    /// 创建剧情线。
+    ///
+    /// `status` 之前是硬编码 `'Planned'`、且没有任何更新入口——于是剧情线状态
+    /// 永远停在初始值，调用方能读到却改不了。现在创建即可指定，更新也能改。
     async fn create_storyline(
         &self,
         project_id: Uuid,
         name: &str,
         description: Option<&str>,
+        status: &str,
         importance: &str,
         tone: &str,
         visibility: &str,
         parent_id: Option<Uuid>,
+        // 阶段弧线（与人物 / 势力 / 地点**同构**）：数组对象，
+        // 元素含 stage / role / screen_weight / goal / function / entry_trigger / status。
+        // `None` 视为空阶段列表。
+        arc_stages: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value>;
-    /// 更新剧情线名称/描述/明暗/可见性。
+    /// 按 id 读取单条剧情线。
+    ///
+    /// `update_storyline` 的 arc_stages 合并需要旧值（先读再合并），
+    /// AI 也可以用它「按 id 看一条」而不必 list 全部。
+    async fn get_storyline(&self, id: Uuid) -> Result<Option<serde_json::Value>>;
+    /// 更新剧情线名称/描述/状态/明暗/可见性。
+    ///
+    /// `None` 表示保持原值（与其它字段一致），因此「只改状态」不会清掉描述。
+    /// 修改剧情线。`name` / `description` 都是「不传就不改」（`None` 保持原值）——
+    /// 与 `update_*_profile` 一致；原先 name 必填、且 name/description 无条件写入，
+    /// 于是「只改描述」也得把名字抄一遍，而「只改名字」会把描述清空。
     async fn update_storyline(
         &self,
         id: Uuid,
-        name: &str,
+        name: Option<&str>,
         description: Option<&str>,
+        status: Option<&str>,
         tone: Option<&str>,
         visibility: Option<&str>,
+        // 阶段弧线：整块替换；调用方若要走 merge，自己先读旧值合并后传入
+        // （合并语义在工具层，见 `apply_arc_stages`）。
+        arc_stages: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value>;
     /// 删除剧情线（按 id）。
     async fn delete_storyline(&self, id: Uuid) -> Result<()>;
-    /// 列出某项目所有挂载关系（parent → child）
+    /// 列出某项目所有剧情线关系（parent → child，含 relation_type）
     async fn list_storyline_relations(
         &self,
         project_id: Uuid,
     ) -> Result<Vec<serde_json::Value>>;
+    /// 建一条剧情线关系（带类型）。同 (from, to) 已存在时**更新类型**（幂等）。
+    ///
+    /// 对外用 from / to 的中性说法：驱动 / 依赖 / 交汇 / 对冲这些横向关系里
+    /// "parent / child" 的读法并不成立（列名是历史包袱，落库仍映射到那两列）。
+    async fn relate_storylines(
+        &self,
+        project_id: Uuid,
+        from_storyline_id: Uuid,
+        to_storyline_id: Uuid,
+        relation_type: &str,
+    ) -> Result<serde_json::Value>;
+    /// 删除一条剧情线关系（按 id）。
+    async fn unrelate_storylines(&self, id: Uuid) -> Result<()>;
 }
 
 /// Foreshadow（伏笔）仓储端口。
+///
+/// `storyline_id` 是伏笔归属的剧情线：`foreshadowing.storyline_id` 这一列一直存在，
+/// 只是此前没被读写——结果是伏笔永远挂不上线，前端也做不出「点开一条暗线看它埋了哪些钩子」。
 #[async_trait]
 pub trait ForeshadowRepositoryPort: Send + Sync {
     async fn list_foreshadows(&self, project_id: Uuid) -> Result<Vec<serde_json::Value>>;
+    /// 创建伏笔。
+    ///
+    /// `status` / `importance` / `hint_level` 都走**枚举校验后的英文值**
+    /// （见 `domain::foreshadowing` 的各 `parse`）：此处原先直接写字符串，
+    /// 默认值甚至是非法值 `"low"`，模型建出来的伏笔暗示级别是脏数据。
     async fn create_foreshadow(
         &self,
         project_id: Uuid,
         name: &str,
         description: Option<&str>,
+        status: &str,
         importance: &str,
         hint_level: &str,
+        // 等级之外的**备注**（如「前期只透风，不揭示」）：等级是枚举、说明是自由文本，
+        // 原先两者挤在 hint_level 一列里，导致前端无法按等级筛选（见迁移 034）。
+        hint_note: Option<&str>,
+        // 埋点 / 预期回收的时机锚（自由文本：「前期」「第三卷」「第 12 章」）
+        introduced_at: Option<&str>,
+        expected_reveal_at: Option<&str>,
+        // 节点锚：埋点 / 计划回收所在的叙事节点（哪一章埋、打算哪一章收）
+        planted_node_id: Option<Uuid>,
+        payoff_node_id: Option<Uuid>,
+        // 父伏笔：一条大伏笔挂几个小钩子（伏笔树）
+        parent_foreshadow_id: Option<Uuid>,
+        // 归属的剧情线（可空：伏笔也可以暂时无主）
+        storyline_id: Option<Uuid>,
     ) -> Result<serde_json::Value>;
+    /// 修改伏笔。
+    ///
+    /// `storyline_id` 用两层 Option 区分三种意图，避免「改个名字」顺手把归属清掉：
+    /// `Some(Some(id))` 改挂到该线；`Some(None)` 解除挂载；`None` 保持原值。
+    ///
+    /// `name` / `description` 同样是「不传就不改」（`None` 保持原值）：
+    /// 只改归属或状态时，不该被迫把名字抄一遍——抄错就是一次误改名。
+    /// 修改伏笔。返回**修改后的完整对象**（而不是 `{"updated":true}`）：
+    /// 调用方改完就能看到写进去的是什么，不必再 list 一遍全文——本项目的
+    /// storyline / 伏笔全文近万字，重复拉取代价很大（AI 上下文也是钱）。
     async fn update_foreshadow(
         &self,
         id: Uuid,
-        name: &str,
+        name: Option<&str>,
         description: Option<&str>,
+        status: Option<&str>,
+        hint_note: Option<&str>,
+        introduced_at: Option<&str>,
+        expected_reveal_at: Option<&str>,
+        actual_reveal_at: Option<&str>,
+        // 节点锚与伏笔树：`None` = 不改（想清空见工具层的 clear_* 说明）
+        planted_node_id: Option<Uuid>,
+        payoff_node_id: Option<Uuid>,
+        parent_foreshadow_id: Option<Uuid>,
+        storyline_id: Option<Option<Uuid>>,
     ) -> Result<serde_json::Value>;
     /// 删除伏笔（按 id）。
     async fn delete_foreshadow(&self, id: Uuid) -> Result<()>;
@@ -644,13 +722,49 @@ pub trait RuleRepositoryPort: Send + Sync {
 /// event / fact 读写。
 #[async_trait]
 pub trait HistoryRepositoryPort: Send + Sync {
-    async fn list_events(&self, project_id: Uuid, limit: i64) -> Result<Vec<serde_json::Value>>;
+    /// 列出事件。`order_by`：`"recent"`（默认，按创建时间倒序）/ `"era"`（按历史轴锚
+    /// `era_order` 升序，未标定的排最后）。中文时间没法比大小，所以排序要显式选。
+    async fn list_events(
+        &self,
+        project_id: Uuid,
+        limit: i64,
+        order_by: &str,
+    ) -> Result<Vec<serde_json::Value>>;
+    /// 创建事件。
+    ///
+    /// 事件天然是结构化的（发生时间 / 地点 / 参与方 / 直接后果 / 揭示时机），此前却只能
+    /// 写 name + description，于是「同一地点发生过哪些事」「哪些事件属于暗线」都查不了。
+    /// `attributes` 承载 where / participants / consequences / reveal_at 四个键。
     async fn create_event(
         &self,
         project_id: Uuid,
         name: &str,
         description: &str,
+        event_type: Option<&str>,
+        event_time: Option<&str>,
+        duration: Option<&str>,
+        attributes: &serde_json::Value,
+        // 历史轴排序锚（越小越早）。`when` 是给人看的自由文本（「远昔」「缓变」），
+        // 中文没法比大小，所以另给一个数值锚；`None` = 未标定。
+        era_order: Option<i64>,
     ) -> Result<serde_json::Value>;
+    /// 修改事件（含结构化字段）。`None` 表示保持原值。
+    async fn update_event(
+        &self,
+        id: Uuid,
+        name: Option<&str>,
+        description: Option<&str>,
+        event_type: Option<&str>,
+        event_time: Option<&str>,
+        duration: Option<&str>,
+        attributes: Option<&serde_json::Value>,
+        era_order: Option<i64>,
+    ) -> Result<serde_json::Value>;
+    /// 语义化结束事件（`status='Deleted'`，不物理删除）。
+    ///
+    /// 与 `entity` / `narrative_node` 同一套语义：创作数据误删无法挽回，
+    /// 因此 AI 侧的删除统一是逻辑删除，保留可追溯性。
+    async fn delete_event(&self, id: Uuid) -> Result<()>;
     async fn list_facts(&self, project_id: Uuid) -> Result<Vec<serde_json::Value>>;
     async fn create_fact(
         &self,
@@ -659,6 +773,11 @@ pub trait HistoryRepositoryPort: Send + Sync {
         category: Option<&str>,
         certainty: &str,
     ) -> Result<serde_json::Value>;
+    /// 语义化结束事实（`status='Retired'`）。
+    ///
+    /// `fact` 表本来就有 `status`（默认 `Active`）与 `superseded_by` 两列，
+    /// 但没有写入路径——事实一旦建立就永远生效，写错了也撤不回。
+    async fn delete_fact(&self, id: Uuid) -> Result<()>;
 }
 
 /// Snapshot（novel_state_snapshot）仓储端口。

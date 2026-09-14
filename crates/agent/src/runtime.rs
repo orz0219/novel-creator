@@ -24,6 +24,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::memory::{AgentMemory, MemoryItem};
+use domain::session_summary::{SessionSummaryPort, StoredSessionSummary};
 use crate::prompt::build_system_prompt;
 use crate::session::{AgentSession, ChatMessage, SessionStore};
 use crate::tool::{AskQuestionTool, EchoTool, ToolRegistry};
@@ -83,6 +84,8 @@ pub struct AgentRuntime {
     ai_settings: Arc<dyn AiSettingsPort>,
     /// 引导进度：以 `project.config.current_step` 为唯一真源。
     guide_progress: Arc<dyn GuideProgressPort>,
+    /// 滚动摘要（项目级，恒定一份）：会话收尾时更新，开新会话时读到。
+    summaries: Arc<dyn SessionSummaryPort>,
 }
 
 impl AgentRuntime {
@@ -95,6 +98,7 @@ impl AgentRuntime {
         default_system_prompt: String,
         ai_settings: Arc<dyn AiSettingsPort>,
         guide_progress: Arc<dyn GuideProgressPort>,
+        summaries: Arc<dyn SessionSummaryPort>,
     ) -> Self {
         Self {
             llm,
@@ -105,6 +109,7 @@ impl AgentRuntime {
             default_system_prompt,
             ai_settings,
             guide_progress,
+            summaries,
         }
     }
 
@@ -366,6 +371,8 @@ impl AgentRuntime {
         let ai_settings = self.ai_settings.clone();
         let sessions = self.sessions.clone();
         let memory = self.memory.clone();
+        // 单独留一份给流闭包里的诊断读取（闭包要 'static，不能借用 self）
+        let settings = self.ai_settings.clone();
         // 把已加载的会话直接移入流闭包：流内不再回查，避免竞态导致助手消息漏存
         let mut session = session;
         // 自动记忆捕获所需的上下文（移入流闭包）
@@ -646,21 +653,35 @@ impl AgentRuntime {
 
                             // 把真正的诊断信息返回给 AI 和用户，而不是只写日志、
                             // 更不是所有错误都写“输出过长”。
-                            let finish_reason = last_finish_reason
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string());
+                            //
+                            // 两条最容易被误判的信息必须显式标注：
+                            // 1. 本次请求实发的输出上限——没有它就无法判断「是不是被截断」；
+                            // 2. finish_reason 缺失——网关没给这个字段时，截断与连接中断
+                            //    在数据上无法区分（实测某次 completion_tokens=0 且
+                            //    finish_reason=unknown，JSON 只有 3358 字节，远没到上限）。
+                            let finish_reason = last_finish_reason.clone();
                             let completion_tokens = last_usage
                                 .as_ref()
-                                .map(|u| u.completion_tokens)
-                                .unwrap_or(0);
+                                .map(|u| u.completion_tokens);
+                            let max_output_tokens = settings
+                                .load()
+                                .await
+                                .map(|c| c.max_output_tokens.to_string())
+                                .unwrap_or_else(|e| format!("读取失败：{}", e));
                             let tail: String = {
                                 let chars: Vec<char> = json_str.chars().collect();
                                 chars[chars.len().saturating_sub(180)..].iter().collect()
                             };
+                            // 字节数与字符数都给：中文一个字 3 字节，只看字节数会把
+                            // 「已经写了 1000 字」误读成「才 3000，离上限还远」。
+                            let json_bytes = json_str.len();
+                            let json_chars = json_str.chars().count();
                             tracing::warn!(
-                                finish_reason = %finish_reason,
-                                completion_tokens,
-                                json_len = json_str.len(),
+                                finish_reason = ?finish_reason,
+                                completion_tokens = ?completion_tokens,
+                                max_output_tokens = %max_output_tokens,
+                                json_bytes = json_bytes,
+                                json_chars = json_chars,
                                 json_tail = %tail,
                                 "工具调用 JSON 解析失败"
                             );
@@ -675,7 +696,9 @@ impl AgentRuntime {
                                 "raw_error": e.to_string(),
                                 "finish_reason": finish_reason.clone(),
                                 "completion_tokens": completion_tokens,
-                                "json_length": json_str.len(),
+                                "max_output_tokens": max_output_tokens,
+                                "json_length_bytes": json_str.len(),
+                                "json_length_chars": json_str.chars().count(),
                                 "json_full": json_str.clone(),
                             }));
 
@@ -684,15 +707,39 @@ impl AgentRuntime {
                                  raw_error: {}\n\
                                  finish_reason: {}\n\
                                  completion_tokens: {}\n\
-                                 json_length: {}\n\
+                                 max_output_tokens（本次请求实发的输出上限，1 token ≈ 1 个汉字）: {}\n\
+                                 json_length（字节 / 字符）: {} 字节 / {} 字符\n\
                                  json_tail: {}\n\
                                  完整 JSON 已写入日志：tmp/agent_tool_errors.jsonl",
                                 e,
-                                finish_reason,
-                                completion_tokens,
-                                json_str.len(),
+                                match &finish_reason {
+                                    Some(r) => r.clone(),
+                                    None => "（网关未返回该字段）".to_string(),
+                                },
+                                match completion_tokens {
+                                    Some(n) => n.to_string(),
+                                    None => "（网关未返回用量）".to_string(),
+                                },
+                                max_output_tokens,
+                                json_bytes,
+                                json_chars,
                                 tail,
                             );
+                            // 把「能不能据此判定截断」直接讲清楚，省掉一轮误判
+                            match finish_reason.as_deref() {
+                                Some("length") => message.push_str(
+                                    "\n判定：输出确实撞到了 max_output_tokens 上限（finish_reason=length）——\
+                                     请缩小单次输出的内容量，或分多次调用（长文本可分次追加写入）。",
+                                ),
+                                Some(_) => message.push_str(
+                                    "\n判定：不是截断（finish_reason 不是 length），问题在模型输出的 JSON 本身。",
+                                ),
+                                None => message.push_str(
+                                    "\n判定：**无法判定**是否截断——网关没有返回 finish_reason。\
+                                     请对照 json_length 与上面的上限自行判断；若 json_length 远小于上限，\
+                                     更可能是网关中途断流而不是截断。",
+                                ),
+                            }
                             if parse_retries >= MAX_PARSE_RETRIES {
                                 message.push_str("\n已连续多次失败，本轮将停止自动重试。");
                             }
@@ -867,6 +914,90 @@ impl AgentRuntime {
 
     pub async fn recall(&self, project_id: Uuid) -> Result<Vec<MemoryItem>> {
         self.memory.list(project_id).await
+    }
+
+    /// 读取项目当前的滚动摘要（从未收尾过时为 `None`）。
+    pub async fn load_summary(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Option<StoredSessionSummary>> {
+        self.summaries.load(project_id).await
+    }
+
+    /// 会话收尾：把整段会话归纳成结构化摘要，**覆盖**项目那一份，并同步一份到
+    /// `agent_memory`。
+    ///
+    /// 为什么两处都写：
+    /// - `session_summary` 是权威的「当前状态」快照，供界面展示与回读；
+    /// - `agent_memory`（memory_type = `session_summary`）是注入通道——现有
+    ///   `build_system_prompt` 会把项目记忆注入系统提示词，新会话因此自动读到
+    ///   「上一次聊到哪」。这里直接覆盖而不是新增碎片，避免记忆无限膨胀。
+    pub async fn summarize_session(&self, session_id: Uuid) -> Result<StoredSessionSummary> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .await?
+            .with_context(|| format!("session not found: {}", session_id))?;
+
+        let previous = self
+            .summaries
+            .load(session.project_id)
+            .await?
+            .map(|s| s.content);
+
+        let transcript = session
+            .messages
+            .iter()
+            .filter_map(|m| {
+                let body = m.content.trim();
+                if body.is_empty() {
+                    return None;
+                }
+                let role = match m.role.as_str() {
+                    "user" => "用户",
+                    "assistant" => "助手",
+                    "tool" => "工具",
+                    other => other,
+                };
+                Some(format!("{}：{}", role, body))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = crate::summary::build_summary_prompt(previous.as_ref(), &transcript)?;
+
+        let config = self
+            .ai_settings
+            .load()
+            .await
+            .context("读取运行时 AI 配置失败")?;
+        let raw = self
+            .llm
+            .complete(
+                crate::summary::SUMMARY_SYSTEM_PROMPT,
+                &prompt,
+                &config.model,
+            )
+            .await
+            .context("生成会话摘要失败")?;
+
+        let summary = crate::summary::parse_summary_response(&raw)?;
+        let stored = self.summaries.save(session.project_id, &summary).await?;
+
+        // 注入通道：供之后新开的会话在系统提示词里读到。
+        // 用 replace_by_type 而非 save：项目全部记忆都会注入提示词，
+        // 追加会在里面堆出多份互相矛盾的摘要。
+        let injected = serde_json::to_string(&stored.content)
+            .context("序列化摘要用于记忆注入失败")?;
+        self.memory
+            .replace_by_type(
+                session.project_id,
+                crate::summary::SUMMARY_MEMORY_TYPE,
+                &injected,
+            )
+            .await?;
+
+        Ok(stored)
     }
 }
 
@@ -1299,29 +1430,17 @@ fn parse_tool_result(content: &str) -> Option<(String, bool, String)> {
 
 /// 在流闭包内执行工具（不依赖 `&self`，仅用已克隆的 `ToolRegistry`）。
 ///
-/// 逻辑与 `AgentRuntime::execute_tool` 一致：先查表，再校验 input 为对象 + JSON Schema，
-/// 最后交给工具实现；任一环节失败返回明确错误，不静默放行。
+/// 逻辑与 `AgentRuntime::execute_tool` 一致：先注入 / 覆盖 `project_id`
+/// （物理隔离），再交给注册表做「查表 + JSON Schema 校验 + 调用」。
+/// 注入与校验都实现在 `tool` 模块里，`batch_call` 的子调用调用同一对函数，
+/// 因此两条路径的行为一致，不存在「批处理里少了注入」的旁路。
 async fn tool_execute(
     tools: &Arc<ToolRegistry>,
     project_id: Uuid,
     name: &str,
-    mut input: serde_json::Value,
+    input: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    // 物理隔离：用会话 project_id 覆盖模型可能传入的值，使所有项目级工具的读写
-    // 都限定在当前项目内。world 级工具（实体 / 规则）的 world_id 由模型经
-    // get_main_world 取得，world 维度的隔离待后续对齐 world 时再加校验。
-    if let Some(obj) = input.as_object_mut() {
-        obj.insert("project_id".into(), serde_json::json!(project_id.to_string()));
-    } else {
-        anyhow::bail!("tool input must be a JSON object");
-    }
-    let tool = tools
-        .get(name)
-        .with_context(|| format!("tool not found: {}", name))?;
-    if let Err(e) = validate_input(&input, &tool.input_schema()) {
-        anyhow::bail!("工具 '{}' 入参校验失败: {}", name, e);
-    }
-    tool.execute(input).await
+    tools.execute_in_project(project_id, name, input).await
 }
 
 /// 从文本中取出第一个完整的 JSON 对象（首个 `{` 到最后一个 `}`），容忍前后多余字符。
@@ -1376,7 +1495,11 @@ fn extract_unsupported_tool_call(text: &str) -> (String, serde_json::Value) {
 
 /// 轻量 JSON Schema 校验：检查 `required` 字段存在且非空，并按 `properties` 中的
 /// `type` 做基础类型校验（string/object/array/number/boolean）。不做深层结构校验。
-fn validate_input(input: &serde_json::Value, schema: &serde_json::Value) -> Result<()> {
+/// 轻量 JSON Schema 校验（required + type + enum）。
+///
+/// `pub(crate)`：`tool::ToolRegistry::execute` 复用它，保证批量调用与单次调用
+/// 走同一套校验，不给 batch_call 留绕过校验的旁路。
+pub(crate) fn validate_input(input: &serde_json::Value, schema: &serde_json::Value) -> Result<()> {
     let obj = input
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("input 不是 JSON 对象"))?;

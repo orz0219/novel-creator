@@ -426,7 +426,8 @@ impl SkillTemplates {
                             "properties": {
                                 "stage": {"type": "string", "description": "阶段名：前期 / 中期 / 后期，或卷1 / 卷2"},
                                 "order": {"type": "integer", "description": "排序，越小越早"},
-                                "role": {"type": "string", "description": "此阶段的身份 / 功能位"},
+                                "role": {"type": "string", "description": "此阶段的定位（人物：他是谁；势力：它在主角眼里的分量；地点：叙事位置）。等价写法 stage_role"},
+                                "stage_role": {"type": "string", "description": "role 的等价写法（更中性的叫法），二选一即可"},
                                 "screen_weight": {"type": "string", "enum": ["Light","Medium","Heavy"]},
                                 "goal": {"type": "string", "description": "此阶段的目标"},
                                 "function": {"type": "string", "description": "此阶段的叙事功能"},

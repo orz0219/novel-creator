@@ -50,6 +50,24 @@ impl EntityService {
         self.repo.list_entities(world_id, entity_type).await
     }
 
+    /// 有界列表（目录页）：返回本页实体 + 总数。
+    ///
+    /// 为什么不直接用 `list_entities`：实测它一次返回 33 个实体的全字段 = 36,555 字符
+    /// （`description` 占 51%），这些字符进入上下文后每轮请求都要重发。
+    /// 调用方给出 limit/offset，并拿到 total——先知道"有多少"，再决定要不要翻页。
+    pub async fn list_entities_page(
+        &self,
+        world_id: Uuid,
+        entity_type: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<Value>, usize)> {
+        let all = self.repo.list_entities(world_id, entity_type).await?;
+        let total = all.len();
+        let items = all.into_iter().skip(offset).take(limit).collect();
+        Ok((items, total))
+    }
+
     pub async fn get_entity(&self, id: Uuid) -> Result<Option<Value>> {
         self.repo.get_entity(id).await
     }
@@ -149,6 +167,24 @@ impl EntityService {
         self.repo.list_relations(world_id).await
     }
 
+    /// 有界列表（目录页）：返回本页 + 总数。（关系边）
+    ///
+    /// 过渡实现：repository 还没下推 LIMIT/OFFSET，先取回再切片——
+    /// 目的是**把返回给模型的体积有界化**（实测无界列表一次能到 42 万字符）；
+    /// 等下推实现后就替换成真正的分页查询。
+    pub async fn list_relations_page(
+        &self,
+        world_id: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<serde_json::Value>, usize)> {
+        let all = self.list_relations(world_id).await?;
+        let total = all.len();
+        let items = all.into_iter().skip(offset).take(limit).collect();
+        Ok((items, total))
+    }
+
+
     pub async fn create_relation(
         &self,
         source_entity_id: Uuid,
@@ -159,6 +195,30 @@ impl EntityService {
         self.repo
             .create_relation(source_entity_id, target_entity_id, relation_type, description)
             .await
+    }
+
+    /// 修改关系（关系类型 / 描述），语义化写入并留痕（ReviseRelation）。
+    ///
+    /// 为什么需要它：关系原先只有 create / end，描述写错就只能"结束旧边 + 重建新边"，
+    /// 结果是 id 变了、时间线断成两段。改属性不该付这个代价。
+    /// `None` 表示该项不改；两项都没给直接报错（避免一次什么也没改的空写）。
+    pub async fn revise_relation(
+        &self,
+        id: Uuid,
+        relation_type: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<()> {
+        if relation_type.is_none() && description.is_none() {
+            anyhow::bail!("revise_relation 至少要给 relation_type 或 description 之一");
+        }
+        let project_id = self
+            .resolver
+            .project_id_for_relation(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project not found for relation {}", id))?;
+        let cmd = MutationCommand::revise_relation(project_id, id, relation_type, description);
+        self.committer.commit(cmd).await?;
+        Ok(())
     }
 
     /// 删除关系：语义化结束（EndRelation），绝不物理 DELETE（提案 五）。
@@ -174,11 +234,45 @@ impl EntityService {
     }
 
     pub async fn get_character_profile(&self, id: Uuid) -> Result<Option<Value>> {
-        self.repo.get_character_profile(id).await
+        let Some(profile) = self.repo.get_character_profile(id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.with_entity_name(id, profile).await?))
     }
 
     pub async fn get_character_state(&self, id: Uuid) -> Result<Option<Value>> {
         self.repo.get_character_state(id).await
+    }
+
+    /// 把实体的权威名称补进档案返回值（原地覆盖同名键）。
+    ///
+    /// 为什么必须有这一步：实体名只存在 `entity.name` 一处（关系的两端、列表、
+    /// 前端卡片用的都是它）；而 `character_profile.name` 是历史遗留的冗余列，
+    /// **它常常是空的**（实测 12 个角色里 8 个为 NULL）。两处并存的结果是
+    /// 「档案读出来 name=null、写入又只回显传进去的字段」，调用方以为名字丢了。
+    ///
+    /// 这里以 `entity.name` 为准覆盖，让档案返回的名字恒等于实体真名——
+    /// 单一真源，不给调用方留第二个可能为空的字段去纠结。
+    async fn with_entity_name(&self, id: Uuid, mut profile: Value) -> Result<Value> {
+        let entity = self
+            .repo
+            .get_entity(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("entity {} not found", id))?;
+        let entity_name = entity.get("name").cloned().unwrap_or(Value::Null);
+
+        match profile.as_object_mut() {
+            Some(obj) => {
+                obj.insert("name".to_string(), entity_name);
+            }
+            None => {
+                anyhow::bail!(
+                    "{} 的档案返回值不是 JSON 对象，无法补入实体名",
+                    id
+                );
+            }
+        }
+        Ok(profile)
     }
 
     /// 改档案前先确认实体存在。
@@ -201,7 +295,10 @@ impl EntityService {
         if let Some(before) = self.repo.get_character_profile(id).await? {
             self.repo.snapshot_profile(id, "character", &before, self.actor).await?;
         }
-        self.repo.update_character_profile(id, profile, self.actor).await
+        let written = self.repo.update_character_profile(id, profile, self.actor).await?;
+        // 写入路径同样补实体名：否则「没传 name 就不回显 name」会让调用方
+        // 误以为名字丢了（实测 AI 就是这样误判的）
+        self.with_entity_name(id, written).await
     }
 
     pub async fn update_character_state(&self, id: Uuid, state: Value) -> Result<Value> {
@@ -213,7 +310,10 @@ impl EntityService {
     }
 
     pub async fn get_location_profile(&self, id: Uuid) -> Result<Option<Value>> {
-        self.repo.get_location_profile(id).await
+        let Some(profile) = self.repo.get_location_profile(id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.with_entity_name(id, profile).await?))
     }
 
     pub async fn upsert_location_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
@@ -221,11 +321,15 @@ impl EntityService {
         if let Some(before) = self.repo.get_location_profile(id).await? {
             self.repo.snapshot_profile(id, "location", &before, self.actor).await?;
         }
-        self.repo.upsert_location_profile(id, profile, self.actor).await
+        let written = self.repo.upsert_location_profile(id, profile, self.actor).await?;
+        self.with_entity_name(id, written).await
     }
 
     pub async fn get_faction_profile(&self, id: Uuid) -> Result<Option<Value>> {
-        self.repo.get_faction_profile(id).await
+        let Some(profile) = self.repo.get_faction_profile(id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.with_entity_name(id, profile).await?))
     }
 
     pub async fn upsert_faction_profile(&self, id: Uuid, profile: Value) -> Result<Value> {
@@ -233,7 +337,8 @@ impl EntityService {
         if let Some(before) = self.repo.get_faction_profile(id).await? {
             self.repo.snapshot_profile(id, "faction", &before, self.actor).await?;
         }
-        self.repo.upsert_faction_profile(id, profile, self.actor).await
+        let written = self.repo.upsert_faction_profile(id, profile, self.actor).await?;
+        self.with_entity_name(id, written).await
     }
 
     pub async fn get_character_knowledge(&self, id: Uuid) -> Result<Vec<Value>> {
