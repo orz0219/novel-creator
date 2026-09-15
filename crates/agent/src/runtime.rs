@@ -15,8 +15,8 @@ use anyhow::{Context, Result};
 use async_stream::stream;
 use chrono::Utc;
 use domain::ports::{
-    AgentPromptConfig, AiSettingsPort, GuideProgressPort, LlmPort, LlmStreamChunk, LlmUsage,
-    PromptRepositoryPort,
+    AgentPromptConfig, AiSettingsPort, GenerationPurpose, GuideProgressPort, LlmPort,
+    LlmStreamChunk, LlmUsage, PromptRepositoryPort,
 };
 use futures::Stream;
 use futures::StreamExt;
@@ -316,7 +316,12 @@ impl AgentRuntime {
             .context("读取运行时 AI 配置失败")?;
         let reply = self
             .llm
-            .complete(&system, &user_prompt, &config.model)
+            .complete(
+                &system,
+                &user_prompt,
+                config.model_for(GenerationPurpose::Agent),
+                config.temperature_for(GenerationPurpose::Agent),
+            )
             .await?;
 
         session.messages.push(ChatMessage {
@@ -410,9 +415,14 @@ impl AgentRuntime {
             let mut format_retries: usize = 0;
             let mut parse_retries: usize = 0;
 
-            // 本轮对话使用的模型名：启动时不固化，每次对话前从设置页读取。
-            let model = match ai_settings.load().await {
-                Ok(config) => config.model,
+            // 本轮对话使用的模型与温度：启动时不固化，每次对话前从设置页读取。
+            // 用途固定为 Agent（引导对话 + 细纲落库）：它要的是逻辑与稳定，
+            // 不是文采——所以可以和"正文生成"用不同的模型与温度。
+            let (model, temperature) = match ai_settings.load().await {
+                Ok(config) => (
+                    config.model_for(GenerationPurpose::Agent).to_string(),
+                    config.temperature_for(GenerationPurpose::Agent),
+                ),
                 Err(e) => {
                     yield Ok(AgentStreamEvent::Error(format!("读取运行时 AI 配置失败：{}", e)));
                     return;
@@ -460,7 +470,10 @@ impl AgentRuntime {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                let mut llm_stream = match llm.stream_complete(&system, &history, &model).await {
+                let mut llm_stream = match llm
+                    .stream_complete(&system, &history, &model, temperature)
+                    .await
+                {
                     Ok(st) => st,
                     Err(e) => {
                         yield Ok(AgentStreamEvent::Error(e.to_string()));
@@ -979,7 +992,8 @@ impl AgentRuntime {
             .complete(
                 crate::summary::SUMMARY_SYSTEM_PROMPT,
                 &prompt,
-                &config.model,
+                config.model_for(GenerationPurpose::Utility),
+                config.temperature_for(GenerationPurpose::Utility),
             )
             .await
             .context("生成会话摘要失败")?;

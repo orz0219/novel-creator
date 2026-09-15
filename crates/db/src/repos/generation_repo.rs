@@ -183,6 +183,9 @@ impl TaskRepo {
             input,
             output: None,
             status: TaskStatus::Pending,
+            // 这个创建入口不接受模型参数；需要任务级覆盖时走 API 的 create_task
+            // （application_ports 的 INSERT 会写入 model 列）。
+            model: None,
             token_usage: None,
             error: None,
             created_at: now,
@@ -215,7 +218,7 @@ impl TaskRepo {
 
     pub async fn get_by_id(&self, task_id: Uuid) -> Result<Option<GenerationTask>> {
         let row = sqlx::query_as::<_, GenerationTaskRow>(
-            "SELECT id, project_id, skill_id, target_id AS scene_id, parameters AS input, result AS output, status, error, created_at, updated_at AS completed_at \
+            "SELECT id, project_id, skill_id, target_id AS scene_id, parameters AS input, result AS output, status, error, model, created_at, updated_at AS completed_at \
              FROM generation_task WHERE id = $1",
         )
         .bind(task_id)
@@ -296,6 +299,8 @@ struct GenerationTaskRow {
     output: Option<serde_json::Value>,
     status: String,
     error: Option<String>,
+    /// 任务级模型覆盖（可为空）
+    model: Option<String>,
     created_at: DateTime<Utc>,
     completed_at: Option<DateTime<Utc>>,
 }
@@ -310,6 +315,7 @@ impl From<GenerationTaskRow> for GenerationTask {
             input: r.input.unwrap_or_default(),
             output: r.output,
             status: ser::parse_task_status(&r.status),
+            model: r.model,
             token_usage: None,
             error: r.error,
             created_at: r.created_at,

@@ -4,8 +4,23 @@ import { api } from './client'
 export interface AppSettings {
   projectName?: string
   language?: string
-  /** 模型名（真源：后端每次 LLM 调用前读取本字段）。 */
+  /** 模型名（真源：后端每次 LLM 调用前读取本字段）。未按用途单独配置时的保底。 */
   defaultModel?: string
+  /**
+   * 按用途分配的模型：`{ "<用途key>": "<模型名>" }`。
+   *
+   * 用途 key 固定四类（与后端 `GenerationPurpose` 一致）：
+   * agent（引导对话 / 细纲）、prose（正文生成）、polish（选区改写）、utility（摘要 / 抽取）。
+   * 缺失的用途回落到 `defaultModel`。
+   */
+  taskModels?: Record<string, string>
+  /**
+   * 按用途分配的温度：`{ "<用途key>": <0-2 的数> }`。
+   *
+   * 逻辑类压低（少自由发挥）、文学类抬高（留表达空间）；缺失的用途用后端内置默认
+   * （agent 0.4 / prose 0.95 / polish 0.85 / utility 0.2）。
+   */
+  taskTemperatures?: Record<string, number>
   /**
    * 供应商 id（见 aiProviders.ts）。
    * 后端不读该字段，只用于设置页刷新后回显下拉选中项。

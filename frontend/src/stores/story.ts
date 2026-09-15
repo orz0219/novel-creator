@@ -26,7 +26,15 @@ export const useStoryStore = defineStore("story", () => {
         roots.push(treeNode)
       }
     }
-    return roots.sort((a, b) => a.sort_order - b.sort_order)
+    // 显式按 sort_order 排每一层：接口返回的是全项目 ORDER BY sort_order 的扁平列表，
+    // 只排 roots 的话，children 的顺序就依赖「组内相对顺序恰好被保持」这个巧合。
+    const bySortOrder = (a: TreeNode, b: TreeNode) => a.sort_order - b.sort_order
+    const sortLevels = (list: TreeNode[]) => {
+      list.sort(bySortOrder)
+      for (const item of list) sortLevels(item.children)
+    }
+    sortLevels(roots)
+    return roots
   })
 
   // Fetch narrative nodes
@@ -84,6 +92,29 @@ export const useStoryStore = defineStore("story", () => {
     return result
   }
 
+  /**
+   * 只改节点状态（看板拖拽/快捷按钮用）。
+   * 后端 PUT /narrative/{id} 是部分更新，只传 status 不会碰 title/content。
+   * 乐观更新：先动界面，请求失败必须把本地状态退回原值再抛错 ——
+   * 退回是为了让界面与后端保持一致，抛错是为了让调用方提示用户，两者都不能省。
+   */
+  async function setNodeStatus(id: string, status: NarrativeNodeStatus) {
+    const idx = nodes.value.findIndex(n => n.id === id)
+    if (idx === -1) throw new Error(`节点不在当前列表中，无法改状态：${id}`)
+    const previous = nodes.value[idx]
+    if (previous.status === status) return previous
+
+    nodes.value[idx] = { ...previous, status }
+    try {
+      const result = await narrativeApi.updateNode(id, { status })
+      nodes.value[idx] = result
+      return result
+    } catch (e) {
+      nodes.value[idx] = previous
+      throw e
+    }
+  }
+
   async function deleteNode(id: string) {
     await narrativeApi.deleteNode(id)
     nodes.value = nodes.value.filter(n => n.id !== id)
@@ -138,7 +169,7 @@ export const useStoryStore = defineStore("story", () => {
   return {
     nodes, storylines, storylineRelations, foreshadows, loading, error, selectedNodeId, selectedNode, tree,
     fetchNodes, fetchStorylines, fetchForeshadows,
-    createNode, updateNode, deleteNode,
+    createNode, updateNode, deleteNode, setNodeStatus,
     createStoryline, updateStoryline, deleteStoryline,
     createForeshadow, updateForeshadow, deleteForeshadow,
     selectNode,

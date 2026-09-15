@@ -94,14 +94,24 @@ ensure_postgres
 wait_port $POSTGRES_PORT "PostgreSQL"
 echo ""
 
-echo -e "${GREEN}[3/4] 启动后端...${NC}"
+echo -e "${GREEN}[3/4] 构建并启动后端...${NC}"
 if is_port_used $BACKEND_PORT; then
     echo -e "${YELLOW}后端已在运行 (端口 $BACKEND_PORT)${NC}"
 else
     cd /Users/wangxingchao/Documents/novel
-    DATABASE_URL=$DB_URL cargo run --bin narrative-engine &
+    # 编译必须与端口等待分开：冷编译整个 workspace（263 个 crate）要数分钟，
+    # 用 cargo run 会把编译时间算进 wait_port 的 30 秒窗口，冷编译必然误报"启动超时"。
+    echo -e "${YELLOW}正在编译后端二进制（冷编译可能持续数分钟，此阶段不计入端口等待）...${NC}"
+    cargo build --bin narrative-engine
+    echo -e "${GREEN}[OK] 后端二进制已就绪${NC}"
+    # 直接运行二进制（而非 cargo run），$! 才是服务进程本身，失败时才能被终止
+    DATABASE_URL=$DB_URL ./target/debug/narrative-engine &
     BACKEND_PID=$!
-    wait_port $BACKEND_PORT "Backend API"
+    if ! wait_port $BACKEND_PORT "Backend API"; then
+        echo -e "${RED}后端未能在 30 秒内监听端口 $BACKEND_PORT，终止进程 $BACKEND_PID${NC}"
+        kill $BACKEND_PID 2>/dev/null
+        exit 1
+    fi
 fi
 echo ""
 
@@ -112,7 +122,11 @@ else
     cd /Users/wangxingchao/Documents/novel/frontend
     npm run dev &
     FRONTEND_PID=$!
-    wait_port $FRONTEND_PORT "Frontend Dev Server"
+    if ! wait_port $FRONTEND_PORT "Frontend Dev Server"; then
+        echo -e "${RED}前端未能在 30 秒内监听端口 $FRONTEND_PORT，终止进程 $FRONTEND_PID${NC}"
+        kill $FRONTEND_PID 2>/dev/null
+        exit 1
+    fi
 fi
 echo ""
 

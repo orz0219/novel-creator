@@ -41,7 +41,13 @@ impl InfraLlmPort {
 
 #[async_trait]
 impl LlmPort for InfraLlmPort {
-    async fn complete(&self, system_prompt: &str, user_prompt: &str, model: &str) -> Result<String> {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model: &str,
+        temperature: f32,
+    ) -> Result<String> {
         let max_tokens = self.max_output_tokens().await?;
         let request = LlmRequest {
             messages: vec![
@@ -55,7 +61,9 @@ impl LlmPort for InfraLlmPort {
                 },
             ],
             max_tokens,
-            temperature: 0.7,
+            // 温度由调用方按用途给出（逻辑类低、文学类高），此处不再写死 0.7：
+            // 同一个值伺候"严密的细纲"和"有文采的正文"，两头都不讨好。
+            temperature,
             model: model.to_string(),
         };
         let response = self.client.generate(request).await?;
@@ -67,6 +75,7 @@ impl LlmPort for InfraLlmPort {
         system_prompt: &str,
         user_prompt: &str,
         model: &str,
+        temperature: f32,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk>> + Send>>> {
         let max_tokens = self.max_output_tokens().await?;
         let request = LlmRequest {
@@ -81,7 +90,9 @@ impl LlmPort for InfraLlmPort {
                 },
             ],
             max_tokens,
-            temperature: 0.7,
+            // 温度由调用方按用途给出（逻辑类低、文学类高），此处不再写死 0.7：
+            // 同一个值伺候"严密的细纲"和"有文采的正文"，两头都不讨好。
+            temperature,
             model: model.to_string(),
         };
         self.client.stream_generate(request).await

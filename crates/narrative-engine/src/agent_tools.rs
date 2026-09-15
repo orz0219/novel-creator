@@ -13,7 +13,7 @@
 //! status='Deleted'、Relation 为语义化结束 valid_until、Narrative 为软删除），
 //! 历史 Event / Fact 仅提供创建与读取，不提供修改 / 删除（不可篡改）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use agent::{AgentTool, ToolRegistry};
@@ -738,6 +738,18 @@ fn attributes_arg(input: &Value) -> Result<Value> {
     }
 }
 
+/// `attributes` 的**可选**解析（revise 用）：给了必须是对象，不给就什么都不改。
+///
+/// 与 create 用的 [`attributes_arg`] 语义不同——create 不给就是空对象，
+/// revise 不给则保持原值（`None` = 不动），不能混用。
+fn opt_attributes_arg(input: &Value) -> Result<Option<Value>> {
+    match input.get("attributes") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v @ Value::Object(_)) => Ok(Some(v.clone())),
+        Some(other) => anyhow::bail!("attributes 应为对象，收到：{}", other),
+    }
+}
+
 fn opt_bool(v: &Value, key: &str) -> Result<bool> {
     match v.get(key) {
         None | Some(Value::Null) => Ok(false),
@@ -927,7 +939,8 @@ fn narrative_schema(a: NarrativeAction) -> Value {
                 "move_to_root": { "type": "boolean", "description": "**可选**：移到顶层（parent_id 置空）。与 parent_id 互斥" },
                 "sort_order": { "type": "number", "description": "**可选**：同父下的目标序号（1 起）。给了就**重排**：同父其他节点自动顺移，序号保持 1..n 连续；换父但没给序号时追加到新父末尾" },
                 "clear_storyline": { "type": "boolean", "description": "**可选**：解绑故事线（连 arc_stage 一起清空）" },
-                "clear_location": { "type": "boolean", "description": "**可选**：解绑地点" }
+                "clear_location": { "type": "boolean", "description": "**可选**：解绑地点" },
+                "attributes": { "type": "object", "description": "**可选**：补充属性（自由对象，**整体替换**，不给就不动）。细纲场景的 objective / conflict / pov_character_id / location_id / required_events / forbidden_events 等都放在这里；建节点时漏填的字段用它补齐，**不要**删了重建——场景一旦被伏笔锚点引用，重建会让锚点脱钩" }
             });
             insert_props(&mut props, node_outline_props());
             json!({ "type": "object", "properties": props, "required": ["id"] })
@@ -1033,6 +1046,7 @@ impl AgentTool for NarrativeTool {
                         description.as_deref(),
                         content.as_deref(),
                         opt_str(&input, "status"),
+                        opt_attributes_arg(&input)?,
                         outline,
                     )
                     .await?;
@@ -3130,6 +3144,68 @@ async fn project_status_snapshot(
     .context("统计未挂节点的重要故事线失败")?;
     snapshot.important_storylines_without_node = important_without_node;
 
+    // 细纲·章表：章节点数、空壳弧（下面一个章都没有的弧）、空壳章（没有一句话事件）
+    let (chapter_node_count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM narrative_node WHERE project_id = $1 AND node_type = 'Chapter' AND status != 'Deleted'",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .context("统计章节点数失败")?;
+    snapshot.chapter_node_count = chapter_node_count;
+
+    let (arcs_without_chapter,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM narrative_node arc \
+         WHERE arc.project_id = $1 AND arc.node_type = 'Arc' AND arc.status != 'Deleted' \
+         AND NOT EXISTS (SELECT 1 FROM narrative_node ch \
+                         WHERE ch.parent_id = arc.id AND ch.node_type = 'Chapter' AND ch.status != 'Deleted')",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .context("统计空壳弧失败")?;
+    snapshot.arcs_without_chapter = arcs_without_chapter;
+
+    let (chapters_without_description,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM narrative_node \
+         WHERE project_id = $1 AND node_type = 'Chapter' AND status != 'Deleted' \
+         AND (description IS NULL OR btrim(description) = '')",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .context("统计空壳章失败")?;
+    snapshot.chapters_without_description = chapters_without_description;
+
+    // 细纲·场景：场景数 + 必填属性不全的场景数。
+    // 字段清单来自 agent::guide::SCENE_REQUIRED_FIELDS（单一事实源），
+    // 不在这里再抄一份——两处清单必然分叉。
+    let (scene_node_count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM narrative_node WHERE project_id = $1 AND node_type = 'Scene' AND status != 'Deleted'",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .context("统计场景节点数失败")?;
+    snapshot.scene_node_count = scene_node_count;
+
+    let scene_field_checks: Vec<String> = agent::guide::SCENE_REQUIRED_FIELDS
+        .iter()
+        .map(|field| format!("COALESCE(btrim(attributes->>'{}'), '') <> ''", field))
+        .collect();
+    let scene_missing_sql = format!(
+        "SELECT COUNT(*) FROM narrative_node \
+         WHERE project_id = $1 AND node_type = 'Scene' AND status != 'Deleted' \
+         AND NOT ({})",
+        scene_field_checks.join(" AND ")
+    );
+    let (scenes_missing_required_fields,): (i64,) = sqlx::query_as(&scene_missing_sql)
+        .bind(project_id)
+        .fetch_one(pool)
+        .await
+        .context("统计必填属性不全的场景失败")?;
+    snapshot.scenes_missing_required_fields = scenes_missing_required_fields;
+
     Ok((snapshot, config))
 }
 
@@ -3157,7 +3233,10 @@ pub fn register_guide_tools(registry: &ToolRegistry, pool: PgPool) {
     registry.register(Arc::new(GuideTool::new(pool.clone())));
     // 只读的进度查询：与 confirm_step 共用同一套快照与校验，
     // 但**绝不推进**任何东西（问进度不该有副作用）。
-    registry.register(Arc::new(ProjectStatusTool::new(pool)));
+    registry.register(Arc::new(ProjectStatusTool::new(pool.clone())));
+    // 细纲细化度：引导进度只回答"阶段走到哪了"，回答不了"细纲细到什么程度、
+    // 下一步该做哪个弧"。没有它，AI 在 100+ 章规模下无法自查（列表投影不含 description）。
+    registry.register(Arc::new(OutlineProgressTool::new(pool)));
 }
 
 /// 项目引导进度查询（只读）。
@@ -3206,6 +3285,303 @@ impl AgentTool for ProjectStatusTool {
     }
 }
 
+/// 细纲细化度查询（只读）。
+///
+/// 存在的理由：`list_nodes` 的目录投影里**没有 description**，AI 想找出「哪一章还是空壳」
+/// 只能逐节点 `get_node`（单轮工具迭代上限 50 次、列表每页 20 条），
+/// 在 100+ 章的规模下根本做不完——于是它只能凭印象说"细纲差不多了"。
+/// 这个工具把「细到什么程度了 + 下一步该做哪一块」压成一次调用。
+///
+/// 判定口径与 `beats.chapters` / `beats.scenes` 两步的 `validate_step` 保持一致
+/// （章要有 description、场景要有 [`agent::guide::SCENE_REQUIRED_FIELDS`]），
+/// 否则又会出现「这里说齐了、点推进却报缺东西」。
+pub struct OutlineProgressTool {
+    pool: PgPool,
+}
+
+impl OutlineProgressTool {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+/// 树序节点行：(id, title, node_type, parent_id, description, attributes, 树序路径)
+type OutlineRow = (
+    Uuid,
+    String,
+    String,
+    Option<Uuid>,
+    Option<String>,
+    Value,
+    Vec<i32>,
+);
+
+/// 场景的 `attributes` 是否具备全部必填字段。
+///
+/// 与 `beats.scenes` 步的 `validate_step` 是**同一口径**：字段清单同取自
+/// [`agent::guide::SCENE_REQUIRED_FIELDS`]，判空方式等价于 SQL 端的
+/// `btrim(attributes->>'x') <> ''`（这几个字段在数据里都是字符串）。
+/// 口径一旦分叉，就会出现「工具说可以开始写正文了，点推进却报场景缺字段」。
+fn scene_attributes_ready(attributes: &Value) -> bool {
+    agent::guide::SCENE_REQUIRED_FIELDS.iter().all(|field| {
+        attributes
+            .get(*field)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// 列表型字段最多返回多少条（工具结果有 12,000 字符硬上限，
+/// 章节多的项目必须截断；总数另行给出，不丢信息）。
+const OUTLINE_LIST_MAX: usize = 20;
+
+#[async_trait]
+impl AgentTool for OutlineProgressTool {
+    fn name(&self) -> String {
+        "outline_progress".to_string()
+    }
+
+    fn description(&self) -> String {
+        "查询本项目「细纲细化到什么程度」：卷/弧/章/场各多少个、哪些章还是空壳（没有一句话事件）、\
+         哪些弧下面还没有章、哪些重要故事线还没挂到节点、哪些章还没有场景，\
+         以及**下一步该做哪一块**（next_suggestion）。\
+         被问「细纲还差什么 / 接下来做什么 / 从哪开始」时先用它；\
+         不要靠 list_nodes 逐页翻去找空壳章——列表投影里没有 description，翻不出来。\
+         只读，不改任何数据。"
+            .to_string()
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": { "type": "string", "description": "项目 UUID（框架会自动注入当前会话的项目）" }
+            },
+            "required": ["project_id"]
+        })
+    }
+
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let project_id = parse_uuid(&input, "project_id")?;
+        let mut report = outline_progress_report(&self.pool, project_id).await?;
+        report["ok"] = json!(true);
+        report["action"] = json!("outline_progress");
+        Ok(report)
+    }
+}
+
+/// 组装细纲进度报告。一次递归查询把整棵树按**树序**取出，其余统计在内存里算。
+///
+/// 为什么必须按树序：`narrative_node.sort_order` 是**同父内**的序号，
+/// 直接 `ORDER BY sort_order` 会让不同弧的章交错出现（第 1 章、第 4 章、第 7 章……），
+/// 而"接下来该写哪几章"完全依赖顺序正确。
+async fn outline_progress_report(pool: &PgPool, project_id: Uuid) -> Result<Value> {
+    let rows: Vec<OutlineRow> = sqlx::query_as(
+        "WITH RECURSIVE tree AS ( \
+             SELECT id, title, node_type, parent_id, description, attributes, sort_order, \
+                    ARRAY[sort_order] AS path \
+             FROM narrative_node \
+             WHERE project_id = $1 AND parent_id IS NULL AND status != 'Deleted' \
+             UNION ALL \
+             SELECT n.id, n.title, n.node_type, n.parent_id, n.description, n.attributes, n.sort_order, \
+                    t.path || n.sort_order \
+             FROM narrative_node n \
+             JOIN tree t ON n.parent_id = t.id \
+             WHERE n.project_id = $1 AND n.status != 'Deleted' \
+         ) \
+         SELECT id, title, node_type, parent_id, description, attributes, path FROM tree ORDER BY path",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .context("按树序读取叙事节点失败")?;
+
+    let title_by_id: HashMap<Uuid, String> =
+        rows.iter().map(|r| (r.0, r.1.clone())).collect();
+    let count_of = |kind: &str| rows.iter().filter(|r| r.2 == kind).count() as i64;
+
+    let volumes = count_of("Volume");
+    let arcs = count_of("Arc");
+    let chapters = count_of("Chapter");
+    let scenes = count_of("Scene");
+    // 字段不全的场景：判定口径与 beats.scenes 步完全一致（同一个 helper）
+    let scenes_missing_fields = rows
+        .iter()
+        .filter(|r| r.2 == "Scene" && !scene_attributes_ready(&r.5))
+        .count() as i64;
+
+    let mut hollow_chapters: Vec<Value> = Vec::new();
+    let mut chapters_without_scene: Vec<Value> = Vec::new();
+    for row in &rows {
+        if row.2 != "Chapter" {
+            continue;
+        }
+        let desc_empty = row
+            .4
+            .as_deref()
+            .map(|d| d.trim().is_empty())
+            .unwrap_or(true);
+        // 注意是「没有**就绪**的场景」：只有 Scene 节点但 attributes 不全，
+        // 在正文生成引擎眼里等于没有（它读的就是那几个字段）。
+        let has_ready_scene = rows
+            .iter()
+            .any(|s| s.2 == "Scene" && s.3 == Some(row.0) && scene_attributes_ready(&s.5));
+        let entry = json!({
+            "id": row.0.to_string(),
+            "title": row.1,
+            "parent_title": row.3.and_then(|pid| title_by_id.get(&pid).cloned()),
+        });
+        // 空壳章与「缺场景」是两件事：没有一句话事件的章先补文案，再谈展开场景。
+        if desc_empty {
+            hollow_chapters.push(entry);
+        } else if !has_ready_scene {
+            chapters_without_scene.push(entry);
+        }
+    }
+
+    let arcs_without_chapter: Vec<Value> = rows
+        .iter()
+        .filter(|r| {
+            r.2 == "Arc"
+                && !rows
+                    .iter()
+                    .any(|c| c.2 == "Chapter" && c.3 == Some(r.0))
+        })
+        .map(|r| json!({ "id": r.0.to_string(), "title": r.1 }))
+        .collect();
+
+    let storyline_rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT s.id::text, s.name, COALESCE(s.importance, 'Normal') FROM storyline s \
+         WHERE s.project_id = $1 AND s.importance IN ('Main', 'Important') \
+         AND NOT EXISTS (SELECT 1 FROM narrative_node n WHERE n.storyline_id = s.id AND n.status != 'Deleted') \
+         ORDER BY s.created_at",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .context("统计未挂节点的重要故事线失败")?;
+    let storylines_without_node: Vec<Value> = storyline_rows
+        .iter()
+        .map(|(id, name, importance)| json!({ "id": id, "name": name, "importance": importance }))
+        .collect();
+
+    let hollow_total = hollow_chapters.len();
+    let no_scene_total = chapters_without_scene.len();
+    let arc_no_chapter_total = arcs_without_chapter.len();
+
+    // 场景数量门槛取自引导流程定义本身（beats.scenes 步的 min_scenes），
+    // 不在这里另写一个数字——两处数字必然分叉，而分叉之后没人知道哪份对。
+    let min_scenes_required = agent::guide::STEPS
+        .iter()
+        .find(|s| s.key == agent::guide::STEP_BEATS_SCENES)
+        .and_then(|s| match &s.min_complete {
+            agent::guide::MinComplete::BeatsScenes { min_scenes } => Some(*min_scenes),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "引导流程定义不一致：{} 步未使用 MinComplete::BeatsScenes",
+                agent::guide::STEP_BEATS_SCENES
+            )
+        })?;
+
+    // 下一步建议：按"先粗后细"的顺序判断，命中即返回——AI 拿到它就不用猜该干什么。
+    let next_suggestion = if volumes == 0 {
+        json!({
+            "action": "先建卷",
+            "reason": "项目里还没有任何卷节点（node_type='Volume'），细纲的顶层就是卷",
+            "tool": "create_node / bulk_create_nodes",
+        })
+    } else if arc_no_chapter_total > 0 {
+        json!({
+            "action": "给这些弧补章",
+            "reason": format!("有 {} 个弧下面一个章都没有——弧不能是空壳", arc_no_chapter_total),
+            "arcs": arcs_without_chapter.iter().take(OUTLINE_LIST_MAX).collect::<Vec<_>>(),
+            "tool": "create_node(parent_id=弧 id, node_type='Chapter')",
+        })
+    } else if hollow_total > 0 {
+        json!({
+            "action": "给这些章补一句话事件",
+            "reason": format!(
+                "有 {} 章没有 description（空壳章）；每章都要写清「谁做了什么、结果如何」，这是后面写正文的唯一依据",
+                hollow_total
+            ),
+            "chapters": hollow_chapters.iter().take(OUTLINE_LIST_MAX).collect::<Vec<_>>(),
+            "tool": "revise_node（写 description）",
+        })
+    } else if !storylines_without_node.is_empty() {
+        json!({
+            "action": "把重要故事线挂到节点上",
+            "reason": "这些重要线（Main / Important）还没有任何节点认领它们",
+            "storylines": storylines_without_node,
+            "tool": "revise_node / create_node（storyline_id + arc_stage）",
+        })
+    } else if no_scene_total > 0 || scenes_missing_fields > 0 || scenes < min_scenes_required {
+        // 三种情况都归到同一步：章下面没有场、场有了但字段不全、场景总数不够。
+        // 它们的修法相同（继续展开/补齐场景），所以合成一条建议，但把原因分别说清。
+        let mut reasons: Vec<String> = Vec::new();
+        if no_scene_total > 0 {
+            reasons.push(format!("还有 {} 章没有就绪的场景", no_scene_total));
+        }
+        if scenes_missing_fields > 0 {
+            reasons.push(format!(
+                "有 {} 个场景缺少必填属性（{}）",
+                scenes_missing_fields,
+                agent::guide::SCENE_REQUIRED_FIELDS.join(" / ")
+            ));
+        }
+        if scenes < min_scenes_required {
+            reasons.push(format!(
+                "场景总数 {} 个，引导流程要求至少 {} 个",
+                scenes, min_scenes_required
+            ));
+        }
+        json!({
+            "action": "把接下来要写的几章展开成场景",
+            "reason": format!(
+                "{}；细纲只要保证「前方 3-5 章是细的」，不要全书一次展开",
+                reasons.join("；")
+            ),
+            "chapters": chapters_without_scene.iter().take(5).collect::<Vec<_>>(),
+            "scene_required_fields": agent::guide::SCENE_REQUIRED_FIELDS,
+            "tool": "create_node(node_type='Scene', parent_id=章 id)，字段填进 attributes",
+        })
+    } else {
+        json!({
+            "action": "可以进入正文写作",
+            "reason": "卷 / 弧 / 章 / 场景都已就位，每章都有一句话事件、且场景的必填属性齐全",
+            "tool": "写作页：选场景 → AI 生成",
+        })
+    };
+
+    hollow_chapters.truncate(OUTLINE_LIST_MAX);
+    chapters_without_scene.truncate(OUTLINE_LIST_MAX);
+    let arcs_without_chapter: Vec<Value> =
+        arcs_without_chapter.into_iter().take(OUTLINE_LIST_MAX).collect();
+
+    Ok(json!({
+        "counts": {
+            "volumes": volumes,
+            "arcs": arcs,
+            "chapters": chapters,
+            "scenes": scenes,
+            "scenes_missing_required_fields": scenes_missing_fields,
+        },
+        "scene_min_required": min_scenes_required,
+        "scene_required_fields": agent::guide::SCENE_REQUIRED_FIELDS,
+        "hollow_chapters_total": hollow_total,
+        "hollow_chapters": hollow_chapters,
+        "arcs_without_chapter_total": arc_no_chapter_total,
+        "arcs_without_chapter": arcs_without_chapter,
+        "storylines_without_node_total": storylines_without_node.len(),
+        "storylines_without_node": storylines_without_node,
+        "chapters_without_scene_total": no_scene_total,
+        "chapters_without_scene": chapters_without_scene,
+        "next_suggestion": next_suggestion,
+    }))
+}
+
 /// 组装「引导进度」只读报告：当前阶段 + 每一步的就绪情况 + 未就绪步骤还缺什么。
 ///
 /// **三个消费方共用这一份实现**：`get_project_status` 工具（AI 回答"还差什么"）、
@@ -3226,6 +3602,10 @@ async fn guide_status(pool: &PgPool, project_id: Uuid) -> Result<Value> {
         let report = validate_step(step.key, &snapshot);
         let status = match step.key {
             k if k == current_step => "current",
+            // 终点步（next 为空，现在的「正文」）的判据是 AlwaysSatisfied ——
+            // 它在流程第一步就已经"通过"了。若照常打勾，界面会在故事脑洞阶段
+            // 就显示「正文 ✓」，让人误以为全书已经写完。
+            _ if step.next.is_empty() => "pending",
             _ if report.passed => "complete",
             _ => "pending",
         };

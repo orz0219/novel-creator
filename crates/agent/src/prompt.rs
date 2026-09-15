@@ -3,7 +3,7 @@
 //! P1 为单段基础提示词：身份 + 当前引导阶段 + 已记住设定 + 可用工具。
 //! 后续可拆为 `system/` 多文件动态组合（见 GPT 方案 6）。
 
-use crate::guide::{find_step, INITIAL_STEP};
+use crate::guide::{find_step, StepGroup, STEPS};
 use crate::types::ToolMeta;
 
 /// 把 JSON Schema 的字段类型压缩成适合放进 prompt 的一行描述。
@@ -116,8 +116,8 @@ pub const DEFAULT_SYSTEM_PROMPT_BASE: &str = "你是 Novel Creator 的创作引�
     === 关键概念：落库 vs 推进是两件事 ===\n\
     - 落库：你调工具（update_project / create_character / create_rule / create_relation 等）\n\
       把数据写入 DB。这是你可以做的（用户授权时）。\n\
-    - 推进：让项目从当前引导阶段（premise / world / golden_finger / characters / storylines / beats）\n\
-      进入下一阶段。这是用户在前端点按钮触发的（confirm_step 工具），你不能也不该自己调。\n\
+    - 推进：让项目从当前引导阶段进入下一阶段（完整流程见 prompt 末尾注入的「引导流程全貌」段）。\n\
+      这是用户在前端点按钮触发的（confirm_step 工具），你不能也不该自己调。\n\
     \n\
     用户点了按钮后，后端会做硬校验（min_complete）：满足才推进，不满足则告诉用户还差什么；\n\
     推进成功后你的下一轮对话会自动看到新的当前阶段（在 prompt 注入的「当前引导阶段」段）。\n\
@@ -172,10 +172,65 @@ pub const DEFAULT_SYSTEM_PROMPT_BASE: &str = "你是 Novel Creator 的创作引�
     6. 如果用户点按钮后端说'已就绪'但 current_step 没动：可能是 prompt 注入的\n\
        completion_signal 与数据库实际状态错位，以数据库为准（重启会话可重对齐）。";
 
+/// 渲染「引导流程全貌」段：全部步骤 + 当前位置 + 骨架/血肉分组。
+///
+/// 步骤清单直接来自 [`STEPS`]，不在这里另抄一份——两处清单必然分叉，
+/// 而分叉之后没人知道哪份是对的（本文件原先那句"完整 10 步清单"的注释
+/// 与实际步骤数对不上，就是这么来的）。
+fn build_flow_overview(current_step: &str) -> String {
+    let total = STEPS.len();
+    let position = STEPS.iter().position(|s| s.key == current_step);
+
+    let mut out = String::new();
+    out.push_str("\n=== 引导流程全貌 ===\n");
+    match position {
+        Some(idx) => out.push_str(&format!("你现在在第 {} / {} 步。\n", idx + 1, total)),
+        None => out.push_str(&format!(
+            "当前阶段 key 不在这份流程定义里（流程共 {} 步）。\n",
+            total
+        )),
+    }
+    out.push_str(
+        "骨架步（严格顺序，缺一不可）：\n  \
+         premise → world → golden_finger → protagonist → storylines\n  \
+         → beats.chapters（卷/弧/章 + 每章一句话事件）\n  \
+         → beats.scenes（把接下来要写的几章展开成场景）\n  \
+         → writing（正文写作，流程终点）\n",
+    );
+    out.push_str(
+        "血肉步（可自由顺序补，但进下一个骨架步前每类至少 1 个）：\n  \
+         world.map / world.factions / world.items / characters.supporting\n",
+    );
+    out.push_str("\n全部步骤：\n");
+    for (i, step) in STEPS.iter().enumerate() {
+        let marker = if step.key == current_step { "▶" } else { "　" };
+        let group = match step.group {
+            StepGroup::Skeleton => "骨架",
+            StepGroup::Flesh => "血肉",
+        };
+        out.push_str(&format!(
+            "{} {}. [{}] {}（key={}）\n",
+            marker,
+            i + 1,
+            group,
+            step.title,
+            step.key
+        ));
+    }
+    if let Some(step) = find_step(current_step) {
+        if step.next.is_empty() {
+            out.push_str("（当前就是最后一步；做完即流程终点，没有下一步）\n");
+        } else if let Some(next) = find_step(step.next) {
+            out.push_str(&format!("（下一步是：{}）\n", next.title));
+        }
+    }
+    out
+}
+
 /// 拼接系统提示词。
 ///
-/// `base` 为用户可编辑的基座（人格 / 引导策略）；其余段落（当前阶段、已记住设定、
-/// 可用工具、提问交互协议）由运行时按当前上下文自动追加。
+/// `base` 为用户可编辑的基座（人格 / 引导策略）；其余段落（引导流程全貌、当前阶段、
+/// 本步目标、已记住设定、可用工具、提问交互协议）由运行时按当前上下文自动追加。
 pub fn build_system_prompt(
     base: &str,
     current_step: &str,
@@ -186,24 +241,40 @@ pub fn build_system_prompt(
     p.push_str(base.trim());
     p.push('\n');
 
-    p.push_str(&format!("\n当前引导阶段：{}\n", current_step));
+    // 先给全貌，再给当前这一格：AI 必须知道自己站在第几步、后面还有哪几步，
+    // 否则它既无法自我定位，也无法告诉用户"整体还剩什么"。
+    p.push_str(&build_flow_overview(current_step));
 
-    // 注入本步目标 + 产物就绪条件：按 current_step 查 guide::STEPS，
-    // 找不到用 INITIAL_STEP。这两段一起让 LLM 既知道要做什么、也什么时候该说"可以推进"。
-    let step_key = if find_step(current_step).is_some() {
-        current_step
-    } else {
-        INITIAL_STEP
-    };
-    if let Some(step) = find_step(step_key) {
-        p.push_str(&format!("\n【本步目标】{}\n", step.title));
-        p.push_str(step.prompt_for_step);
-        p.push('\n');
-        p.push_str(&format!(
-            "\n【本步产物就绪条件】满足以下全部条件后，告诉用户'可以推进'并请他点按钮：\n{}",
-            step.completion_signal
-        ));
-        p.push('\n');
+    match find_step(current_step) {
+        Some(step) => {
+            p.push_str(&format!("\n【本步目标】{}\n", step.title));
+            p.push_str(step.prompt_for_step);
+            p.push('\n');
+
+            let lead = if step.next.is_empty() {
+                // 终点站没有下一步：绝不能再让 AI 说「请点下方确认推进按钮」——
+                // 前端那个按钮在最后一步已经换成「去写作页」，AI 说了用户也对不上。
+                "\n【本步说明】引导流程的最后一站（下方是本步的性质，不是待办条件）：\n"
+            } else {
+                // 措辞刻意与下面 completion_signal 自带的「本步产物就绪条件：」区分开，
+                // 否则拼出来会出现两行一样的标题，读起来像是重复粘贴。
+                "\n【就绪与推进】满足下列条件后，告诉用户「可以推进」并请他点按钮；\
+                 未满足时按 missing 列表说清还差什么：\n"
+            };
+            p.push_str(&format!("{}{}", lead, step.completion_signal));
+            p.push('\n');
+        }
+        None => {
+            // 不静默回落到 INITIAL_STEP：那会让 AI 拿着「脑洞阶段」的说明书
+            // 去干一个已经写到细纲的项目的活，而且它自己不知道拿错了。
+            p.push_str(&format!(
+                "\n⚠️ 当前引导阶段 key「{}」不在流程定义中。\n\
+                 这通常是旧版本遗留（例如拆步前的 `beats`）或数据被改坏。\n\
+                 请**先把这个情况原样告诉用户**，并建议他重置引导阶段或执行迁移；\n\
+                 在阶段被修正之前，不要按任何单个阶段的说明书继续产出。\n",
+                current_step
+            ));
+        }
     }
 
     if !memories.is_empty() {
@@ -255,4 +326,82 @@ pub fn build_system_prompt(
     p.push_str("\n**正例**：调用 update_project 写入脑洞：\n");
     p.push_str("<<CALL_TOOL>>{\"name\":\"update_project\",\"input\":{\"premise\":\"现代都市，主角捡到一块花不完的钱\"}}<<END>>\n");
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(step: &str) -> String {
+        build_system_prompt("基座文本", step, &[], &[])
+    }
+
+    #[test]
+    fn prompt_injects_whole_flow_and_position() {
+        let p = render(crate::guide::STEP_BEATS_SCENES);
+        assert!(p.contains("=== 引导流程全貌 ==="), "缺少流程全貌段");
+        // 位置必须真实：beats.scenes 在 STEPS 里的序号
+        let idx = STEPS
+            .iter()
+            .position(|s| s.key == crate::guide::STEP_BEATS_SCENES)
+            .expect("beats.scenes 应在 STEPS 里");
+        assert!(
+            p.contains(&format!("你现在在第 {} / {} 步", idx + 1, STEPS.len())),
+            "位置注入不正确：{}",
+            p
+        );
+        // 当前步必须被标记出来
+        assert!(p.contains(&format!("▶ {}. [", idx + 1)), "当前步没有被标记");
+        // 终点站要写清楚，否则 AI 会继续找下一步
+        assert!(p.contains("writing（正文写作，流程终点）"), "缺少终点说明");
+    }
+
+    #[test]
+    fn prompt_tells_terminal_step_not_to_ask_for_advance() {
+        let p = render(crate::guide::STEP_WRITING);
+        assert!(p.contains("最后一站"), "终点步应说明是最后一站");
+        assert!(
+            !p.contains("告诉用户「可以推进」"),
+            "终点步不应再引导 AI 让用户点推进按钮"
+        );
+        assert!(p.contains("没有下一步"), "终点步应明确没有下一步");
+    }
+
+    #[test]
+    fn non_terminal_step_still_asks_for_advance() {
+        let p = render(crate::guide::STEP_BEATS_CHAPTERS);
+        assert!(p.contains("满足下列条件后，告诉用户「可以推进」并请他点按钮"));
+        assert!(p.contains("下一步是：细纲·场景"), "应告知下一步是什么");
+    }
+
+    #[test]
+    fn unknown_step_does_not_silently_fall_back_to_premise() {
+        // 拆分前的遗留 key：必须明说，而不是拿 premise 的说明书继续干活
+        let p = render(crate::guide::LEGACY_STEP_BEATS);
+        assert!(p.contains("不在流程定义中"), "应明确报出未知阶段");
+        assert!(p.contains(crate::guide::LEGACY_STEP_BEATS));
+        assert!(
+            !p.contains("【本步目标】"),
+            "未知阶段不应注入任何单个阶段的目标说明"
+        );
+        // 注意：流程全貌段里会列出所有 key（包括 premise），所以不能断言「全文不含 premise」——
+        // 只能断言没有把任何阶段当成当前阶段注入（见上一条）。
+        assert!(
+            !p.contains("你现在在第"),
+            "未知阶段不应报告位置，更不该落到某个具体阶段"
+        );
+    }
+
+    #[test]
+    fn every_step_renders_with_its_own_title() {
+        for step in STEPS {
+            let p = render(step.key);
+            assert!(
+                p.contains(&format!("【本步目标】{}", step.title)),
+                "step '{}' 没渲染出自己的目标",
+                step.key
+            );
+            assert!(!p.contains("不在流程定义中"), "step '{}' 被判为未知", step.key);
+        }
+    }
 }

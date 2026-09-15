@@ -7,11 +7,12 @@
 //!
 //! 这样 Generation 不再直接写 Canon；所有落库变更都通过统一的提交者。
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use domain::generation::{ContextLayer, ContextPackage, ReproducibilityMeta};
 use domain::sha256_hex;
 use domain::ports::{
+    AiSettingsPort, GenerationPurpose,
     ContextSnapshotRepositoryPort, GenerationRepositoryPort, LlmPort, ProposalRepositoryPort,
 };
 use std::sync::Arc;
@@ -26,6 +27,8 @@ pub struct GenerationExecutor {
     snapshots: Arc<dyn ContextSnapshotRepositoryPort>,
     proposals: Arc<dyn ProposalRepositoryPort>,
     llm: Arc<dyn LlmPort>,
+    /// 运行时 AI 配置：正文生成按用途（Prose）取模型与温度。
+    settings: Arc<dyn AiSettingsPort>,
 }
 
 impl GenerationExecutor {
@@ -34,12 +37,14 @@ impl GenerationExecutor {
         snapshots: Arc<dyn ContextSnapshotRepositoryPort>,
         proposals: Arc<dyn ProposalRepositoryPort>,
         llm: Arc<dyn LlmPort>,
+        settings: Arc<dyn AiSettingsPort>,
     ) -> Self {
         Self {
             repo,
             snapshots,
             proposals,
             llm,
+            settings,
         }
     }
 
@@ -100,12 +105,27 @@ impl GenerationExecutor {
         user_prompt.push_str(
             "\n\n## 任务\n请严格依据上述设定撰写本场景的小说正文（中文、第三人称叙事），直接输出正文本身，不要大纲、不要解释、不要任何额外说明。",
         );
-        // 模型来源：统一配置透传（当前阶段以 OPENCODE_MODEL 为准；task 级覆盖为 P1）。
-        let model = std::env::var("OPENCODE_MODEL")
-            .unwrap_or_else(|_| "mimo-v2.5".to_string());
+        // 模型：任务级覆盖 → 用途配置（Prose = 正文生成）→ 全局默认。
+        // 这里原先硬编码环境变量 `OPENCODE_MODEL`（还带 "mimo-v2.5" 兜底默认值），
+        // 后果是**设置页里选的模型对正文生成完全无效**：用户改了设置却毫无变化。
+        let config = self
+            .settings
+            .load()
+            .await
+            .context("读取运行时 AI 配置失败（正文生成）")?;
+        let model = match task.model.as_deref() {
+            Some(explicit) => explicit.to_string(),
+            None => config.model_for(GenerationPurpose::Prose).to_string(),
+        };
+        // 温度不跟随任务级模型：任务级只覆盖"用哪个模型"，
+        // 温度始终按用途给（否则前端随便传个模型就会连带改变文风参数）。
+        let temperature = config.temperature_for(GenerationPurpose::Prose);
 
         let start = Instant::now();
-        let output = self.llm.complete(&system_prompt, &user_prompt, &model).await?;
+        let output = self
+            .llm
+            .complete(&system_prompt, &user_prompt, &model, temperature)
+            .await?;
         let latency_ms = start.elapsed().as_millis() as i64;
 
         // 保存 ContextSnapshot 并关联本次 Run（提案 十二）
@@ -171,7 +191,9 @@ impl GenerationExecutor {
             self.llm.clone(),
             task.project_id,
             Some(task_id),
-            &model,
+            // 抽取用 Utility 用途（便宜快），不是正文那个文学性模型
+            config.model_for(GenerationPurpose::Utility),
+            config.temperature_for(GenerationPurpose::Utility),
             &output,
         )
         .await

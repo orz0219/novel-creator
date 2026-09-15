@@ -127,7 +127,8 @@ pub async fn create_node(State(state): State<AppState>, Path(project_id): Path<S
 pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<UpdateNodeInput>) -> Result<Json<serde_json::Value>, AppError> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError(anyhow::anyhow!("Invalid node ID")))?;
     let service = narrative_service(&state);
-    // 结构 / 挂载补丁走默认值（什么都不改）：前端这个端点只改文本与状态
+    // 结构 / 挂载 / attributes 补丁走默认值（什么都不改）：前端这个端点只改文本与状态。
+    // attributes 由 Agent 的 revise_node 工具维护（细纲场景字段），前端不碰。
     let node = service
         .update_node(
             id,
@@ -135,6 +136,7 @@ pub async fn update_node(State(state): State<AppState>, Path(id): Path<String>, 
             input.description.as_deref(),
             input.content.as_deref(),
             input.status.as_deref(),
+            None,
             domain::narrative::NarrativeNodeOutlinePatch::default(),
         )
         .await?;

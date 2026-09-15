@@ -45,6 +45,13 @@ pub struct GenerationTask {
     pub input: serde_json::Value,
     pub output: Option<serde_json::Value>,
     pub status: TaskStatus,
+    /// 本次生成指定的模型（**任务级覆盖**）。
+    ///
+    /// 前端发起生成时可以显式指定；为 `None` 时按用途
+    /// （[`crate::ports::GenerationPurpose::Prose`]）从设置里取。
+    /// 这一列在数据库里一直存在，但结构体里没有对应字段，
+    /// 于是「指定了模型也不生效」——执行器当时硬编码了环境变量。
+    pub model: Option<String>,
     pub token_usage: Option<TokenUsage>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,

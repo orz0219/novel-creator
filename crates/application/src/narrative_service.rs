@@ -69,6 +69,12 @@ impl NarrativeService {
 
     /// 修改节点：文本 / 状态 + 结构与挂载补丁（换父、重排、挂线挂阶段、挂实体、元数据）。
     #[allow(clippy::too_many_arguments)]
+    /// 更新叙事节点。
+    ///
+    /// `attributes` 是**整体替换**语义（`None` = 不改）。它原先被写死成 `None`，
+    /// 导致「建节点时漏填的属性再也补不上」——细纲场景要求 objective / conflict /
+    /// pov_character_id / location_id 非空，漏一个就只能删了重建，
+    /// 而场景一旦被伏笔锚点引用，重建就会让锚点脱钩。
     pub async fn update_node(
         &self,
         id: Uuid,
@@ -76,6 +82,7 @@ impl NarrativeService {
         description: Option<&str>,
         content: Option<&str>,
         status: Option<&str>,
+        attributes: Option<serde_json::Value>,
         outline: NarrativeNodeOutlinePatch,
     ) -> Result<Value> {
         let project_id = self
@@ -88,7 +95,7 @@ impl NarrativeService {
             id,
             title.map(|s| s.to_string()),
             description.map(|s| s.to_string()),
-            None,
+            attributes,
             content.map(|s| s.to_string()),
             status.map(|s| s.to_string()),
             outline,

@@ -6,10 +6,25 @@
   - hover：可看具体差什么
   - 点击：调 confirm_step → 失败则显示错误条（盖在 composer 顶部）
   - 不再有"驳回"输入框——驳回文本就是 composer 的 textarea 本身
+  - 走到最后一步（正文写作）时不再是禁用的「已是最后一步」，
+    而是换成可点的「去写作页」——引导走完不等于无事可做
 -->
 <template>
   <div class="ca-inline">
+    <!-- 引导已走完（最后一站是「正文」）：不再给一个禁用的死按钮，
+         而是把用户送去真正该去的地方——写作页。 -->
     <button
+      v-if="isLastStep"
+      class="ca-btn done"
+      :disabled="disabled === true"
+      :title="terminalHint"
+      @click="goWriting"
+    >
+      <PenLine :size="14" />
+      <span>去写作页</span>
+    </button>
+    <button
+      v-else
       class="ca-btn"
       :class="{ 'has-missing': missingItems.length > 0 }"
       :disabled="isDisabled"
@@ -32,15 +47,16 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { ArrowRight, AlertCircle } from 'lucide-vue-next'
+import { useRouter } from 'vue-router'
+import { ArrowRight, AlertCircle, PenLine } from 'lucide-vue-next'
 import { confirmGuideStep } from '@/api/agent'
 
 const props = defineProps<{
   /** 当前阶段 title（用于按钮文案兜底） */
   currentTitle: string
-  /** 下一个阶段 title（按钮文案）；为空表示引导已到最后一步 */
+  /** 下一个阶段 title（按钮文案）；为空表示引导已到最后一步（现在的最后一站是「正文」） */
   nextTitle: string
-  /** 项目 id（调 confirm_step 必备） */
+  /** 项目 id（调 confirm_step 必备，也用于最后一步跳写作页） */
   projectId: string
   /** 当前阶段未就绪时后端给出的缺失项描述（驱动角标 + hover 提示）。
    *  由后端 `guide/status` 提供——前端不自己判断"缺什么"，
@@ -55,30 +71,39 @@ const emit = defineEmits<{
   advanced: []
 }>()
 
+const router = useRouter()
 const busy = ref(false)
 const error = ref<string | null>(null)
 
 /** 后端给出的缺失项 */
 const missingItems = computed<string[]>(() => props.missing ?? [])
 
-/** 已是最后一步：beats 之后没有下一步，按钮无事可做 */
+/** 已是最后一步（正文写作是流程终点）：没有可推进的下一步。
+ *  注意这里不再把按钮置灰——引导走完不等于无事可做，而是该去写作页了。 */
 const isLastStep = computed(() => !props.nextTitle)
 
-/** 生成中、自身请求中、或已是最后一步时都不可点 */
-const isDisabled = computed(() => busy.value || props.disabled === true || isLastStep.value)
+/** 生成中或自身请求中不可点（最后一步的「去写作页」不受生成中影响之外的限制） */
+const isDisabled = computed(() => busy.value || props.disabled === true)
 
 const buttonText = computed(() =>
-  isLastStep.value ? '已是最后一步' : `推进到「${props.nextTitle}」`,
+  isLastStep.value ? '去写作页' : `推进到「${props.nextTitle}」`,
+)
+
+const terminalHint = computed(
+  () => `引导流程已走完（最后一站是「${props.currentTitle || '正文'}」）：去写作页选场景开始写`,
 )
 
 /** hover 提示文案 */
 const hintTitle = computed(() => {
-  if (isLastStep.value) return '引导流程已到最后一步，没有下一步可推进'
   if (missingItems.value.length === 0) {
     return `当前阶段「${props.currentTitle}」产物已足，点此推进到「${props.nextTitle}」`
   }
   return `推进还差 ${missingItems.value.length} 项：${missingItems.value.join('；')}`
 })
+
+function goWriting() {
+  router.push(`/project/${props.projectId}/write`)
+}
 
 async function onConfirm() {
   if (isDisabled.value) return
@@ -143,6 +168,20 @@ async function onConfirm() {
   color: var(--text-primary);
   border-color: var(--color-primary);
   transform: none;
+}
+
+/* 引导走完（最后一站「正文」）：按钮变成去写作页的出口，
+   用中性底 + 绿色描边表示"已完成"，而不是待推进的朱砂红。 */
+.ca-btn.done {
+  background: var(--bg-panel-secondary);
+  color: var(--text-primary);
+  border-color: var(--color-success);
+  font-family: var(--font-sans, inherit);
+}
+.ca-btn.done:hover:not(:disabled) {
+  background: var(--bg-hover);
+  transform: none;
+  box-shadow: none;
 }
 
 .ca-badge {

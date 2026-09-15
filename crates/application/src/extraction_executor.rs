@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use domain::extraction::ExtractionResult;
-use domain::ports::{AiSettingsPort, LlmPort, ProposalRepositoryPort};
+use domain::ports::{AiSettingsPort, GenerationPurpose, LlmPort, ProposalRepositoryPort};
 use domain::validation::{ChangePayload, ProposedChangeType};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -58,13 +58,16 @@ impl ExtractionExecutor {
         // 而 LlmPort::complete 的第三个参数是「模型名」，于是网关回
         //   Model extraction is not supported
         // —— 抽取功能（手动抽取与生成后的自动抽取）一直不可用。
-        let model = self.settings.load().await?.model;
+        // 用途取 Utility：抽取是"读懂 → 输出 JSON"的杂活，用便宜快的模型即可，
+        // 不该占用正文那个文学性模型。
+        let config = self.settings.load().await?;
         extract_into_proposals(
             self.proposals.clone(),
             self.llm.clone(),
             project_id,
             task_id,
-            &model,
+            config.model_for(GenerationPurpose::Utility),
+            config.temperature_for(GenerationPurpose::Utility),
             text,
         )
         .await
@@ -83,11 +86,12 @@ pub async fn extract_into_proposals(
     project_id: Uuid,
     task_id: Option<Uuid>,
     model: &str,
+    temperature: f32,
     text: &str,
 ) -> Result<ExtractionResult> {
     let user = format!("## 原文\n{}\n\n请只返回符合 schema 的 JSON。", text);
     let raw = llm
-        .complete(EXTRACTION_SYSTEM_PROMPT, &user, model)
+        .complete(EXTRACTION_SYSTEM_PROMPT, &user, model, temperature)
         .await?;
     let result = parse_extraction_json(&raw).context("解析 LLM 抽取结果失败")?;
 
@@ -189,7 +193,13 @@ mod tests {
     }
     #[async_trait]
     impl LlmPort for MockLlm {
-        async fn complete(&self, _s: &str, _u: &str, model: &str) -> Result<String> {
+        async fn complete(
+            &self,
+            _s: &str,
+            _u: &str,
+            model: &str,
+            _temperature: f32,
+        ) -> Result<String> {
             self.seen_models.lock().unwrap().push(model.to_string());
             Ok(self.reply.clone())
         }
@@ -206,6 +216,8 @@ mod tests {
                 base_url: "http://localhost:1".to_string(),
                 api_key: Some("test-key".to_string()),
                 model: self.model.clone(),
+                task_models: Default::default(),
+                task_temperatures: Default::default(),
                 context_limit: 128_000,
                 max_output_tokens: 4_096,
             })

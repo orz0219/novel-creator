@@ -40,6 +40,8 @@ fn generation_executor(state: &AppState) -> GenerationExecutor {
         snapshots,
         prop_repo,
         llm,
+        // 正文生成按用途（Prose）取模型与温度，因此执行器必须能读运行时配置
+        state.ai_settings.clone(),
     )
 }
 

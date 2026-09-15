@@ -17,8 +17,9 @@
         </div>
       </header>
 
-      <!-- 10 步进度条：每一步的完成度（对勾）都取自后端 guide/status，
-           与「确认推进」的校验同源——不在这里另行判断，避免假对号与假缺项 -->
+      <!-- 引导步骤进度条：每一步的完成度（对勾）都取自后端 guide/status，
+           与「确认推进」的校验同源——不在这里另行判断，避免假对号与假缺项。
+           步骤数量与名称也全部来自后端（不写死数字：细纲已拆成 章表→场景→正文 三步，写死必然过期） -->
       <StepIndicator
         :current="guideStep"
         :steps="guideSteps"
@@ -492,9 +493,22 @@ const guideSteps = computed<StepDef[]>(() =>
   })),
 )
 const guideStep = computed(() => guideStatus.value?.current_step ?? '')
-const guideIndex = computed(() => guideSteps.value.findIndex((s) => s.key === guideStep.value))
 const currentGuideTitle = computed(() => guideStatus.value?.current_title ?? '')
-const nextGuideTitle = computed(() => guideSteps.value[guideIndex.value + 1]?.title ?? '')
+/**
+ * 下一步的标题：**用后端给的 next**，不是"数组里的下一个"。
+ *
+ * 后端的 `guide/status` 对每一步都返回了 `next`（终点步为 null），那是流程定义的
+ * 直接映射；按数组位置去猜，一旦步骤顺序与数组顺序不一致（血肉步可乱序、
+ * 或某一步没被返回）就会算出错误的下一步，甚至把终点步算成"还能推进"。
+ */
+const nextGuideTitle = computed(() => {
+  // 注意用 guideStatus 的原始 steps（带 next），不是上面精简过的 guideSteps
+  const steps = guideStatus.value?.steps ?? []
+  const current = steps.find((s) => s.key === guideStep.value)
+  const nextKey = current?.next
+  if (!nextKey) return ''
+  return steps.find((s) => s.key === nextKey)?.title ?? ''
+})
 
 /** 当前阶段未就绪时后端给出的缺失项（推进按钮的角标与 hover 提示）。 */
 const currentMissing = computed(

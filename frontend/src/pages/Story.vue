@@ -153,7 +153,10 @@ const statusOptions: { value: NarrativeNodeStatus; label: string }[] = [
   { value: 'Archived', label: '已归档' },
 ]
 
-const expanded = ref<Record<string, boolean>>({ 'vol-1': true, 'arc-2': true, 'ch-4': true })
+// 展开状态初始为空，拉完数据后由 onMounted 按真实节点 id 默认展开卷与弧。
+// 这里原本写的是 { 'vol-1': true, 'arc-2': true, 'ch-4': true } —— 假 ID，永远匹配不上真实 UUID，
+// 结果整个结构页默认全折叠，每次进来都得手动点开。
+const expanded = ref<Record<string, boolean>>({})
 const showCreateDialog = ref(false)
 const showEditDialog = ref(false)
 const editingNode = ref<NarrativeNode | null>(null)
@@ -225,6 +228,11 @@ function findFirstScene(node: any): any {
 
 onMounted(async () => {
   await storyStore.fetchNodes(projectId)
+  // 默认展开所有卷与弧（章节保持折叠，避免一屏塞满）
+  for (const vol of storyStore.tree) {
+    expanded.value[vol.id] = true
+    for (const arc of vol.children) expanded.value[arc.id] = true
+  }
 })
 </script>
 

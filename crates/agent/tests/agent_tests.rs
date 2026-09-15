@@ -23,7 +23,13 @@ struct MockLlm {
 
 #[async_trait]
 impl LlmPort for MockLlm {
-    async fn complete(&self, _system: &str, user_prompt: &str, _model: &str) -> Result<String> {
+    async fn complete(
+        &self,
+        _system: &str,
+        user_prompt: &str,
+        _model: &str,
+        _temperature: f32,
+    ) -> Result<String> {
         let n = self
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -51,6 +57,9 @@ impl AiSettingsPort for MockAiSettings {
             base_url: "http://127.0.0.1:1".to_string(),
             api_key: None,
             model: "test".to_string(),
+            // 测试不验证按用途路由，留空即全部回落到 model / 用途默认温度
+            task_models: Default::default(),
+            task_temperatures: Default::default(),
             context_limit: 128_000,
             max_output_tokens: 22_000,
         })

@@ -54,6 +54,9 @@ pub async fn test_connection(
         base_url: non_empty(input.base_url).unwrap_or(current.base_url),
         api_key: non_empty(input.api_key).or(current.api_key),
         model: non_empty(input.model).unwrap_or(current.model),
+        // 连通性探测不参与用途路由，但结构体字段必须给全（缺省即无覆盖）。
+        task_models: current.task_models,
+        task_temperatures: current.task_temperatures,
         context_limit: current.context_limit,
         max_output_tokens: current.max_output_tokens,
     };
@@ -108,6 +111,8 @@ pub async fn list_models(
         base_url: non_empty(input.base_url).unwrap_or(current.base_url),
         api_key: non_empty(input.api_key).or(current.api_key),
         model: current.model,
+        task_models: current.task_models,
+        task_temperatures: current.task_temperatures,
         context_limit: current.context_limit,
         max_output_tokens: current.max_output_tokens,
     };

@@ -9,6 +9,8 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::pin::Pin;
 use futures::Stream;
 use uuid::Uuid;
@@ -241,9 +243,19 @@ pub enum LlmStreamChunk {
 /// LLM 调用端口（提案 十 / 十一）。
 ///
 /// GenerationExecutor 只依赖此抽象，具体实现在 infrastructure 中包裹 LlmClient。
+///
+/// `temperature` 由调用方按 [`GenerationPurpose`] 决定（见
+/// [`AiRuntimeConfig::temperature_for`]）：以前它被写死在实现里（0.7），
+/// 于是"逻辑严密的细纲"和"要有文采的正文"共用一个值，两头都不讨好。
 #[async_trait]
 pub trait LlmPort: Send + Sync {
-    async fn complete(&self, system_prompt: &str, user_prompt: &str, model: &str) -> Result<String>;
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        model: &str,
+        temperature: f32,
+    ) -> Result<String>;
 
     /// 流式补全：逐段产出正文 token，末尾可能跟一条用量统计。
     ///
@@ -254,11 +266,107 @@ pub trait LlmPort: Send + Sync {
         system_prompt: &str,
         user_prompt: &str,
         model: &str,
+        temperature: f32,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk>> + Send>>> {
-        let text = self.complete(system_prompt, user_prompt, model).await?;
+        let text = self
+            .complete(system_prompt, user_prompt, model, temperature)
+            .await?;
         Ok(Box::pin(futures::stream::once(async move {
             Ok(LlmStreamChunk::Token(text))
         })))
+    }
+}
+
+/// LLM 调用的**用途**：决定用哪个模型、什么温度。
+///
+/// 存在理由：逻辑性强的模型适合做设定与细纲，文学性强的模型适合写正文；
+/// 而在此之前系统只有一个全局模型、一个硬编码温度 0.7 ——
+/// 同一个温度同时伺候"结构严谨的细纲"和"要有文采的正文"，两头都不讨好。
+///
+/// 配置键（写进 `app_settings.settings` 的 `taskModels` / `taskTemperatures`）见 [`Self::key`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationPurpose {
+    /// 引导对话：设定问答 + 细纲落库（要结构、要逻辑、工具调用要稳）
+    Agent,
+    /// 正文生成：按场景写小说（要文学性）
+    Prose,
+    /// 选区改写：重写 / 扩写 / 精简 / 改风格（要文学性 + 听话）
+    Polish,
+    /// 杂活：会话摘要、文本抽取（要便宜、要快）
+    Utility,
+}
+
+impl GenerationPurpose {
+    /// 全部用途（设置页渲染与配置校验共用）
+    pub const ALL: [GenerationPurpose; 4] = [
+        GenerationPurpose::Agent,
+        GenerationPurpose::Prose,
+        GenerationPurpose::Polish,
+        GenerationPurpose::Utility,
+    ];
+
+    /// 配置键：写进 `taskModels` / `taskTemperatures` 的键名
+    pub fn key(self) -> &'static str {
+        match self {
+            GenerationPurpose::Agent => "agent",
+            GenerationPurpose::Prose => "prose",
+            GenerationPurpose::Polish => "polish",
+            GenerationPurpose::Utility => "utility",
+        }
+    }
+
+    /// 中文名（设置页与错误信息用）
+    pub fn label_cn(self) -> &'static str {
+        match self {
+            GenerationPurpose::Agent => "引导对话 / 细纲",
+            GenerationPurpose::Prose => "正文生成",
+            GenerationPurpose::Polish => "选区改写",
+            GenerationPurpose::Utility => "摘要 / 抽取",
+        }
+    }
+
+    /// 给设置页用的说明：这一项到底管哪些调用
+    pub fn description_cn(self) -> &'static str {
+        match self {
+            GenerationPurpose::Agent => "设定问答与细纲落库都在这里；选逻辑强、结构化稳的模型",
+            GenerationPurpose::Prose => "写作页按场景生成正文；选文学性强的模型",
+            GenerationPurpose::Polish => "选中一段文字后的重写 / 扩写 / 精简 / 改风格",
+            GenerationPurpose::Utility => "会话摘要、正文抽取等后台杂活；选便宜快的模型",
+        }
+    }
+
+    /// 该用途的默认温度（用户没在设置页配 `taskTemperatures` 时生效）。
+    ///
+    /// 数值是刻意的：逻辑类压到 0.2-0.5 减少自由发挥，文学类抬到 0.85+ 留出表达空间。
+    /// 原先全链路硬编码 0.7，正好落在两头都不讨好的中间。
+    pub fn default_temperature(self) -> f32 {
+        match self {
+            GenerationPurpose::Agent => 0.4,
+            GenerationPurpose::Prose => 0.95,
+            GenerationPurpose::Polish => 0.85,
+            GenerationPurpose::Utility => 0.2,
+        }
+    }
+
+    /// 从配置键解析。未知键**报错**而不是忽略：配错的键必须让人看见，
+    /// 否则用户会以为"设了却没生效"。
+    pub fn parse(key: &str) -> Result<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|p| p.key() == key)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "未知的 LLM 用途键「{}」；合法值：{}",
+                    key,
+                    Self::ALL
+                        .iter()
+                        .map(|p| p.key())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                )
+            })
     }
 }
 
@@ -273,8 +381,13 @@ pub struct AiRuntimeConfig {
     pub base_url: String,
     /// 未配置密钥时为 None（请求不带 Authorization 头）。
     pub api_key: Option<String>,
-    /// 模型名，透传给网关的 `model` 字段。
+    /// 默认模型名：某个用途没单独配置时用它。
     pub model: String,
+    /// **按用途覆盖的模型**：键是 [`GenerationPurpose::key`]，值是模型名。
+    /// 缺失的用途回落到 `model`。
+    pub task_models: HashMap<String, String>,
+    /// **按用途覆盖的温度**：键同上。缺失的用途用 [`GenerationPurpose::default_temperature`]。
+    pub task_temperatures: HashMap<String, f32>,
     /// 单次对话的上下文上限（token），用于聊天页用量预警。
     ///
     /// 注意：网关的 `/models` 不返回上下文长度，因此这是**用户在设置页配置的预算**，
@@ -284,6 +397,27 @@ pub struct AiRuntimeConfig {
     ///
     /// 中文长文本 + 工具调用 JSON 很容易撞上限；设置页可调，默认 22000。
     pub max_output_tokens: u32,
+}
+
+impl AiRuntimeConfig {
+    /// 取某用途该用的模型：用途配置 → 全局默认模型。
+    ///
+    /// 环境变量兜底在构造 `AiRuntimeConfig` 时就已经并进 `model`，
+    /// 因此这里是**唯一**一条优先级链，不会出现第二处判断。
+    pub fn model_for(&self, purpose: GenerationPurpose) -> &str {
+        self.task_models
+            .get(purpose.key())
+            .map(|s| s.as_str())
+            .unwrap_or(&self.model)
+    }
+
+    /// 取某用途该用的温度：用途配置 → 该用途的默认温度。
+    pub fn temperature_for(&self, purpose: GenerationPurpose) -> f32 {
+        self.task_temperatures
+            .get(purpose.key())
+            .copied()
+            .unwrap_or_else(|| purpose.default_temperature())
+    }
 }
 
 /// 运行时 AI 配置读取端口。
@@ -949,4 +1083,80 @@ pub trait ProjectResolverPort: Send + Sync {
     async fn project_id_for_world(&self, world_id: Uuid) -> Result<Option<Uuid>>;
     async fn project_id_for_relation(&self, relation_id: Uuid) -> Result<Option<Uuid>>;
     async fn project_id_for_narrative_node(&self, node_id: Uuid) -> Result<Option<Uuid>>;
+}
+
+#[cfg(test)]
+mod generation_purpose_tests {
+    use super::*;
+
+    fn config_with(task_models: &[(&str, &str)], task_temps: &[(&str, f32)]) -> AiRuntimeConfig {
+        AiRuntimeConfig {
+            base_url: "http://localhost:1".into(),
+            api_key: None,
+            model: "default-model".into(),
+            task_models: task_models
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            task_temperatures: task_temps
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+            context_limit: 128_000,
+            max_output_tokens: 22_000,
+        }
+    }
+
+    #[test]
+    fn model_for_prefers_purpose_override_then_default() {
+        let cfg = config_with(&[("prose", "literary-model")], &[]);
+        assert_eq!(cfg.model_for(GenerationPurpose::Prose), "literary-model");
+        // 没配的用途回落到全局默认模型（环境变量兜底已在构造时并进 model）
+        assert_eq!(cfg.model_for(GenerationPurpose::Agent), "default-model");
+    }
+
+    #[test]
+    fn temperature_for_prefers_purpose_override_then_builtin_default() {
+        let cfg = config_with(&[], &[("agent", 0.1)]);
+        assert!((cfg.temperature_for(GenerationPurpose::Agent) - 0.1).abs() < 1e-6);
+        // 没配的用途用它自己的内置默认温度，而不是某个全局值
+        assert!(
+            (cfg.temperature_for(GenerationPurpose::Prose)
+                - GenerationPurpose::Prose.default_temperature())
+            .abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn literary_purposes_default_hotter_than_logical_ones() {
+        // 这条是本次改造的意图本身：逻辑类压低减少发挥、文学类抬高留表达空间。
+        // 若有人把默认值调反了，测试应该拦住。
+        assert!(
+            GenerationPurpose::Prose.default_temperature()
+                > GenerationPurpose::Agent.default_temperature()
+        );
+        assert!(
+            GenerationPurpose::Polish.default_temperature()
+                > GenerationPurpose::Utility.default_temperature()
+        );
+    }
+
+    #[test]
+    fn purpose_keys_are_a_stable_contract() {
+        // 这些键会写进 app_settings.settings.taskModels，是前端与后端的对外契约：
+        // 改名会让已经保存的配置静默失效，因此钉死。
+        assert_eq!(GenerationPurpose::Agent.key(), "agent");
+        assert_eq!(GenerationPurpose::Prose.key(), "prose");
+        assert_eq!(GenerationPurpose::Polish.key(), "polish");
+        assert_eq!(GenerationPurpose::Utility.key(), "utility");
+        assert_eq!(GenerationPurpose::ALL.len(), 4);
+    }
+
+    #[test]
+    fn parse_rejects_unknown_key() {
+        assert_eq!(GenerationPurpose::parse("prose").unwrap(), GenerationPurpose::Prose);
+        let err = GenerationPurpose::parse("agnt").unwrap_err().to_string();
+        assert!(err.contains("未知的 LLM 用途键"), "{}", err);
+    }
 }

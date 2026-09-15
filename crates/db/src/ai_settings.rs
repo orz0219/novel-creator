@@ -16,9 +16,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::HashMap;
 
 use domain::model_catalog;
-use domain::ports::{AiRuntimeConfig, AiSettingsPort};
+use domain::ports::{AiRuntimeConfig, AiSettingsPort, GenerationPurpose};
 
 /// 环境变量提供的默认值（设置页未配置对应字段时使用）。
 #[derive(Debug, Clone)]
@@ -102,8 +103,75 @@ impl AiSettingsPort for DbAiSettingsPort {
             context_limit: resolve_context_limit(&settings, &model, self.defaults.context_limit),
             max_output_tokens,
             model,
+            task_models: parse_task_models(&settings)?,
+            task_temperatures: parse_task_temperatures(&settings)?,
         })
     }
+}
+
+/// 解析「按用途分配的模型」：`taskModels: { "agent": "模型名", ... }`。
+///
+/// 用途键必须是系统认识的（[`GenerationPurpose::parse`]）：写错的键直接报错，
+/// 而不是当成一个永远不会被读到的配置静静躺着——那正是"设了却没生效"的来源。
+fn parse_task_models(settings: &Value) -> Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    let Some(raw) = settings.get("taskModels") else {
+        return Ok(out);
+    };
+    let Some(obj) = raw.as_object() else {
+        anyhow::bail!("taskModels 应为对象（{{\"用途\": \"模型名\"}}），收到：{}", raw);
+    };
+    for (key, value) in obj {
+        let purpose = GenerationPurpose::parse(key)?;
+        let model = value
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "taskModels.{} 应为非空字符串（模型名），收到：{}",
+                    key,
+                    value
+                )
+            })?;
+        out.insert(purpose.key().to_string(), model.to_string());
+    }
+    Ok(out)
+}
+
+/// 解析「按用途分配的温度」：`taskTemperatures: { "prose": 0.95, ... }`。
+fn parse_task_temperatures(settings: &Value) -> Result<HashMap<String, f32>> {
+    let mut out = HashMap::new();
+    let Some(raw) = settings.get("taskTemperatures") else {
+        return Ok(out);
+    };
+    let Some(obj) = raw.as_object() else {
+        anyhow::bail!(
+            "taskTemperatures 应为对象（{{\"用途\": 温度}}），收到：{}",
+            raw
+        );
+    };
+    for (key, value) in obj {
+        let purpose = GenerationPurpose::parse(key)?;
+        let temperature = match value {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            anyhow::anyhow!("taskTemperatures.{} 应为数字，收到：{}", key, value)
+        })? as f32;
+        // 温度超出 [0,2] 是配置错误而不是"会自动夹紧"：夹紧会掩盖用户写错的意图
+        if !(0.0..=2.0).contains(&temperature) {
+            anyhow::bail!(
+                "taskTemperatures.{} 应在 0 与 2 之间，收到：{}",
+                key,
+                temperature
+            );
+        }
+        out.insert(purpose.key().to_string(), temperature);
+    }
+    Ok(out)
 }
 
 /// 解析当前模型的上下文上限，优先级由高到低：
@@ -196,5 +264,67 @@ mod tests {
         assert_eq!(parse_limit(Some(&json!("abc"))), None);
         assert_eq!(parse_limit(Some(&json!(null))), None);
         assert_eq!(parse_limit(None), None);
+    }
+
+    #[test]
+    fn parse_task_models_accepts_known_purposes() {
+        let s = json!({"taskModels": {"agent": "logic-model", "prose": "prose-model"}});
+        let m = parse_task_models(&s).unwrap();
+        assert_eq!(m.get("agent").map(String::as_str), Some("logic-model"));
+        assert_eq!(m.get("prose").map(String::as_str), Some("prose-model"));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn parse_task_models_rejects_unknown_purpose() {
+        // 拼错的键必须报错：静默忽略会让用户以为"设了却在生效"，
+        // 而真相是这个键永远不会被任何调用点读到。
+        let s = json!({"taskModels": {"agnt": "x"}});
+        let err = parse_task_models(&s).unwrap_err().to_string();
+        assert!(err.contains("未知的 LLM 用途键"), "{}", err);
+        assert!(err.contains("agent"), "错误信息要列出合法键：{}", err);
+    }
+
+    #[test]
+    fn parse_task_models_rejects_blank_model_name() {
+        // 空串必须报错而不是当成"未配置"：否则用户清空下拉后，
+        // 保存会在库里留下一个空模型名，之后每次调用都失败。
+        let s = json!({"taskModels": {"agent": "   "}});
+        assert!(parse_task_models(&s).is_err());
+    }
+
+    #[test]
+    fn parse_task_models_rejects_non_object() {
+        let s = json!({"taskModels": ["agent"]});
+        assert!(parse_task_models(&s).is_err());
+    }
+
+    #[test]
+    fn parse_task_temperatures_accepts_numbers_and_numeric_strings() {
+        let s = json!({"taskTemperatures": {"prose": 0.95, "agent": "0.4"}});
+        let t = parse_task_temperatures(&s).unwrap();
+        assert!((t["prose"] - 0.95).abs() < 1e-6);
+        assert!((t["agent"] - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_task_temperatures_rejects_out_of_range() {
+        // 越界报错而不是夹紧：夹紧会掩盖用户写错的意图
+        let s = json!({"taskTemperatures": {"prose": 3.0}});
+        let err = parse_task_temperatures(&s).unwrap_err().to_string();
+        assert!(err.contains("应在 0 与 2 之间"), "{}", err);
+    }
+
+    #[test]
+    fn parse_task_temperatures_rejects_non_numeric() {
+        let s = json!({"taskTemperatures": {"prose": "热一点"}});
+        assert!(parse_task_temperatures(&s).is_err());
+    }
+
+    #[test]
+    fn missing_keys_mean_no_override() {
+        let s = json!({});
+        assert!(parse_task_models(&s).unwrap().is_empty());
+        assert!(parse_task_temperatures(&s).unwrap().is_empty());
     }
 }

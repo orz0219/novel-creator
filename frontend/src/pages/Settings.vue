@@ -145,6 +145,38 @@
       </div>
 
       <div class="settings-section">
+        <h3 class="section-title">按用途分配模型</h3>
+        <p class="section-hint">
+          逻辑类的活交给逻辑强的模型、文学类的活交给文学性强的模型。以前全系统只有一个模型、
+          一个写死的温度，细纲和正文共用一套参数，两头都不讨好。<br />
+          模型<strong>留空</strong> = 用上面的默认模型；温度<strong>留空</strong> = 用该用途的内置默认值。
+        </p>
+
+        <div v-for="p in PURPOSES" :key="p.key" class="purpose-row">
+          <div class="purpose-meta">
+            <span class="purpose-label">{{ p.label }}</span>
+            <span class="purpose-desc">{{ p.desc }}</span>
+          </div>
+          <select class="setting-select purpose-model" v-model="taskModels[p.key]">
+            <option value="">（用默认模型）</option>
+            <option v-for="m in modelChoices" :key="m" :value="m">{{ m }}</option>
+          </select>
+          <div class="purpose-temp">
+            <input
+              class="setting-input"
+              type="number"
+              min="0"
+              max="2"
+              step="0.05"
+              v-model.number="taskTemperatures[p.key]"
+              :placeholder="String(p.defaultTemp)"
+            />
+            <span class="field-unit">温度</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <h3 class="section-title">编辑器设置</h3>
         <div class="setting-item">
           <span class="setting-label">字体大小</span>
@@ -205,6 +237,77 @@ const backLabel = computed(() => (route.query.from ? '返回' : '返回首页'))
 
 function goBack() {
   router.push(backTarget.value)
+}
+
+/**
+ * 按用途分配模型的四类用途。
+ *
+ * key 必须与后端 `GenerationPurpose` 一致——后端解析到不认识的键会**直接报错**
+ * （不是忽略），所以这里多写一个键会让保存后的每次 LLM 调用都失败。
+ * defaultTemp 仅用于输入框占位提示，真源在后端。
+ */
+const PURPOSES = [
+  {
+    key: 'agent',
+    label: '引导对话 / 细纲',
+    desc: '设定问答与细纲落库都在这里；选逻辑强、结构化稳的模型',
+    defaultTemp: 0.4,
+  },
+  {
+    key: 'prose',
+    label: '正文生成',
+    desc: '写作页按场景生成正文；选文学性强的模型',
+    defaultTemp: 0.95,
+  },
+  {
+    key: 'polish',
+    label: '选区改写',
+    desc: '选中一段文字后的重写 / 扩写 / 精简 / 改风格',
+    defaultTemp: 0.85,
+  },
+  {
+    key: 'utility',
+    label: '摘要 / 抽取',
+    desc: '会话摘要、正文抽取等后台杂活；选便宜快的模型',
+    defaultTemp: 0.2,
+  },
+] as const
+
+/** 按用途的模型（空串 = 用默认模型）。 */
+const taskModels = reactive<Record<string, string>>({})
+/** 按用途的温度（空串 = 用该用途的内置默认温度）。 */
+const taskTemperatures = reactive<Record<string, number | ''>>({})
+
+/** 从已保存的设置回显按用途的配置。 */
+function syncPurposeRows() {
+  for (const p of PURPOSES) {
+    taskModels[p.key] = form.taskModels?.[p.key] ?? ''
+    const saved = form.taskTemperatures?.[p.key]
+    taskTemperatures[p.key] = saved === undefined || saved === null ? '' : saved
+  }
+}
+
+/**
+ * 收集按用途配置。
+ *
+ * **必须剔除空值**：后端对 `taskModels.<用途>` 拿到空串会报错（"应为非空字符串"），
+ * 那会让之后每一次 LLM 调用都失败。所以「留空」在这里等于「不写这个键」。
+ */
+function collectPurposePayload(): {
+  taskModels: Record<string, string>
+  taskTemperatures: Record<string, number>
+} {
+  const models: Record<string, string> = {}
+  const temperatures: Record<string, number> = {}
+  for (const p of PURPOSES) {
+    const model = (taskModels[p.key] ?? '').trim()
+    if (model) models[p.key] = model
+    const temp = taskTemperatures[p.key]
+    if (temp !== '' && temp !== null && temp !== undefined && !Number.isNaN(temp)) {
+      temperatures[p.key] = Number(temp)
+    }
+  }
+  return { taskModels: models, taskTemperatures: temperatures }
 }
 
 const form = reactive<AppSettings>({
@@ -365,6 +468,7 @@ onMounted(async () => {
   }
   initializeProvider()
   syncModelLimit()
+  syncPurposeRows()
   // 没填 API Key 就不拉：否则必然报一个「获取模型列表失败」，属于噪音
   if (form.aiApiKey) {
     await loadModels()
@@ -401,7 +505,9 @@ async function save() {
     }
     // 保存前把当前 key 归到它所属的供应商名下，保证两个 key 各存一份
     backupKey(form.aiProvider ?? 'custom')
-    const payload = { ...form, contextLimits: limits }
+    // 按用途分配：空值必须剔除（后端拿到空模型名会报错，之后每次调用都会失败）
+    const purposePayload = collectPurposePayload()
+    const payload = { ...form, contextLimits: limits, ...purposePayload }
     await settingsApi.update(payload)
     Object.assign(form, payload)
     savedAt.value = new Date().toLocaleTimeString()
@@ -479,6 +585,23 @@ async function runTest() {
 .setting-input, .setting-select { padding: var(--space-2) var(--space-3); background: var(--bg-base); border: 1px solid var(--border-default); border-radius: var(--radius-sm); color: var(--text-primary); font-size: var(--text-sm); }
 .setting-input.wide { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono); }
 .setting-select.wide { flex: 1 1 auto; min-width: 0; }
+
+/* ---- 按用途分配模型 ---- */
+.purpose-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(200px, 1fr) 140px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-muted);
+}
+.purpose-row:last-child { border-bottom: none; }
+.purpose-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.purpose-label { font-size: var(--text-sm); color: var(--text-primary); }
+.purpose-desc { font-size: var(--text-xs); color: var(--text-tertiary); line-height: 1.5; }
+.purpose-model { min-width: 0; }
+.purpose-temp { display: flex; align-items: center; gap: var(--space-2); }
+.purpose-temp .setting-input { flex: 1 1 auto; min-width: 0; }
 .field-unit { flex: 0 0 auto; font-size: var(--text-xs); color: var(--text-tertiary); font-family: var(--font-mono); }
 .toggle { position: relative; display: inline-block; width: 40px; height: 22px; }
 .toggle input { opacity: 0; width: 0; height: 0; }
